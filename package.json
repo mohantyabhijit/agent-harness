@@ -1,0 +1,17 @@
+{
+  "name": "incident-forge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Human-in-the-loop production incident investigator built with TrueForge",
+  "scripts": {
+    "dev": "trueforge",
+    "start": "trueforge"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@truefoundry/trueforge": "0.1.4"
+  }
+}
+

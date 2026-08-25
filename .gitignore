@@ -1,0 +1,22 @@
+node_modules/
+.env
+.env.*
+!.env.example
+
+# Local runtime state and databases
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Generated output
+coverage/
+dist/
+reports/generated/
+
+# Editor and OS files
+.DS_Store
+.idea/
+.vscode/
+
