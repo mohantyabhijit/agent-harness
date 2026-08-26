@@ -50,3 +50,10 @@ export class CampaignVersionConflict extends Error {
     this.name = "CampaignVersionConflict";
   }
 }
+
+export class CampaignIdentityConflict extends Error {
+  constructor(campaignId: string) {
+    super(`Campaign ${campaignId} identity is immutable`);
+    this.name = "CampaignIdentityConflict";
+  }
+}

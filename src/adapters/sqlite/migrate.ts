@@ -3,14 +3,16 @@ import type Database from "better-sqlite3";
 const schema = `
   CREATE TABLE IF NOT EXISTS campaigns (
     id TEXT PRIMARY KEY,
-    repository TEXT NOT NULL,
+    repository TEXT NOT NULL COLLATE NOCASE,
     issue_number INTEGER NOT NULL,
     issue_url TEXT NOT NULL,
     parent_session_id TEXT NOT NULL,
     lane TEXT NOT NULL CHECK (lane IN ('easy_win', 'long_term')),
     status TEXT NOT NULL,
-    qodo_iteration INTEGER NOT NULL DEFAULT 0 CHECK (qodo_iteration BETWEEN 0 AND 3),
-    version INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1),
+    qodo_iteration INTEGER NOT NULL DEFAULT 0
+      CHECK (typeof(qodo_iteration) = 'integer' AND qodo_iteration BETWEEN 0 AND 3),
+    version INTEGER NOT NULL DEFAULT 1
+      CHECK (typeof(version) = 'integer' AND version >= 1),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     UNIQUE(repository, issue_number)
@@ -52,7 +54,8 @@ const schema = `
     summary TEXT NOT NULL,
     source_url TEXT,
     disposition TEXT,
-    iteration INTEGER NOT NULL CHECK (iteration BETWEEN 1 AND 3),
+    iteration INTEGER NOT NULL
+      CHECK (typeof(iteration) = 'integer' AND iteration BETWEEN 1 AND 3),
     PRIMARY KEY (campaign_id, id)
   );
 
@@ -69,6 +72,10 @@ const schema = `
 
 export function migrateCampaignStore(database: Database.Database): void {
   database.pragma("foreign_keys = ON");
+  const foreignKeysEnabled = database.pragma("foreign_keys", { simple: true });
+  if (foreignKeysEnabled !== 1) {
+    throw new Error("SQLite foreign key enforcement could not be enabled");
+  }
   database.transaction(() => {
     database.exec(schema);
   })();
