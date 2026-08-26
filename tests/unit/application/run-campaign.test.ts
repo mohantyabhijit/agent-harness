@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { describe, expect, it, vi } from "vitest";
 
 import { RunCampaign } from "../../../src/application/run-campaign.js";
+import { externalActionDigest } from "../../../src/application/external-action.js";
 import { issueApproval } from "../../../src/domain/approval.js";
 import { transitionCampaign } from "../../../src/domain/campaign.js";
 import { campaign } from "../../builders.js";
@@ -62,13 +63,14 @@ describe("RunCampaign", () => {
     ["scripts executed", preflightAttestation({ repositoryScriptsExecuted: true })],
     ["contradictory pass", preflightAttestation({ quarantineReason: "unsafe" })],
     ["reasonless quarantine", preflightAttestation({ verdict: "quarantine" })],
+    ["missing source-linked evidence", preflightAttestation({ evidence: [] })],
   ])("rejects an invalid trusted preflight attestation: %s", async (_label, output) => {
     const { service, store, harness } = fixture();
     store.seed(campaign({ status: "policy_review" }));
     harness.enqueueResult("preflight", { summary: "preflight", artifacts: [], output });
 
-    await expect(service.execute("campaign-1", "preflight")).rejects.toThrow(/preflight output/i);
-    expect((await store.get("campaign-1"))?.campaign.status).toBe("preflight");
+    await expect(service.execute("campaign-1", "preflight")).rejects.toThrow(/quarantined/i);
+    expect((await store.get("campaign-1"))?.campaign.status).toBe("quarantined");
   });
 
   it("does not auto-recover or dispatch a campaign already stranded in preflight", async () => {
@@ -93,22 +95,25 @@ describe("RunCampaign", () => {
     expect((await service.execute("campaign-1", "verify")).status).toBe("verification");
 
     expect(harness.childSessions).toEqual(["session-1", "session-2", "session-3"]);
+    expect(harness.packets[1]?.currentCommitSha).toBe(commitSha);
+    expect(harness.packets[2]?.currentCommitSha).toBe(commitSha);
     const snapshot = await store.get("campaign-1");
     expect(snapshot?.externalReferences.filter(({ kind }) => kind === "sandbox")).toEqual([
       { kind: "sandbox", value: "session-1" },
       { kind: "sandbox", value: "session-2" },
       { kind: "sandbox", value: "session-3" },
     ]);
-    expect(snapshot?.events.map(({ payload }) => payload)).toEqual([
+    expect(snapshot?.events.map(({ payload }) => payload)).toEqual(expect.arrayContaining([
       expect.objectContaining({ claimedCampaignVersion: 2, sandboxSessionId: "session-1" }),
       expect.objectContaining({ claimedCampaignVersion: 4, sandboxSessionId: "session-2" }),
       expect.objectContaining({ claimedCampaignVersion: 5, sandboxSessionId: "session-3" }),
-    ]);
+    ]));
   });
 
   it("requires durable implementation completion for the claimed campaign version", async () => {
     const { service, store, harness } = fixture();
     store.seed(campaign({ status: "implementation", version: 4 }));
+    await store.setExternalReference("campaign-1", { kind: "commit", value: commitSha });
 
     await expect(service.execute("campaign-1", "verify")).rejects.toThrow(/implementation.*event/i);
     expect(harness.operations).toEqual([]);
@@ -118,6 +123,7 @@ describe("RunCampaign", () => {
     for (const failure of ["claim", "child", "reference", "event"] as const) {
       const { service, store, harness } = fixture();
       store.seed(campaign({ status: "baseline", version: 3 }));
+      await store.setExternalReference("campaign-1", { kind: "commit", value: commitSha });
       if (failure === "claim") store.failNextUpdate = true;
       if (failure === "child") harness.enqueueFailure("implement", new Error("child failed"));
       if (failure === "reference") store.failNextExternalReference = true;
@@ -132,6 +138,7 @@ describe("RunCampaign", () => {
   it("claims a campaign version before dispatch so a concurrent milestone runs once", async () => {
     const { service, store, harness } = fixture();
     store.seed(campaign({ status: "baseline", version: 3 }));
+    await store.setExternalReference("campaign-1", { kind: "commit", value: commitSha });
 
     const results = await Promise.allSettled([
       service.execute("campaign-1", "implement"),
@@ -140,6 +147,49 @@ describe("RunCampaign", () => {
 
     expect(results.filter(({ status }) => status === "fulfilled")).toHaveLength(1);
     expect(harness.operations).toEqual(["implement"]);
+  });
+
+  it("rotates a reported implementation head and verifies that exact commit", async () => {
+    const nextCommit = "b".repeat(40);
+    const { service, store, harness } = fixture();
+    store.seed(campaign({ status: "policy_review" }));
+    await service.execute("campaign-1", "preflight");
+    harness.enqueueResult("implement", { summary: "implemented", artifacts: [], output: { status: "completed", commitSha: nextCommit } });
+    await service.execute("campaign-1", "implement");
+    await service.execute("campaign-1", "verify");
+
+    expect(harness.packets.at(-2)?.currentCommitSha).toBe(commitSha);
+    expect(harness.packets.at(-1)?.currentCommitSha).toBe(nextCommit);
+    expect((await store.get("campaign-1"))?.externalReferences.filter(({ kind }) => kind === "commit")).toEqual([{ kind: "commit", value: nextCommit }]);
+    expect((await store.get("campaign-1"))?.events).toEqual(expect.arrayContaining([expect.objectContaining({ eventType: "campaign_commit_updated", payload: expect.objectContaining({ output: { previousCommitSha: commitSha, commitSha: nextCommit } }) })]));
+  });
+
+  it("recovers interrupted operations without dispatch and only one concurrent recovery wins", async () => {
+    const { service, store, harness } = fixture();
+    store.seed(campaign({ status: "preflight", version: 2 }));
+    const results = await Promise.allSettled([service.recoverInterrupted("campaign-1"), service.recoverInterrupted("campaign-1")]);
+    expect(results.filter(({ status }) => status === "fulfilled")).toHaveLength(1);
+    expect((await store.get("campaign-1"))?.campaign.status).toBe("quarantined");
+    expect(harness.operations).toEqual([]);
+  });
+
+  it.each([
+    ["implementation", "human_escalation"],
+    ["verification", "human_escalation"],
+    ["repair", "human_escalation"],
+  ] as const)("recovers interrupted %s to %s without dispatch", async (status, target) => {
+    const { service, store, harness } = fixture();
+    store.seed(campaign({ status, version: 4, qodoIteration: status === "repair" ? 1 : 0 }));
+    await expect(service.recoverInterrupted("campaign-1")).resolves.toMatchObject({ status: target });
+    expect(harness.operations).toEqual([]);
+  });
+
+  it("rejects a typed external payload for another campaign before consuming", async () => {
+    const { service, store } = await approvedFixture();
+    const action = vi.fn(async () => undefined);
+    await expect(service.executeApprovedExternalAction("campaign-1", { approvalId: "approval-1", payload: { ...externalPayload, repository: "other/repo" } }, action)).rejects.toThrow(/identity/i);
+    expect(action).not.toHaveBeenCalled();
+    expect((await store.get("campaign-1"))?.approvals[0]?.status).toBe("approved");
   });
 
   it("consumes exact authorization, records attempt first, and passes a bound descriptor", async () => {
@@ -154,8 +204,11 @@ describe("RunCampaign", () => {
         issueNumber: 42,
         issueUrl: "https://github.com/owner/repo/issues/42",
         action: "create_pr",
-        actionDigest: "sha256:expected",
+        actionDigest: externalActionDigest(externalPayload),
+        payload: externalPayload,
       });
+      expect(Object.isFrozen(authorized)).toBe(true);
+      expect(Object.isFrozen((authorized as { payload: object }).payload)).toBe(true);
       return "pull-request-7";
     });
 
@@ -226,9 +279,10 @@ describe("RunCampaign", () => {
         id: "approval-1",
         campaignId: "campaign-1",
         action: "create_pr",
-        actionDigest: "sha256:expected",
+        actionDigest: externalActionDigest(externalPayload),
         issuedAt: "2026-08-26T00:00:00Z",
       }));
+      await store.setExternalReference("campaign-1", { kind: "commit", value: commitSha });
       const action = vi.fn(async () => undefined);
 
       await expect(
@@ -276,6 +330,7 @@ function preflightAttestation(overrides: Record<string, unknown> = {}): Record<s
     commitSha,
     dependenciesInstalled: false,
     repositoryScriptsExecuted: false,
+    evidence: requiredChecks.map((check) => ({ check, sourceUrl: `https://github.com/owner/repo/blob/${commitSha}/package.json`, observation: `${check} inspected statically` })),
     ...overrides,
   };
 }
@@ -283,19 +338,24 @@ function preflightAttestation(overrides: Record<string, unknown> = {}): Record<s
 function approvalRequest() {
   return {
     approvalId: "approval-1",
-    action: "create_pr" as const,
-    actionDigest: "sha256:expected",
+    payload: externalPayload,
   };
 }
+
+const externalPayload = {
+  action: "create_pr" as const, repository: "owner/repo", issueNumber: 42,
+  branch: "openquest/fix-42", baseBranch: "main", commitSha, title: "Fix issue 42", body: "Verified remediation",
+};
 
 async function approvedFixture() {
   const result = fixture();
   result.store.seed(campaign({ status: "contribution_approval", version: 7 }));
+  await result.store.setExternalReference("campaign-1", { kind: "commit", value: commitSha });
   await result.store.recordApproval(issueApproval({
     id: "approval-1",
     campaignId: "campaign-1",
     action: "create_pr",
-    actionDigest: "sha256:expected",
+    actionDigest: externalActionDigest(externalPayload),
     issuedAt: "2026-08-26T00:00:00Z",
   }));
   return result;

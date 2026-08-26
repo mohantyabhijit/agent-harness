@@ -190,6 +190,9 @@ export class FakeCampaignStore implements CampaignStore {
       throw new Error("External reference persistence failed");
     }
     const snapshot = this.#required(campaignId);
+    if (reference.kind === "commit") {
+      snapshot.externalReferences = snapshot.externalReferences.filter(({ kind }) => kind !== "commit");
+    }
     if (
       !snapshot.externalReferences.some(
         (candidate) => candidate.kind === reference.kind && candidate.value === reference.value,

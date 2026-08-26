@@ -339,11 +339,17 @@ export class SqliteCampaignStore implements CampaignStore {
   }
 
   async setExternalReference(campaignId: string, reference: ExternalReference): Promise<void> {
-    this.#database.prepare(`
-      INSERT INTO external_references (campaign_id, kind, value)
-      VALUES (?, ?, ?)
-      ON CONFLICT(campaign_id, kind, value) DO NOTHING
-    `).run(campaignId, reference.kind, reference.value);
+    const write = this.#database.transaction(() => {
+      if (reference.kind === "commit") {
+        this.#database.prepare("DELETE FROM external_references WHERE campaign_id = ? AND kind = 'commit'").run(campaignId);
+      }
+      this.#database.prepare(`
+        INSERT INTO external_references (campaign_id, kind, value)
+        VALUES (?, ?, ?)
+        ON CONFLICT(campaign_id, kind, value) DO NOTHING
+      `).run(campaignId, reference.kind, reference.value);
+    });
+    write.immediate();
   }
 
   #snapshot(row: CampaignRow): CampaignSnapshot {

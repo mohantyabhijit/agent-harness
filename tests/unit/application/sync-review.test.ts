@@ -11,7 +11,7 @@ const commitSha = "b".repeat(40);
 describe("SyncReview", () => {
   it("starts no fourth repair session", async () => {
     const { syncReview, store, harness } = fixture();
-    store.seed(campaign({ status: "qodo_review", qodoIteration: 3 }));
+    await seedReview(store, campaign({ status: "qodo_review", qodoIteration: 3 }));
 
     const result = await syncReview.execute("campaign-1", reviewBatch({ findings: [openHighFinding] }));
 
@@ -22,7 +22,7 @@ describe("SyncReview", () => {
 
   it("starts at most three fresh, review-bound repair sessions", async () => {
     const { syncReview, store, harness } = fixture();
-    store.seed(campaign({ status: "qodo_review", qodoIteration: 0 }));
+    await seedReview(store, campaign({ status: "qodo_review", qodoIteration: 0 }));
 
     for (let iteration = 1; iteration <= 3; iteration += 1) {
       const repairing = await syncReview.execute("campaign-1", reviewBatch({
@@ -52,7 +52,7 @@ describe("SyncReview", () => {
 
   it("persists complete review identity, findings, and dispositions before passing", async () => {
     const { syncReview, store, harness } = fixture();
-    store.seed(campaign({ status: "qodo_review", qodoIteration: 1 }));
+    await seedReview(store, campaign({ status: "qodo_review", qodoIteration: 1 }));
     const dismissed = {
       id: "qodo-low-1",
       severity: "low" as const,
@@ -87,10 +87,11 @@ describe("SyncReview", () => {
     ["noncanonical commit", reviewBatch({ commitSha: "abc123" })],
     ["incomplete empty", reviewBatch({ complete: false, findings: [] })],
     ["malformed finding", reviewBatch({ findings: [{ ...openHighFinding, severity: "critical" as never }] })],
+    ["duplicate finding id", reviewBatch({ findings: [openHighFinding, { ...openHighFinding }] })],
     ["unknown batch field", { ...reviewBatch(), repository: "other/repo" }],
   ])("rejects a strict invalid review batch: %s", async (_label, batch) => {
     const { syncReview, store, harness } = fixture();
-    store.seed(campaign({ status: "qodo_review", qodoIteration: 1 }));
+    await seedReview(store, campaign({ status: "qodo_review", qodoIteration: 1 }));
 
     await expect(syncReview.execute("campaign-1", batch)).rejects.toThrow(/review|finding|campaign|commit/i);
     expect((await store.get("campaign-1"))?.qodoFindings).toEqual([]);
@@ -99,7 +100,7 @@ describe("SyncReview", () => {
 
   it("rejects a review for a commit that disagrees with durable campaign memory", async () => {
     const { syncReview, store, harness } = fixture();
-    store.seed(campaign({ status: "qodo_review", qodoIteration: 1 }));
+    await seedReview(store, campaign({ status: "qodo_review", qodoIteration: 1 }));
     await store.setExternalReference("campaign-1", { kind: "commit", value: "c".repeat(40) });
 
     await expect(syncReview.execute("campaign-1", reviewBatch())).rejects.toThrow(/stale|commit/i);
@@ -108,7 +109,7 @@ describe("SyncReview", () => {
 
   it("rejects a review identity that disagrees with pull-request campaign memory", async () => {
     const { syncReview, store, harness } = fixture();
-    store.seed(campaign({ status: "qodo_review", qodoIteration: 1 }));
+    await seedReview(store, campaign({ status: "qodo_review", qodoIteration: 1 }));
     await store.setExternalReference("campaign-1", { kind: "pull_request", value: "review-other" });
 
     await expect(syncReview.execute("campaign-1", reviewBatch())).rejects.toThrow(/pull-request/i);
@@ -117,7 +118,7 @@ describe("SyncReview", () => {
 
   it("accepts an explicitly complete review with no findings", async () => {
     const { syncReview, store, harness } = fixture();
-    store.seed(campaign({ status: "qodo_review", qodoIteration: 0 }));
+    await seedReview(store, campaign({ status: "qodo_review", qodoIteration: 0 }));
 
     const result = await syncReview.execute("campaign-1", reviewBatch());
 
@@ -128,7 +129,7 @@ describe("SyncReview", () => {
 
   it("claims review state before findings and dispatch so duplicate sync launches once", async () => {
     const { syncReview, store, harness } = fixture();
-    store.seed(campaign({ status: "qodo_review", qodoIteration: 0 }));
+    await seedReview(store, campaign({ status: "qodo_review", qodoIteration: 0 }));
     const batch = reviewBatch({ findings: [openHighFinding] });
 
     const results = await Promise.allSettled([
@@ -142,7 +143,7 @@ describe("SyncReview", () => {
 
   it("escalates with fixed evidence when a claimed repair child fails", async () => {
     const { syncReview, store, harness } = fixture();
-    store.seed(campaign({ status: "qodo_review", qodoIteration: 1 }));
+    await seedReview(store, campaign({ status: "qodo_review", qodoIteration: 1 }));
     harness.enqueueFailure("repair", new Error("token=top-secret"));
 
     const result = await syncReview.execute("campaign-1", reviewBatch({ findings: [openHighFinding] }));
@@ -163,11 +164,29 @@ describe("SyncReview", () => {
     await expect(syncReview.execute("campaign-1", reviewBatch())).rejects.toThrow(/qodo review/i);
     expect(harness.operations).toEqual([]);
   });
+
+  it("separates stable pull request, review run, and changing head across iterations", async () => {
+    const nextCommit = "c".repeat(40);
+    const { syncReview, store } = fixture();
+    await seedReview(store, campaign({ status: "qodo_review", qodoIteration: 0 }));
+    const first = reviewBatch({ reviewId: "review-a", findings: [openHighFinding] });
+    const repairing = await syncReview.execute("campaign-1", first);
+    await store.setExternalReference("campaign-1", { kind: "commit", value: nextCommit });
+    await store.update(transitionCampaign(repairing, "qodo_review"), repairing.version);
+    const fixed = { ...openHighFinding, status: "fixed" as const, disposition: "Fixed in repair commit" };
+    const second = reviewBatch({ reviewId: "review-b", commitSha: nextCommit, findings: [fixed] });
+
+    await expect(syncReview.execute("campaign-1", second)).resolves.toMatchObject({ status: "qodo_review" });
+    await expect(syncReview.execute("campaign-1", second)).rejects.toThrow(/already synchronized/i);
+    const claimed = (await store.get("campaign-1"))?.events.filter(({ eventType }) => eventType === "qodo_review_claimed");
+    expect(claimed).toHaveLength(2);
+  });
 });
 
 function reviewBatch(overrides: Partial<QodoReviewBatch> = {}): QodoReviewBatch {
   return {
     campaignId: "campaign-1",
+    pullRequest: "https://github.com/owner/repo/pull/7",
     reviewId: "review-1",
     commitSha,
     testsPassed: true,
@@ -175,6 +194,12 @@ function reviewBatch(overrides: Partial<QodoReviewBatch> = {}): QodoReviewBatch 
     findings: [],
     ...overrides,
   };
+}
+
+async function seedReview(store: FakeCampaignStore, value: ReturnType<typeof campaign>): Promise<void> {
+  store.seed(value);
+  await store.setExternalReference(value.id, { kind: "commit", value: commitSha });
+  await store.setExternalReference(value.id, { kind: "pull_request", value: "https://github.com/owner/repo/pull/7" });
 }
 
 function fixture(): { syncReview: SyncReview; store: FakeCampaignStore; harness: FakeHarness } {

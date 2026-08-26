@@ -7,9 +7,11 @@ import {
 import type { Clock, IdGenerator } from "./create-campaign.js";
 import type { CampaignSnapshot, CampaignStore } from "./ports/campaign-store.js";
 import type { CampaignPacket, HarnessPort, HarnessSessionResult } from "./ports/harness.js";
+import { isPullRequest } from "./external-action.js";
 
 export interface QodoReviewBatch {
   readonly campaignId: string;
+  readonly pullRequest: string;
   readonly reviewId: string;
   readonly commitSha: string;
   readonly testsPassed: boolean;
@@ -51,12 +53,10 @@ export class SyncReview {
     await this.store.update(claimed.campaign, snapshot.campaign.version);
     await this.appendReviewEvent(claimed.campaign, "qodo_review_claimed", batch, {
       outcome: gate.outcome,
+      reviewIteration: snapshot.campaign.qodoIteration,
       findings: batch.findings,
     });
 
-    if (!snapshot.externalReferences.some(({ kind }) => kind === "commit")) {
-      await this.store.setExternalReference(campaignId, { kind: "commit", value: batch.commitSha });
-    }
     const findingIteration = Math.max(1, claimed.campaign.qodoIteration);
     for (const finding of batch.findings) {
       await this.store.recordQodoFinding(campaignId, findingIteration, finding);
@@ -141,7 +141,9 @@ export class SyncReview {
         digest: actionDigest,
         status,
       })),
+      currentCommitSha: batch.commitSha,
       context: {
+        pullRequest: batch.pullRequest,
         reviewId: batch.reviewId,
         commitSha: batch.commitSha,
         testsPassed: batch.testsPassed,
@@ -162,6 +164,7 @@ export class SyncReview {
       id: this.nextId(),
       eventType,
       payload: {
+        pullRequest: batch.pullRequest,
         reviewId: batch.reviewId,
         commitSha: batch.commitSha,
         testsPassed: batch.testsPassed,
@@ -207,8 +210,10 @@ function claimReview(campaign: Campaign, gate: QualityGateResult): ClaimedReview
 }
 
 function assertReviewIsCurrent(snapshot: CampaignSnapshot, batch: QodoReviewBatch): void {
+  if (!isPullRequest(batch.pullRequest, snapshot.campaign.repository)) throw new Error("Invalid Qodo pull-request identity");
   const commitReferences = snapshot.externalReferences.filter(({ kind }) => kind === "commit");
-  if (commitReferences.some(({ value }) => value !== batch.commitSha)) {
+  const currentCommit = commitReferences[0];
+  if (commitReferences.length !== 1 || currentCommit === undefined || currentCommit.value !== batch.commitSha) {
     throw new Error("Stale Qodo review commit does not match campaign memory");
   }
   const pullRequests = snapshot.externalReferences
@@ -217,13 +222,15 @@ function assertReviewIsCurrent(snapshot: CampaignSnapshot, batch: QodoReviewBatc
   if (new Set(pullRequests).size > 1) {
     throw new Error("Qodo review has ambiguous pull-request campaign memory");
   }
-  if (pullRequests.length === 1 && pullRequests[0] !== batch.reviewId) {
+  if (pullRequests.length !== 1 || pullRequests[0] !== batch.pullRequest) {
     throw new Error("Stale Qodo review does not match pull-request campaign memory");
   }
   if (snapshot.events.some((event) =>
     event.eventType === "qodo_review_claimed" &&
     isRecord(event.payload) &&
-    event.payload.reviewId === batch.reviewId
+    event.payload.reviewId === batch.reviewId &&
+    event.payload.commitSha === batch.commitSha &&
+    event.payload.reviewIteration === snapshot.campaign.qodoIteration
   )) {
     throw new Error("Stale Qodo review batch was already synchronized");
   }
@@ -246,6 +253,7 @@ function parseReviewBatch(input: unknown): QodoReviewBatch {
   }
   const allowedKeys = new Set([
     "campaignId",
+    "pullRequest",
     "reviewId",
     "commitSha",
     "testsPassed",
@@ -256,6 +264,7 @@ function parseReviewBatch(input: unknown): QodoReviewBatch {
     Object.keys(input).some((key) => !allowedKeys.has(key)) ||
     typeof input.campaignId !== "string" ||
     input.campaignId.trim().length === 0 ||
+    typeof input.pullRequest !== "string" ||
     typeof input.reviewId !== "string" ||
     input.reviewId.trim().length === 0 ||
     typeof input.commitSha !== "string" ||
@@ -268,8 +277,11 @@ function parseReviewBatch(input: unknown): QodoReviewBatch {
     throw new Error("Invalid Qodo review batch");
   }
   const findings = input.findings.map(parseFinding);
+  if (new Set(findings.map(({ id }) => id)).size !== findings.length) throw new Error("Invalid Qodo review batch");
+  if (!/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/[1-9][0-9]*$/u.test(input.pullRequest)) throw new Error("Invalid Qodo review batch");
   return {
     campaignId: input.campaignId,
+    pullRequest: input.pullRequest,
     reviewId: input.reviewId,
     commitSha: input.commitSha,
     testsPassed: input.testsPassed,

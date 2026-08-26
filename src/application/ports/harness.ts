@@ -5,6 +5,7 @@ export interface CampaignPacket {
   goal: string;
   verifiedEvidence: readonly { sourceUrl: string; observation: string }[];
   approvals: readonly { action: string; digest: string; status: string }[];
+  currentCommitSha?: string;
   context?: Readonly<Record<string, unknown>>;
 }
 

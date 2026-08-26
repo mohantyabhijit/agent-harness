@@ -310,6 +310,21 @@ describe("SqliteCampaignStore", () => {
     expect((await store.get("campaign-1"))?.externalReferences).toEqual([reference]);
   });
 
+  it("atomically replaces the singleton current commit while preserving multi-valued sessions", async () => {
+    const { store } = openMemoryStore();
+    await store.create(campaign());
+    await store.setExternalReference("campaign-1", { kind: "commit", value: "a".repeat(40) });
+    await store.setExternalReference("campaign-1", { kind: "child_session", value: "session-1" });
+    await store.setExternalReference("campaign-1", { kind: "commit", value: "b".repeat(40) });
+    await store.setExternalReference("campaign-1", { kind: "child_session", value: "session-2" });
+
+    expect((await store.get("campaign-1"))?.externalReferences).toEqual([
+      { kind: "child_session", value: "session-1" },
+      { kind: "child_session", value: "session-2" },
+      { kind: "commit", value: "b".repeat(40) },
+    ]);
+  });
+
   it("upgrades existing external-reference tables to retain commit identity", async () => {
     const { database, store } = openMemoryStore();
     await store.create(campaign());

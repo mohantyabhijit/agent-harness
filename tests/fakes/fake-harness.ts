@@ -96,6 +96,17 @@ function defaultOutput(operation: HarnessOperation): unknown {
       commitSha: "a".repeat(40),
       dependenciesInstalled: false,
       repositoryScriptsExecuted: false,
+      evidence: [
+        "manifest_and_lifecycle_scripts",
+        "suspicious_paths",
+        "credential_and_secret_boundary",
+        "network_behavior",
+        "repository_metadata",
+      ].map((check) => ({
+        check,
+        sourceUrl: `https://github.com/owner/repo/blob/${"a".repeat(40)}/package.json`,
+        observation: `${check} inspected statically`,
+      })),
     };
   }
   if (operation === "verify") {
