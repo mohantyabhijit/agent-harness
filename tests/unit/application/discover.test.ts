@@ -16,7 +16,9 @@ class FixtureCatalog implements GithubCatalogPort {
 
   async listRepositories(selectedSpaces: readonly Space[]): Promise<readonly RepositoryCandidate[]> {
     this.requestedSpaces.push(...selectedSpaces);
-    return [...repositories].reverse();
+    return repositories.filter((repository) =>
+      repository.spaces.some((space) => selectedSpaces.includes(space)),
+    );
   }
 
   async listIssues(repository: string): Promise<readonly IssueCandidate[]> {
@@ -40,6 +42,14 @@ describe("DiscoverRepositories", () => {
     await new DiscoverRepositories(catalog).execute(["web", "developer_tools", "web"]);
 
     expect(catalog.requestedSpaces).toEqual(["web", "developer_tools"]);
+  });
+
+  it("returns only active, licensed public repositories overlapping a web-only selection", async () => {
+    const result = await new DiscoverRepositories(new FixtureCatalog()).execute(["web"]);
+
+    expect(result.map((item) => item.repository.fullName)).toEqual([
+      "friendly/healthy-contributor",
+    ]);
   });
 
   it("returns source-backed score explanations without making network calls", async () => {
