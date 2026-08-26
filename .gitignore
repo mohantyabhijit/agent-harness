@@ -20,3 +20,5 @@ reports/generated/
 .idea/
 .vscode/
 
+# Isolated implementation worktrees
+.worktrees/
