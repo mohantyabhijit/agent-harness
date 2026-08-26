@@ -38,7 +38,8 @@ export function createContainer(config: ServerConfig): ServerContainer {
     scheduler,
     intervalMs: config.QODO_POLL_INTERVAL_MS,
     shutdownTimeoutMs: config.QODO_SHUTDOWN_TIMEOUT_MS,
-    providerReady: qodoReview.isReady(),
+    reviewAuthorityReady: () => qodoReview.isReady(),
+    repairVerifierReady: () => false,
   });
   const dependencies: AppDependencies = {
     store,
@@ -49,6 +50,8 @@ export function createContainer(config: ServerConfig): ServerContainer {
     authorization: bearerAuthorizationPolicy({ operator: config.OPERATOR_BEARER_TOKEN, reviewProvider: config.REVIEW_PROVIDER_BEARER_TOKEN }),
     reviewHealth: () => reviewJob.health(),
     qodoReview,
+    requireReviewHealth: true,
+    reviewSyncTimeoutMs: config.QODO_SHUTDOWN_TIMEOUT_MS,
   };
   return {
     dependencies,

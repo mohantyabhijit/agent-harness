@@ -120,12 +120,23 @@ function externalClaimRecord(): ExternalActionClaimRecord {
   };
 }
 
+function repairVerificationAuthority(input: { eventId: string; currentHead: string; pullRequest: string; childSessionId?: string; sandboxSessionId?: string }) {
+  const childSessionId = input.childSessionId ?? `child-${input.eventId}`;
+  return {
+    receipt: `verified-repair-receipt-${input.eventId}`,
+    campaignId: "campaign-1", repository: "owner/repo", pullRequest: input.pullRequest, childSessionId,
+    sandboxSessionId: input.sandboxSessionId ?? childSessionId, expectedParentCommitSha: "a".repeat(40),
+    candidateCommitSha: input.currentHead, testPolicy: "openquest-repair-tests-v1", testsPassed: true as const,
+    commands: ["npm test"], evidence: [{ kind: "direct" as const, sourceUrl: "https://github.com/owner/repo/actions/runs/1", observation: "Tests passed" }],
+  };
+}
+
 function insertRepairAuthority(database: Database.Database, input: { eventId: string; currentHead: string; pullRequest: string; qodoIteration?: number }): void {
   database.prepare("INSERT INTO campaign_events (id, campaign_id, event_type, payload_json, occurred_at, sequence) VALUES (?, 'campaign-1', 'campaign_operation_completed', '{}', '2026-08-26T00:00:30Z', COALESCE((SELECT MAX(sequence) + 1 FROM campaign_events WHERE campaign_id = 'campaign-1'), 1))").run(input.eventId);
   database.prepare(`INSERT INTO campaign_operation_results
-    (event_id, campaign_id, operation, resulting_campaign_version, current_commit_sha, pull_request, qodo_iteration, child_session_id)
-    VALUES (?, 'campaign-1', 'repair', 3, ?, ?, ?, ?)`
-  ).run(input.eventId, input.currentHead, input.pullRequest, input.qodoIteration ?? 1, `child-${input.eventId}`);
+    (event_id, campaign_id, operation, resulting_campaign_version, current_commit_sha, pull_request, qodo_iteration, child_session_id, repair_verification_json)
+    VALUES (?, 'campaign-1', 'repair', 3, ?, ?, ?, ?, ?)`
+  ).run(input.eventId, input.currentHead, input.pullRequest, input.qodoIteration ?? 1, `child-${input.eventId}`, JSON.stringify(repairVerificationAuthority(input)));
 }
 
 describe("SqliteCampaignStore", () => {
@@ -933,9 +944,11 @@ describe("SqliteCampaignStore", () => {
       expectedVersion: 2,
       expectedStatus: "repair",
       childSessionId: "repair-child",
+      sandboxSessionId: "repair-sandbox",
       event: { id: "repair-completed", eventType: "campaign_operation_completed", payload: { claimedCampaignVersion: 2, resultingCampaignVersion: 3 }, occurredAt: "2026-08-26T00:01:00Z" },
       newCommitSha: "b".repeat(40),
-      operationResult: { operation: "repair", currentCommitSha: "b".repeat(40), pullRequest: "https://github.com/owner/repo/pull/7", qodoIteration: 1 },
+      operationResult: { operation: "repair", currentCommitSha: "b".repeat(40), pullRequest: "https://github.com/owner/repo/pull/7", qodoIteration: 1,
+        repairVerification: repairVerificationAuthority({ eventId: "repair-completed", currentHead: "b".repeat(40), pullRequest: "https://github.com/owner/repo/pull/7", childSessionId: "repair-child", sandboxSessionId: "repair-sandbox" }) },
     });
     expect(version).toBe(3);
     expect((await store.get("campaign-1"))?.externalReferences).toContainEqual({ kind: "commit", value: "b".repeat(40) });

@@ -3,6 +3,7 @@ import type { Campaign, CampaignStatus } from "../../domain/campaign.js";
 import type { Evidence } from "../../domain/evidence.js";
 import type { QodoFinding } from "../../domain/quality-gate.js";
 import type { ExternalActionPayload } from "../external-action.js";
+import type { PersistenceLease } from "./persistence-lease.js";
 
 export interface CampaignEvent {
   readonly id: string;
@@ -54,6 +55,7 @@ export interface ExternalActionClaim {
   readonly closedAt?: string;
   readonly disposition?: ExternalActionDisposition;
   readonly observedCanonicalHead?: string;
+  readonly repairVerificationReceipt?: string;
 }
 
 export interface ExternalActionClaimRecord {
@@ -105,6 +107,7 @@ export interface ChildResultRecord {
   readonly event: CampaignEventInput;
   readonly newCommitSha?: string;
   readonly operationResult?: CampaignOperationResult;
+  readonly persistenceLease?: PersistenceLease;
 }
 
 export interface QodoReviewFindingRecord {
@@ -123,6 +126,7 @@ export interface QodoReviewClaimRecord {
   readonly claimedEvent: CampaignEventInput;
   readonly findings: readonly QodoReviewFindingRecord[];
   readonly outcomeEvent: CampaignEventInput;
+  readonly persistenceLease?: PersistenceLease;
 }
 
 export interface QodoEscalationRecord {
@@ -130,6 +134,7 @@ export interface QodoEscalationRecord {
   readonly expectedStatus: "qodo_review" | "repair";
   readonly campaign: Campaign;
   readonly event: CampaignEventInput;
+  readonly persistenceLease?: PersistenceLease;
 }
 
 export interface CampaignOperationResult {
@@ -137,6 +142,22 @@ export interface CampaignOperationResult {
   readonly currentCommitSha: string;
   readonly pullRequest?: string;
   readonly qodoIteration: number;
+  readonly repairVerification?: RepairVerificationAuthority;
+}
+
+export interface RepairVerificationAuthority {
+  readonly receipt: string;
+  readonly campaignId: string;
+  readonly repository: string;
+  readonly pullRequest: string;
+  readonly childSessionId: string;
+  readonly sandboxSessionId: string;
+  readonly expectedParentCommitSha: string;
+  readonly candidateCommitSha: string;
+  readonly testPolicy: string;
+  readonly testsPassed: true;
+  readonly commands: readonly string[];
+  readonly evidence: readonly { readonly kind: "direct"; readonly sourceUrl: string; readonly observation: string }[];
 }
 
 export interface ApprovalIssuanceRecord {

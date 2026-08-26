@@ -11,7 +11,9 @@ import { isPullRequest } from "./external-action.js";
 import { parseQodoReviewBatch, type QodoReviewBatch } from "./qodo-review-batch.js";
 import { ApplicationError } from "./errors.js";
 import type { HarnessRequestOptions } from "./ports/harness.js";
-import type { RepairVerifierPort } from "./ports/repair-verifier.js";
+import type { RepairVerifierPort, VerifiedRepair } from "./ports/repair-verifier.js";
+import type { PersistenceLease } from "./ports/persistence-lease.js";
+import { PersistenceLeaseRevoked } from "./ports/persistence-lease.js";
 import { z } from "zod";
 
 export type { QodoReviewBatch } from "./qodo-review-batch.js";
@@ -20,6 +22,12 @@ interface ClaimedReview {
   readonly campaign: Campaign;
   readonly gate: QualityGateResult;
 }
+
+export interface ReviewExecutionContext extends HarnessRequestOptions {
+  readonly persistenceLease?: PersistenceLease;
+}
+
+const REPAIR_TEST_POLICY = "openquest-repair-tests-v1";
 
 export class SyncReview {
   constructor(
@@ -30,14 +38,16 @@ export class SyncReview {
     private readonly repairVerifier?: RepairVerifierPort,
   ) {}
 
-  async enforceIterationLimit(campaignId: string): Promise<Campaign> {
+  async enforceIterationLimit(campaignId: string, context?: ReviewExecutionContext): Promise<Campaign> {
+    assertLease(context);
     const snapshot = await this.requiredSnapshot(campaignId);
+    assertLease(context);
     if (snapshot.campaign.status !== "qodo_review") throw new ApplicationError("invalid_transition");
     if (snapshot.campaign.qodoIteration !== 3) throw new ApplicationError("invalid_transition");
     const pullRequest = singletonExternalReference(snapshot, "pull_request");
     const commitSha = singletonExternalReference(snapshot, "commit");
     const escalated = transitionCampaign(snapshot.campaign, "human_escalation");
-    await this.store.escalateQodoReview(campaignId, { expectedVersion: snapshot.campaign.version, expectedStatus: "qodo_review", campaign: escalated, event: {
+    await this.store.escalateQodoReview(campaignId, { expectedVersion: snapshot.campaign.version, expectedStatus: "qodo_review", campaign: escalated, ...(context?.persistenceLease === undefined ? {} : { persistenceLease: context.persistenceLease }), event: {
       id: this.nextId(),
       eventType: "quality_gate_escalated",
       occurredAt: this.clock.now(),
@@ -52,12 +62,14 @@ export class SyncReview {
     return escalated;
   }
 
-  async execute(campaignId: string, input: QodoReviewBatch, context?: HarnessRequestOptions): Promise<Campaign> {
+  async execute(campaignId: string, input: QodoReviewBatch, context?: ReviewExecutionContext): Promise<Campaign> {
     const batch = parseQodoReviewBatch(input);
     if (batch.campaignId !== campaignId) {
       throw new ApplicationError("campaign_conflict");
     }
+    assertLease(context);
     const snapshot = await this.requiredSnapshot(campaignId);
+    assertLease(context);
     if (snapshot.campaign.status !== "qodo_review") {
       throw new ApplicationError("invalid_transition");
     }
@@ -116,6 +128,7 @@ export class SyncReview {
       claimedEvent,
       findings: findingRecords,
       outcomeEvent,
+      ...(context?.persistenceLease === undefined ? {} : { persistenceLease: context.persistenceLease }),
     });
     if (gate.outcome !== "repair") return claimed.campaign;
 
@@ -125,6 +138,7 @@ export class SyncReview {
         "repair",
         context,
       );
+      assertLease(context);
       const repair = parseRepairOutput(result.output, batch.commitSha);
       if (this.repairVerifier === undefined) throw new Error("Repair verifier is unavailable");
       const verified = await this.repairVerifier.verify({
@@ -133,16 +147,26 @@ export class SyncReview {
         pullRequest: batch.pullRequest,
         childSessionId: result.sessionId,
         expectedParentCommitSha: batch.commitSha,
+        testPolicy: REPAIR_TEST_POLICY,
         candidate: repair,
         ...(context?.signal === undefined ? {} : { signal: context.signal }),
         ...(context?.timeoutMs === undefined ? {} : { timeoutMs: context.timeoutMs }),
       });
-      if (verified.commitSha !== repair.commitSha || verified.commitSha === batch.commitSha || verified.sandboxSessionId.trim().length === 0) {
-        throw new Error("Repair verification does not match the candidate");
-      }
-      const nextCommitSha = verified.commitSha;
+      assertLease(context);
+      const authority = parseVerifiedRepair(verified);
+      assertVerifiedRepairBinding(authority, {
+        campaignId,
+        repository: snapshot.campaign.repository,
+        pullRequest: batch.pullRequest,
+        childSessionId: result.sessionId,
+        expectedParentCommitSha: batch.commitSha,
+        candidateCommitSha: repair.commitSha,
+        testPolicy: REPAIR_TEST_POLICY,
+      });
+      const nextCommitSha = authority.candidateCommitSha;
       const resultingVersion = claimed.campaign.version + 1;
       if (isCancelled(context)) throw new Error("Repair was cancelled");
+      assertLease(context);
       const recordedVersion = await this.store.recordChildResult(campaignId, {
         expectedVersion: claimed.campaign.version,
         expectedStatus: "repair",
@@ -151,30 +175,35 @@ export class SyncReview {
           operation: "repair",
           iteration: gate.nextIteration,
           childSessionId: result.sessionId,
-          sandboxSessionId: verified.sandboxSessionId,
+          sandboxSessionId: authority.sandboxSessionId,
           artifacts: result.artifacts,
           summary: result.summary,
-          output: { status: "verified", commitSha: verified.commitSha, verification: { testsPassed: true, commands: verified.commands, evidence: verified.evidence } },
+          output: { status: "verified", commitSha: authority.candidateCommitSha, verification: authority },
           resultingCampaignVersion: resultingVersion,
         }),
         newCommitSha: nextCommitSha,
-        sandboxSessionId: verified.sandboxSessionId,
+        sandboxSessionId: authority.sandboxSessionId,
+        ...(context?.persistenceLease === undefined ? {} : { persistenceLease: context.persistenceLease }),
         operationResult: {
           operation: "repair",
           currentCommitSha: nextCommitSha,
           pullRequest: batch.pullRequest,
           qodoIteration: claimed.campaign.qodoIteration,
+          repairVerification: authority,
         },
       });
       return { ...claimed.campaign, version: recordedVersion };
-    } catch {
+    } catch (error) {
+      if (error instanceof PersistenceLeaseRevoked || leaseIsRevoked(context)) throw error;
       try {
+        assertLease(context);
         const escalated = transitionCampaign(claimed.campaign, "human_escalation");
         const reason = isCancelled(context) ? "repair_cancelled" : "repair_child_failed";
         await this.store.escalateQodoReview(campaignId, {
           expectedVersion: claimed.campaign.version,
           expectedStatus: "repair",
           campaign: escalated,
+          ...(context?.persistenceLease === undefined ? {} : { persistenceLease: context.persistenceLease }),
           event: this.reviewEvent(claimed.campaign, "quality_gate_escalated", batch, { reason, iteration: claimed.campaign.qodoIteration }),
         });
         return escalated;
@@ -340,12 +369,13 @@ function isIdenticalAuthenticatedReplay(snapshot: CampaignSnapshot, batch: QodoR
   const payload = prior[0]?.payload;
   if (!isRecord(payload)) throw new ApplicationError("campaign_conflict");
   const priorFindings = payload.findings;
+  const incomingById = new Map(batch.findings.map((finding) => [finding.id, finding]));
   const identical = payload.pullRequest === batch.pullRequest && payload.reviewId === batch.reviewId &&
     payload.reviewUrl === batch.reviewUrl && payload.sourceIdentity === batch.sourceIdentity &&
     payload.sourceReceipt === batch.sourceReceipt && payload.commitSha === batch.commitSha &&
     payload.testsPassed === batch.testsPassed && payload.complete === batch.complete &&
     Array.isArray(priorFindings) && priorFindings.length === batch.findings.length &&
-    priorFindings.every((finding, index) => isQodoFinding(finding) && equalFinding(finding, batch.findings[index] as QodoFinding));
+    priorFindings.every((finding) => isQodoFinding(finding) && incomingById.has(finding.id) && equalFinding(finding, incomingById.get(finding.id) as QodoFinding));
   if (!identical) throw new ApplicationError("campaign_conflict");
   return true;
 }
@@ -398,6 +428,38 @@ function parseRepairOutput(output: unknown, previousCommitSha: string): z.infer<
 
 function isCancelled(context?: HarnessRequestOptions): boolean {
   return context?.signal?.aborted === true;
+}
+
+function assertLease(context?: ReviewExecutionContext): void { context?.persistenceLease?.assertCurrent(); }
+function leaseIsRevoked(context?: ReviewExecutionContext): boolean {
+  try { assertLease(context); return false; } catch { return true; }
+}
+
+const verifiedRepairSchema = z.object({
+  receipt: z.string().trim().min(16).max(512),
+  campaignId: z.string().trim().min(1).max(200),
+  repository: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u).max(200),
+  pullRequest: z.url().max(2_048),
+  childSessionId: z.string().trim().min(1).max(512),
+  sandboxSessionId: z.string().trim().min(1).max(512),
+  expectedParentCommitSha: z.string().regex(/^[0-9a-f]{40}$/u),
+  candidateCommitSha: z.string().regex(/^[0-9a-f]{40}$/u),
+  testPolicy: z.string().trim().min(1).max(200),
+  testsPassed: z.literal(true),
+  commands: z.array(z.string().trim().min(1).max(2_000)).min(1).max(100),
+  evidence: z.array(z.object({ kind: z.literal("direct"), sourceUrl: z.url().max(2_048), observation: z.string().trim().min(1).max(2_000) }).strict()).min(1).max(100),
+}).strict();
+
+function parseVerifiedRepair(value: VerifiedRepair): z.infer<typeof verifiedRepairSchema> { return verifiedRepairSchema.parse(value); }
+
+function assertVerifiedRepairBinding(
+  receipt: z.infer<typeof verifiedRepairSchema>,
+  expected: Omit<z.infer<typeof verifiedRepairSchema>, "receipt" | "sandboxSessionId" | "testsPassed" | "commands" | "evidence">,
+): void {
+  for (const key of ["campaignId", "repository", "pullRequest", "childSessionId", "expectedParentCommitSha", "candidateCommitSha", "testPolicy"] as const) {
+    if (receipt[key] !== expected[key]) throw new Error(`Repair verification ${key} does not match the request`);
+  }
+  if (receipt.candidateCommitSha === receipt.expectedParentCommitSha) throw new Error("Repair verifier returned the reviewed commit");
 }
 
 function singletonExternalReference(snapshot: CampaignSnapshot, kind: "pull_request" | "commit"): string {

@@ -121,6 +121,7 @@ interface ExternalActionClaimRow {
   closed_at: string | null;
   disposition: NonNullable<ExternalActionClaim["disposition"]> | null;
   observed_canonical_head: string | null;
+  repair_verification_receipt: string | null;
 }
 
 export class SqliteCampaignStore implements CampaignStore {
@@ -438,6 +439,7 @@ export class SqliteCampaignStore implements CampaignStore {
       return { iteration, finding: parseQodoFinding(finding), event };
     });
     const write = this.#database.transaction(() => {
+      record.persistenceLease?.assertCurrent();
       this.#assertClaim(campaignId, record.expectedVersion, "qodo_review");
       this.#assertNoBlockingExternalAction(campaignId);
       const existing = this.#database.prepare("SELECT * FROM campaigns WHERE id = ?").get(campaignId) as CampaignRow | undefined;
@@ -474,6 +476,7 @@ export class SqliteCampaignStore implements CampaignStore {
       throw new Error("Invalid Qodo escalation record");
     }
     const escalate = this.#database.transaction(() => {
+      record.persistenceLease?.assertCurrent();
       this.#assertClaim(campaignId, record.expectedVersion, record.expectedStatus);
       const updated = this.#database.prepare("UPDATE campaigns SET status = 'human_escalation', version = ?, updated_at = ? WHERE id = ? AND version = ? AND status = ?")
         .run(record.campaign.version, occurredAt, campaignId, record.expectedVersion, record.expectedStatus);
@@ -533,7 +536,7 @@ export class SqliteCampaignStore implements CampaignStore {
       if (currentCommitSha !== record.expectedCurrentCommitSha) throw new CampaignVersionConflict(campaignId, record.expectedVersion);
       if (record.payload.action === "push_branch" && currentCommitSha === undefined) throw new Error("Branch push requires a current campaign head");
       if ((record.payload.action === "create_pr" || record.payload.action === "update_pr") && record.payload.commitSha !== currentCommitSha) throw new Error("External action commit does not match current campaign head");
-      if (record.payload.action === "update_pr") this.#assertUpdatePullRequestIdentity(campaignId, record.payload);
+      const repairVerificationReceipt = record.payload.action === "update_pr" ? this.#assertUpdatePullRequestIdentity(campaignId, record.payload) : undefined;
 
       const approvalRow = this.#database.prepare("SELECT * FROM approvals WHERE id = ? AND active = 1 AND trusted_proposal_authority = 1").get(record.approvalId) as ApprovalRow | undefined;
       const approved = approvalRow === undefined ? undefined : mapApproval(approvalRow);
@@ -568,12 +571,12 @@ export class SqliteCampaignStore implements CampaignStore {
       this.#database.prepare(`
         INSERT INTO external_action_claims (
           id, campaign_id, approval_id, action_digest, payload_json, current_commit_sha,
-          claimed_campaign_version, claimed_campaign_status, status, attempted_at, lease_started_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
+          claimed_campaign_version, claimed_campaign_status, status, attempted_at, lease_started_at, repair_verification_receipt
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
       `).run(
         record.claimId, campaignId, record.approvalId, approved.actionDigest,
         canonicalExternalActionJson(approved.payload as ExternalActionPayload), currentCommitSha ?? null,
-        approved.expectedCampaignVersion, approved.expectedCampaignStatus, consumedAt, leaseStartedAt,
+        approved.expectedCampaignVersion, approved.expectedCampaignStatus, consumedAt, leaseStartedAt, repairVerificationReceipt ?? null,
       );
       this.#insertEvent(campaignId, record.attemptedEvent, occurredAt);
       return { claim: this.#requiredExternalActionClaim(campaignId, record.claimId, "active") };
@@ -658,7 +661,8 @@ export class SqliteCampaignStore implements CampaignStore {
       const campaign = this.#database.prepare("SELECT version, status FROM campaigns WHERE id = ?").get(campaignId) as Pick<CampaignRow, "version" | "status"> | undefined;
       if (campaign === undefined) throw new Error(`Campaign ${campaignId} does not exist`);
       const current = this.#currentCommit(campaignId);
-      const changed = record.observedCanonicalHead !== undefined && record.observedCanonicalHead !== current;
+      const preserveVerifiedRepair = record.disposition === "confirmed_not_completed" && claim.payload.action === "update_pr";
+      const changed = !preserveVerifiedRepair && record.observedCanonicalHead !== undefined && record.observedCanonicalHead !== current;
       const confirmedUpdate = record.disposition === "confirmed_completed" && claim.payload.action === "update_pr";
       if (confirmedUpdate && (record.observedCanonicalHead !== claim.payload.commitSha || current !== claim.payload.commitSha || campaign.status !== "repair" || this.#currentPullRequest(campaignId) !== claim.payload.pullRequest)) {
         throw new Error("Confirmed update_pr reconciliation does not match current authority");
@@ -710,6 +714,7 @@ export class SqliteCampaignStore implements CampaignStore {
     if (record.childSessionId.trim().length === 0) throw new Error("Invalid child session identifier");
     if (record.newCommitSha !== undefined) assertCommitSha(record.newCommitSha);
     const write = this.#database.transaction(() => {
+      record.persistenceLease?.assertCurrent();
       this.#assertClaim(campaignId, record.expectedVersion, record.expectedStatus);
       this.#assertNoBlockingExternalAction(campaignId);
       let resultingVersion = record.expectedVersion;
@@ -730,7 +735,7 @@ export class SqliteCampaignStore implements CampaignStore {
         if (result === undefined || result.currentCommitSha !== this.#currentCommit(campaignId)) throw new Error("Completed child result lacks typed operation authority");
         const campaign = this.#database.prepare("SELECT qodo_iteration FROM campaigns WHERE id = ?").get(campaignId) as { qodo_iteration: number };
         if (result.qodoIteration !== campaign.qodo_iteration) throw new Error("Operation result Qodo iteration does not match campaign");
-        if (result.operation === "repair" && (result.pullRequest === undefined || !isPullRequest(result.pullRequest, this.#repository(campaignId)) || this.#currentPullRequest(campaignId) !== result.pullRequest)) throw new Error("Repair result lacks current pull request identity");
+        if (result.operation === "repair" && (result.pullRequest === undefined || !isPullRequest(result.pullRequest, this.#repository(campaignId)) || this.#currentPullRequest(campaignId) !== result.pullRequest || !validRepairAuthority(result.repairVerification, campaignId, this.#repository(campaignId), result.pullRequest, record.childSessionId, record.sandboxSessionId, result.currentCommitSha))) throw new Error("Repair result lacks exact verified publication authority");
       } else if (record.operationResult !== undefined) {
         throw new Error("Typed operation authority requires a completed child event");
       }
@@ -738,9 +743,10 @@ export class SqliteCampaignStore implements CampaignStore {
       if (record.operationResult !== undefined) {
         const result = record.operationResult;
         this.#database.prepare(`INSERT INTO campaign_operation_results
-          (event_id, campaign_id, operation, resulting_campaign_version, current_commit_sha, pull_request, qodo_iteration, child_session_id)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-        ).run(record.event.id, campaignId, result.operation, resultingVersion, result.currentCommitSha, result.pullRequest ?? null, result.qodoIteration, record.childSessionId);
+          (event_id, campaign_id, operation, resulting_campaign_version, current_commit_sha, pull_request, qodo_iteration, child_session_id, repair_verification_json)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        ).run(record.event.id, campaignId, result.operation, resultingVersion, result.currentCommitSha, result.pullRequest ?? null, result.qodoIteration, record.childSessionId,
+          result.repairVerification === undefined ? null : JSON.stringify(result.repairVerification));
       }
       return resultingVersion;
     });
@@ -809,7 +815,7 @@ export class SqliteCampaignStore implements CampaignStore {
   #assertUpdatePullRequestIdentity(
     campaignId: string,
     payload: Extract<ExternalActionPayload, { action: "update_pr" }>,
-  ): void {
+  ): string {
     const campaign = this.#database.prepare("SELECT repository, version, qodo_iteration FROM campaigns WHERE id = ?").get(campaignId) as Pick<CampaignRow, "repository" | "version" | "qodo_iteration"> | undefined;
     if (campaign === undefined) throw new Error("Campaign does not exist");
     const pullRequests = this.#database.prepare("SELECT value FROM external_references WHERE campaign_id = ? AND kind = 'pull_request'").all(campaignId) as { value: string }[];
@@ -817,12 +823,17 @@ export class SqliteCampaignStore implements CampaignStore {
       throw new Error("External action pull request does not match campaign memory");
     }
     const matches = this.#database.prepare(`
-      SELECT event_id FROM campaign_operation_results
+      SELECT event_id, child_session_id, repair_verification_json FROM campaign_operation_results
       WHERE campaign_id = ? AND operation = 'repair'
         AND resulting_campaign_version = ? AND current_commit_sha = ?
         AND pull_request = ? AND qodo_iteration = ?
-    `).all(campaignId, campaign.version, payload.commitSha, payload.pullRequest, campaign.qodo_iteration) as { event_id: string }[];
-    if (matches.length !== 1) throw new Error("Campaign lacks one unambiguous repair completion event for this update");
+    `).all(campaignId, campaign.version, payload.commitSha, payload.pullRequest, campaign.qodo_iteration) as { event_id: string; child_session_id: string; repair_verification_json: string | null }[];
+    const match = matches[0];
+    if (matches.length !== 1 || match?.repair_verification_json === null || match === undefined) throw new Error("Campaign lacks one unambiguous verified repair completion event for this update");
+    let authority: unknown;
+    try { authority = JSON.parse(match.repair_verification_json); } catch { throw new Error("Campaign repair verification receipt is invalid"); }
+    if (!validStoredRepairAuthority(authority, campaignId, campaign.repository, payload.pullRequest, match.child_session_id, payload.commitSha)) throw new Error("Campaign repair verification receipt does not match this update");
+    return (authority as { receipt: string }).receipt;
   }
 
   #repository(campaignId: string): string {
@@ -1026,6 +1037,7 @@ function mapExternalActionClaim(row: ExternalActionClaimRow): ExternalActionClai
     ...(row.closed_at === null ? {} : { closedAt: row.closed_at }),
     ...(row.disposition === null ? {} : { disposition: row.disposition }),
     ...(row.observed_canonical_head === null ? {} : { observedCanonicalHead: row.observed_canonical_head }),
+    ...(row.repair_verification_receipt === null ? {} : { repairVerificationReceipt: row.repair_verification_receipt }),
   };
 }
 
@@ -1037,6 +1049,42 @@ function assertCampaignQodoIteration(iteration: number): void {
 
 function assertCommitSha(commitSha: string): void {
   if (!/^[0-9a-f]{40}$/u.test(commitSha)) throw new Error("Invalid current commit SHA");
+}
+
+function validRepairAuthority(
+  value: import("../../application/ports/campaign-store.js").RepairVerificationAuthority | undefined,
+  campaignId: string,
+  repository: string,
+  pullRequest: string,
+  childSessionId: string,
+  sandboxSessionId: string | undefined,
+  commitSha: string,
+): boolean {
+  return value !== undefined && (value as unknown as Record<string, unknown>).testsPassed === true && value.receipt === value.receipt.trim() && value.receipt.length >= 16 && value.receipt.length <= 512 && value.campaignId === campaignId &&
+    value.repository === repository && value.pullRequest === pullRequest && value.childSessionId === childSessionId &&
+    value.sandboxSessionId === sandboxSessionId && value.candidateCommitSha === commitSha &&
+    value.expectedParentCommitSha !== commitSha && value.testPolicy === "openquest-repair-tests-v1" &&
+    value.commands.length > 0 && value.commands.length <= 100 && value.commands.every((command) => typeof command === "string" && command.trim().length > 0 && command.length <= 2_000) &&
+    value.evidence.length > 0 && value.evidence.length <= 100 && value.evidence.every((evidence) => (evidence as unknown as Record<string, unknown>).kind === "direct" && typeof evidence.sourceUrl === "string" && evidence.sourceUrl.length <= 2_048 && typeof evidence.observation === "string" && evidence.observation.trim().length > 0 && evidence.observation.length <= 2_000);
+}
+
+function validStoredRepairAuthority(value: unknown, campaignId: string, repository: string, pullRequest: string, childSessionId: string, commitSha: string): boolean {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const keys = ["receipt", "campaignId", "repository", "pullRequest", "childSessionId", "sandboxSessionId", "expectedParentCommitSha", "candidateCommitSha", "testPolicy", "testsPassed", "commands", "evidence"];
+  if (Object.keys(value).length !== keys.length || Object.keys(value).some((key) => !keys.includes(key))) return false;
+  const raw = value as Record<string, unknown>;
+  if (!Array.isArray(raw.evidence) || !(raw.evidence as unknown[]).every(isDirectEvidenceRecord)) return false;
+  const authority = value as Partial<import("../../application/ports/campaign-store.js").RepairVerificationAuthority>;
+  return typeof authority.receipt === "string" && typeof authority.sandboxSessionId === "string" && typeof authority.expectedParentCommitSha === "string" &&
+    typeof authority.testPolicy === "string" && authority.testsPassed === true && Array.isArray(authority.commands) && Array.isArray(authority.evidence) &&
+    validRepairAuthority(authority as import("../../application/ports/campaign-store.js").RepairVerificationAuthority,
+      campaignId, repository, pullRequest, childSessionId, authority.sandboxSessionId, commitSha);
+}
+
+function isDirectEvidenceRecord(value: unknown): boolean {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return Object.keys(record).length === 3 && record.kind === "direct" && typeof record.sourceUrl === "string" && typeof record.observation === "string";
 }
 
 function assertChildEventVersion(payload: unknown, expectedVersion: number, resultingVersion: number): void {

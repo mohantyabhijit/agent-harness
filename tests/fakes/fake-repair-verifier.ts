@@ -9,8 +9,16 @@ export class FakeRepairVerifier implements RepairVerifierPort {
     this.requests.push(structuredClone(request));
     if (this.failure !== undefined) throw this.failure;
     return this.result ?? {
-      commitSha: request.candidate.commitSha,
+      receipt: `verified-repair:${request.campaignId}:${request.childSessionId}`,
+      campaignId: request.campaignId,
+      repository: request.repository,
+      pullRequest: request.pullRequest,
+      childSessionId: request.childSessionId,
       sandboxSessionId: `sandbox:${request.childSessionId}`,
+      expectedParentCommitSha: request.expectedParentCommitSha,
+      candidateCommitSha: request.candidate.commitSha,
+      testPolicy: request.testPolicy,
+      testsPassed: true,
       commands: request.candidate.verification.commands,
       evidence: request.candidate.verification.evidence,
     };

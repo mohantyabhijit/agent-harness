@@ -3,7 +3,7 @@ import { isPullRequest } from "./external-action.js";
 import type { CampaignSnapshot, CampaignStore } from "./ports/campaign-store.js";
 import type { CampaignPacket, HarnessRequestOptions } from "./ports/harness.js";
 import type { QodoReviewLocator, QodoReviewPort } from "./ports/qodo-review.js";
-import type { QodoReviewBatch, SyncReview } from "./sync-review.js";
+import type { QodoReviewBatch, ReviewExecutionContext, SyncReview } from "./sync-review.js";
 
 export class SyncAuthenticatedReview {
   constructor(
@@ -12,10 +12,12 @@ export class SyncAuthenticatedReview {
     private readonly syncReview: Pick<SyncReview, "execute">,
   ) {}
 
-  async execute(campaignId: string, locator: QodoReviewLocator, options?: HarnessRequestOptions) {
+  async execute(campaignId: string, locator: QodoReviewLocator, options?: ReviewExecutionContext) {
+    options?.persistenceLease?.assertCurrent();
     const snapshot = await this.store.get(campaignId);
     if (snapshot === undefined) throw new ApplicationError("campaign_not_found");
     const batch = await authenticatedReviewBatch(this.review, snapshot, options, locator);
+    options?.persistenceLease?.assertCurrent();
     return this.syncReview.execute(campaignId, batch, options);
   }
 }

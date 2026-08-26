@@ -15,12 +15,21 @@ export interface RepairVerificationRequest extends HarnessRequestOptions {
   readonly pullRequest: string;
   readonly childSessionId: string;
   readonly expectedParentCommitSha: string;
+  readonly testPolicy: string;
   readonly candidate: RepairCandidate;
 }
 
 export interface VerifiedRepair {
-  readonly commitSha: string;
+  readonly receipt: string;
+  readonly campaignId: string;
+  readonly repository: string;
+  readonly pullRequest: string;
+  readonly childSessionId: string;
   readonly sandboxSessionId: string;
+  readonly expectedParentCommitSha: string;
+  readonly candidateCommitSha: string;
+  readonly testPolicy: string;
+  readonly testsPassed: true;
   readonly commands: readonly string[];
   readonly evidence: readonly { readonly kind: "direct"; readonly sourceUrl: string; readonly observation: string }[];
 }

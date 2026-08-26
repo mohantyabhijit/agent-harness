@@ -33,6 +33,8 @@ export interface AppDependencies {
   readonly reviewHealth?: () => QodoReviewJobHealth;
   readonly qodoReview?: QodoReviewPort;
   readonly repairVerifier?: RepairVerifierPort;
+  readonly requireReviewHealth?: boolean;
+  readonly reviewSyncTimeoutMs?: number;
 }
 
 export function buildApp(dependencies: AppDependencies): FastifyInstance {
@@ -66,8 +68,8 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
   });
   app.get("/api/readyz", async (_request, reply) => {
     const review = dependencies.reviewHealth?.();
-    if (review?.status === "degraded") {
-      return reply.code(503).send({ status: "not_ready", review: { code: review.code ?? "unexpected_failure" } });
+    if ((dependencies.requireReviewHealth === true && review === undefined) || review?.status === "degraded") {
+      return reply.code(503).send({ status: "not_ready", review: { code: review?.code ?? "unexpected_failure" } });
     }
     return reply.send({ status: "ready" });
   });
@@ -75,7 +77,7 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
   registerDiscoveryRoutes(app, { discover, catalog: dependencies.catalog });
   registerCampaignRoutes(app, { createCampaign, runCampaign, store: dependencies.store, clock: dependencies.clock });
   registerApprovalRoutes(app, { store: dependencies.store, clock: dependencies.clock, ids: dependencies.ids });
-  registerReviewRoutes(app, { syncReview: authenticatedReview });
+  registerReviewRoutes(app, { syncReview: authenticatedReview, ...(dependencies.reviewSyncTimeoutMs === undefined ? {} : { timeoutMs: dependencies.reviewSyncTimeoutMs }) });
   return app;
 }
 

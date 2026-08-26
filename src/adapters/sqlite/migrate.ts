@@ -99,7 +99,8 @@ const schema = `
     lease_started_at TEXT NOT NULL,
     closed_at TEXT,
     disposition TEXT CHECK (disposition IS NULL OR disposition IN ('confirmed_completed', 'confirmed_not_completed')),
-    observed_canonical_head TEXT
+    observed_canonical_head TEXT,
+    repair_verification_receipt TEXT
   );
 
   CREATE TABLE IF NOT EXISTS campaign_operation_results (
@@ -110,7 +111,8 @@ const schema = `
     current_commit_sha TEXT NOT NULL,
     pull_request TEXT,
     qodo_iteration INTEGER NOT NULL CHECK (qodo_iteration BETWEEN 0 AND 3),
-    child_session_id TEXT NOT NULL
+    child_session_id TEXT NOT NULL,
+    repair_verification_json TEXT
   );
 
   CREATE INDEX IF NOT EXISTS campaigns_status_idx ON campaigns(status, created_at, id);
@@ -154,6 +156,7 @@ export function migrateCampaignStore(database: Database.Database): void {
         UPDATE external_action_claims SET lease_started_at = attempted_at WHERE lease_started_at IS NULL;
       `);
     }
+    if (!externalActionClaimColumns.some(({ name }) => name === "repair_verification_receipt")) database.exec("ALTER TABLE external_action_claims ADD COLUMN repair_verification_receipt TEXT");
     const approvalColumns = database.prepare("PRAGMA table_info(approvals)").all() as { name: string }[];
     if (!approvalColumns.some(({ name }) => name === "active")) {
       database.exec("ALTER TABLE approvals ADD COLUMN active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)); UPDATE approvals SET active = 0 WHERE status <> 'approved';");
@@ -189,6 +192,8 @@ export function migrateCampaignStore(database: Database.Database): void {
     ] as const) {
       if (!qodoFindingColumns.some((column) => column.name === name)) database.exec(`ALTER TABLE qodo_findings ADD COLUMN ${name} ${declaration}`);
     }
+    const operationResultColumns = database.prepare("PRAGMA table_info(campaign_operation_results)").all() as { name: string }[];
+    if (!operationResultColumns.some(({ name }) => name === "repair_verification_json")) database.exec("ALTER TABLE campaign_operation_results ADD COLUMN repair_verification_json TEXT");
     // Incomplete or untrusted rows are immutable audit history, not authority.
     database.exec("UPDATE approvals SET active = 0 WHERE status = 'approved' AND (trusted_proposal_authority <> 1 OR proposal_id IS NULL OR expected_campaign_version IS NULL OR expected_campaign_status IS NULL OR payload_json IS NULL)");
     const duplicateLiveApproval = database.prepare(`

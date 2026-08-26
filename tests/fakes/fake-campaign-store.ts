@@ -301,9 +301,11 @@ export class FakeCampaignStore implements CampaignStore {
   }
 
   async applyQodoReview(campaignId: string, record: QodoReviewClaimRecord): Promise<void> {
+    record.persistenceLease?.assertCurrent();
     const beforeUpdate = this.beforeUpdate;
     delete this.beforeUpdate;
     await beforeUpdate?.();
+    record.persistenceLease?.assertCurrent();
     const snapshot = this.#required(campaignId);
     this.#assertNoBlockingExternalAction(snapshot);
     this.#assertClaim(snapshot, campaignId, record.expectedVersion, "qodo_review");
@@ -350,6 +352,7 @@ export class FakeCampaignStore implements CampaignStore {
   }
 
   async escalateQodoReview(campaignId: string, record: QodoEscalationRecord): Promise<void> {
+    record.persistenceLease?.assertCurrent();
     const snapshot = this.#required(campaignId);
     this.#assertClaim(snapshot, campaignId, record.expectedVersion, record.expectedStatus);
     this.#assertEventAvailable(record.event.id);
@@ -383,7 +386,7 @@ export class FakeCampaignStore implements CampaignStore {
     if (currentCommitSha !== record.expectedCurrentCommitSha) throw new CampaignVersionConflict(campaignId, record.expectedVersion);
     if (record.payload.action === "push_branch" && currentCommitSha === undefined) throw new Error("Branch push requires a current campaign head");
     if ((record.payload.action === "create_pr" || record.payload.action === "update_pr") && record.payload.commitSha !== currentCommitSha) throw new Error("External action commit does not match current campaign head");
-    if (record.payload.action === "update_pr") assertUpdatePullRequestIdentity(snapshot, record.payload);
+    const repairVerificationReceipt = record.payload.action === "update_pr" ? assertUpdatePullRequestIdentity(snapshot, record.payload) : undefined;
     if (externalActionDigest(record.payload) !== record.actionDigest) throw new Error("External action payload digest does not match claim");
     const approvalIndex = snapshot.approvals.findIndex(({ id }) => id === record.approvalId);
     const approval = snapshot.approvals[approvalIndex];
@@ -424,6 +427,7 @@ export class FakeCampaignStore implements CampaignStore {
       status: "active",
       attemptedAt: consumedAt,
       leaseStartedAt,
+      ...(repairVerificationReceipt === undefined ? {} : { repairVerificationReceipt }),
     };
     const durableConsumed = structuredClone({ ...consumed, active: false });
     const durableClaim = structuredClone(claim);
@@ -510,7 +514,8 @@ export class FakeCampaignStore implements CampaignStore {
     if (record.event.eventType !== "external_action_reconciled") throw new Error("Invalid external action reconciliation event");
     if (record.observedCanonicalHead !== undefined) assertCommitSha(record.observedCanonicalHead);
     const current = singletonCommit(snapshot);
-    const changed = record.observedCanonicalHead !== undefined && record.observedCanonicalHead !== current;
+    const preserveVerifiedRepair = record.disposition === "confirmed_not_completed" && claim.payload.action === "update_pr";
+    const changed = !preserveVerifiedRepair && record.observedCanonicalHead !== undefined && record.observedCanonicalHead !== current;
     const confirmedUpdate = record.disposition === "confirmed_completed" && claim.payload.action === "update_pr";
     if (confirmedUpdate && (record.observedCanonicalHead !== claim.payload.commitSha || current !== claim.payload.commitSha || snapshot.campaign.status !== "repair" || singletonPullRequest(snapshot) !== claim.payload.pullRequest)) {
       throw new Error("Confirmed update_pr reconciliation does not match current authority");
@@ -597,6 +602,7 @@ export class FakeCampaignStore implements CampaignStore {
   }
 
   async recordChildResult(campaignId: string, record: ChildResultRecord): Promise<number> {
+    record.persistenceLease?.assertCurrent();
     if (record.childSessionId.trim().length === 0) throw new Error("Invalid child session identifier");
     if (record.newCommitSha !== undefined) assertCommitSha(record.newCommitSha);
     const snapshot = this.#required(campaignId);
@@ -627,7 +633,7 @@ export class FakeCampaignStore implements CampaignStore {
       const resultingCommit = nextReferences.find(({ kind }) => kind === "commit")?.value;
       if (result === undefined || result.currentCommitSha !== resultingCommit) throw new Error("Completed child result lacks typed operation authority");
       if (result.qodoIteration !== snapshot.campaign.qodoIteration) throw new Error("Operation result Qodo iteration does not match campaign");
-      if (result.operation === "repair" && (result.pullRequest === undefined || !isPullRequest(result.pullRequest, snapshot.campaign.repository) || singletonPullRequest(snapshot) !== result.pullRequest)) throw new Error("Repair result lacks current pull request identity");
+      if (result.operation === "repair" && (result.pullRequest === undefined || !isPullRequest(result.pullRequest, snapshot.campaign.repository) || singletonPullRequest(snapshot) !== result.pullRequest || !validRepairAuthority(result.repairVerification, campaignId, snapshot.campaign.repository, result.pullRequest, record.childSessionId, record.sandboxSessionId, result.currentCommitSha))) throw new Error("Repair result lacks exact verified publication authority");
       snapshot.operationResults.push({ ...structuredClone(result), eventId: record.event.id, resultingCampaignVersion: resultingVersion, childSessionId: record.childSessionId });
     } else if (record.operationResult !== undefined) throw new Error("Typed operation authority requires a completed child event");
     snapshot.externalReferences = nextReferences;
@@ -742,6 +748,22 @@ function assertCommitSha(commitSha: string): void {
   if (!/^[0-9a-f]{40}$/u.test(commitSha)) throw new Error("Invalid current commit SHA");
 }
 
+function validRepairAuthority(
+  value: import("../../src/application/ports/campaign-store.js").RepairVerificationAuthority | undefined,
+  campaignId: string,
+  repository: string,
+  pullRequest: string,
+  childSessionId: string,
+  sandboxSessionId: string | undefined,
+  commitSha: string,
+): boolean {
+  return value !== undefined && (value as unknown as Record<string, unknown>).testsPassed === true && value.receipt === value.receipt.trim() && value.receipt.length >= 16 && value.receipt.length <= 512 && value.campaignId === campaignId && value.repository === repository &&
+    value.pullRequest === pullRequest && value.childSessionId === childSessionId && value.sandboxSessionId === sandboxSessionId &&
+    value.candidateCommitSha === commitSha && value.expectedParentCommitSha !== commitSha && value.testPolicy === "openquest-repair-tests-v1" &&
+    value.commands.length > 0 && value.commands.length <= 100 && value.commands.every((command) => command.trim().length > 0 && command.length <= 2_000) &&
+    value.evidence.length > 0 && value.evidence.length <= 100 && value.evidence.every((evidence) => (evidence as unknown as Record<string, unknown>).kind === "direct" && evidence.sourceUrl.length <= 2_048 && evidence.observation.trim().length > 0 && evidence.observation.length <= 2_000);
+}
+
 function canonicalTimestamp(value: string, label: string): string {
   const instant = Date.parse(value);
   if (!Number.isFinite(instant)) throw new TypeError(`Invalid ${label} timestamp`);
@@ -771,15 +793,18 @@ function singletonPullRequest(snapshot: MutableSnapshot): string | undefined {
 function assertUpdatePullRequestIdentity(
   snapshot: MutableSnapshot,
   payload: Extract<import("../../src/application/external-action.js").ExternalActionPayload, { action: "update_pr" }>,
-): void {
+): string {
   const pullRequests = snapshot.externalReferences.filter(({ kind }) => kind === "pull_request");
   if (pullRequests.length !== 1 || pullRequests[0]?.value !== payload.pullRequest || !isPullRequest(payload.pullRequest, snapshot.campaign.repository)) {
     throw new Error("External action pull request does not match campaign memory");
   }
-  const matches = snapshot.operationResults.filter((result) => result.operation === "repair" &&
+  const matches = snapshot.operationResults.filter((result) => result.operation === "repair" && result.repairVerification !== undefined &&
     result.resultingCampaignVersion === snapshot.campaign.version && result.currentCommitSha === payload.commitSha &&
     result.pullRequest === payload.pullRequest && result.qodoIteration === snapshot.campaign.qodoIteration);
   if (matches.length !== 1) throw new Error("Campaign lacks one unambiguous repair completion event for this update");
+  const receipt = matches[0]?.repairVerification?.receipt;
+  if (receipt === undefined) throw new Error("Campaign repair verification receipt is missing");
+  return receipt;
 }
 
 function assertExternalActionEventVersion(payload: unknown, expectedVersion: number, resultingVersion: number): void {

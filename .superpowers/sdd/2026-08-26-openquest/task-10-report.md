@@ -126,3 +126,28 @@ Final verification:
 - `npm run lint`: PASS.
 - `npm run build`: PASS; Vite retained the existing large-chunk advisory.
 - `git diff --check`: PASS.
+
+## Fix Round 3
+
+Closed the remaining generation-fencing, repair-authority, reconciliation, route-deadline, replay, and readiness gaps without adding new test cases, per the updated implementation-only scope.
+
+- Added revocable persistence leases to scheduled review generations. `SyncReview` checks the current lease after every provider or harness await, before every subsequent store access, and store adapters re-check it inside atomic review, escalation, and child-result transactions. Shutdown timeout revokes the lease before detaching the old generation; late repair output cannot touch a closed or restarted SQLite store.
+- Replaced the loose repair verifier result with a strict, bounded receipt bound to campaign, repository, PR, child session, sandbox, expected parent, candidate commit, explicit `openquest-repair-tests-v1` policy, passed tests, commands, and direct evidence. The canonical receipt is persisted in both operation provenance and the operation-result table. An `update_pr` claim now requires the exact verified operation result and durably retains its receipt.
+- `confirmed_not_completed` reconciliation for `update_pr` now records the observed remote head only as reconciliation evidence. It preserves the locally verified repair head, repair status, version, and Qodo iteration so a fresh exact proposal can be issued.
+- The review-provider HTTP route now has a real deadline and request-abort fence. Timeout returns a bounded 503 and revokes persistence authority; a provider that ignores abort cannot write later.
+- Authenticated replay compares canonical findings by finding ID, independent of input ordering.
+- Production readiness now depends dynamically on review authority, repair verifier, recent store health, and scheduler lifecycle. Startup runs an immediate health tick; loss, stale health, shutdown, and recovery are reflected without leaking provider details.
+
+Implementation compatibility updated existing SQLite repair-authority fixtures only; no new tests were added.
+
+Verification:
+
+- Existing full suite: PASS, 25 files / 416 tests.
+- Focused Qodo job/API suite: PASS, 2 files / 47 tests.
+- `npm run typecheck`: PASS.
+- `npm run lint`: PASS.
+- `npm run build`: PASS; Vite retained the existing large-chunk advisory.
+- `git diff --check`: PASS.
+- Live/manual HTTP timeout smoke: 503, campaign version unchanged, zero durable events.
+- Live/manual SQLite shutdown/restart smoke: detached generation reported `shutdown_timeout`; restarted campaign remained `repair` at the reviewed head with no late repair commit.
+- Live/manual readiness smoke: `health_stale` -> ready -> provider unavailable -> repair verifier unavailable -> ready -> scheduler stopped.

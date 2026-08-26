@@ -212,7 +212,8 @@ export class RunCampaign {
         throw new ApplicationError("campaign_conflict");
       }
     }
-    const resultingVersion = snapshot.campaign.version + (confirmedUpdate || (reconciliation.observedCanonicalHead !== undefined && reconciliation.observedCanonicalHead !== current) ? 1 : 0);
+    const preserveVerifiedRepair = reconciliation.disposition === "confirmed_not_completed" && claim.payload.action === "update_pr";
+    const resultingVersion = snapshot.campaign.version + (confirmedUpdate || (!preserveVerifiedRepair && reconciliation.observedCanonicalHead !== undefined && reconciliation.observedCanonicalHead !== current) ? 1 : 0);
     await this.store.reconcileExternalAction(campaignId, {
       claimId: reconciliation.claimId,
       disposition: reconciliation.disposition,
