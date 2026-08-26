@@ -3,7 +3,7 @@ import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { createOpenQuestApi, type FetchLike } from "../../src/web/api.js";
+import { createOpenQuestApi, type CampaignSnapshot, type FetchLike } from "../../src/web/api.js";
 import { App } from "../../src/web/App.js";
 import type { Evidence } from "../../src/domain/evidence.js";
 
@@ -19,6 +19,16 @@ const realCampaignResponse = {
   qodoIteration: 0,
   version: 1,
 } as const;
+const realCampaignSnapshot: CampaignSnapshot = {
+  ...realCampaignResponse,
+  evidence: [],
+  events: [{ id: "created", eventType: "campaign_created", occurredAt: "2026-08-26T00:00:00Z" }],
+  approvals: [],
+  qodoFindings: [],
+  externalReferences: [],
+  externalActionClaims: [],
+  approvalProposal: null,
+};
 const canonicalEvidence = {
   id: "guide",
   sourceUrl: "https://github.com/owner/repo/blob/main/CONTRIBUTING.md",
@@ -84,6 +94,34 @@ describe("OpenQuest browser API", () => {
     const api = createOpenQuestApi({ fetch: async () => new Response(JSON.stringify(realCampaignResponse), { status: 201 }), operatorCapability: () => "runtime-only" });
 
     await expect(api.createCampaign({ repository: "owner/repo", issueNumber: 1, issueUrl: "https://github.com/owner/repo/issues/1", lane: "easy_win" })).resolves.toEqual({ id: ":review.1" });
+  });
+
+  it("loads a strictly validated durable campaign snapshot without sending a capability", async () => {
+    const fetcher = vi.fn<FetchLike>(async () => new Response(JSON.stringify(realCampaignSnapshot), { status: 200 }));
+    const api = createOpenQuestApi({ fetch: fetcher, baseUrl: "https://openquest.test", operatorCapability: () => "runtime-only" });
+
+    await expect(api.getCampaign(":review.1")).resolves.toEqual(realCampaignSnapshot);
+    expect(fetcher).toHaveBeenCalledWith("https://openquest.test/api/campaigns/%3Areview.1", expect.not.objectContaining({ headers: expect.anything() }));
+  });
+
+  it("rejects malformed durable campaign facts at the browser boundary", async () => {
+    const api = createOpenQuestApi({ fetch: async () => new Response(JSON.stringify({ ...realCampaignSnapshot, events: [{ ...realCampaignSnapshot.events[0], transcript: "do not expose" }] }), { status: 200 }) });
+
+    await expect(api.getCampaign(":review.1")).rejects.toThrow(/campaign/i);
+  });
+
+  it("issues approval for the exact payload with the supplied human-confirmation key", async () => {
+    const payload = { action: "create_pr" as const, repository: "owner/repo", issueNumber: 1, branch: "openquest/fix-1", baseBranch: "main", commitSha: "a".repeat(40), title: "Fix issue 1", body: "AI-assisted contribution reviewed by a human." };
+    const approval = { id: "approval-1", action: "create_pr", actionDigest: `sha256:${"b".repeat(64)}`, status: "approved", issuedAt: "2026-08-26T00:00:00Z" } as const;
+    const fetcher = vi.fn<FetchLike>(async () => new Response(JSON.stringify({ approval, brief: { action: "Create pull request", repository: "owner/repo", issueNumber: 1, target: "main", branch: "openquest/fix-1", commitSha: "a".repeat(40), title: "Fix issue 1", body: "AI-assisted contribution reviewed by a human." } }), { status: 201 }));
+    const api = createOpenQuestApi({ fetch: fetcher, operatorCapability: () => "runtime-only" });
+
+    await expect(api.issueApproval(":review.1", payload, "approval-click-0001")).resolves.toEqual(approval);
+    expect(fetcher).toHaveBeenCalledWith("/api/campaigns/%3Areview.1/approvals", expect.objectContaining({
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer runtime-only", "idempotency-key": "approval-click-0001" },
+      body: JSON.stringify({ payload }),
+    }));
   });
 
   it("rejects campaign responses with unexpected fields", async () => {

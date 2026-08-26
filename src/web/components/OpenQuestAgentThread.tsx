@@ -1,0 +1,26 @@
+import { useState } from "react";
+import { TrueForgeUI } from "@truefoundry/trueforge-ui";
+
+interface OpenQuestAgentThreadProps { readonly sessionId: string; readonly trueForgeBaseUrl?: string; }
+
+export function OpenQuestAgentThread({ sessionId, trueForgeBaseUrl = "http://localhost:8790" }: OpenQuestAgentThreadProps) {
+  const [error, setError] = useState(false);
+  return <section aria-labelledby="agent-thread-heading" className="campaign-panel agent-thread" data-session-id={sessionId} data-testid="agent-thread">
+    <div className="panel-heading">
+      <div><p className="eyebrow">Live workspace</p><h2 id="agent-thread-heading">OpenQuest agent</h2></div>
+      <span className="status-pill">Session resumed</span>
+    </div>
+    <p>The agent workspace resumes the campaign’s parent session. Durable evidence and decisions remain in the campaign record beside it.</p>
+    {error ? <p className="campaign-error" role="alert">The agent workspace could not connect. Campaign facts and approvals remain available.</p> : null}
+    <div className="trueforge-frame">
+      <TrueForgeUI
+        agentConfig={{ mode: "SingleAgent", name: "openquest" }}
+        initialSessionId={sessionId}
+        layout="drawer"
+        onError={() => { setError(true); }}
+        server={{ type: "trueforge", baseUrl: trueForgeBaseUrl }}
+        theme={{ brand: { name: "OpenQuest", logo: "/openquest-mark.svg" }, mode: "dark", preset: "trueforge" }}
+      />
+    </div>
+  </section>;
+}

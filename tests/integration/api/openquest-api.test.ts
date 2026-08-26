@@ -277,6 +277,55 @@ describe("OpenQuest API", () => {
     await app.close();
   });
 
+  it("exposes only a server-validated durable exact-action proposal", async () => {
+    const { app, store } = buildTestApp();
+    const head = "a".repeat(40);
+    const payload = { action: "create_pr" as const, repository: "owner/repo", issueNumber: 42, branch: "openquest/fix-42", baseBranch: "main", commitSha: head, title: "Fix issue 42", body: "AI-assisted contribution reviewed by a human." };
+    store.seed(campaign({ status: "contribution_approval", version: 7 }));
+    store.seedExternalReference("campaign-1", { kind: "commit", value: head });
+    await store.appendEvent("campaign-1", {
+      id: "proposal-1",
+      eventType: "external_action_proposed",
+      occurredAt: "2026-08-26T00:05:00Z",
+      payload: {
+        payload,
+        brief: {
+          policy: "Focused pull requests with tests are welcome.",
+          approach: "Guard the empty result before reading it.",
+          files: ["src/dependencies.ts"],
+          risks: ["Provider responses may be malformed."],
+          tests: ["npm test"],
+          safetyResult: "Static preflight passed.",
+          qodoStatus: "No open high-severity findings.",
+          aiDisclosure: "AI-assisted contribution prepared by OpenQuest and reviewed by a human.",
+        },
+      },
+    });
+
+    const response = await app.inject({ method: "GET", url: "/api/campaigns/campaign-1" });
+
+    expect(response.json().approvalProposal).toEqual({ payload, actionDigest: externalActionDigest(payload), brief: expect.objectContaining({ safetyResult: "Static preflight passed." }) });
+    await app.close();
+  });
+
+  it("fails closed when a durable proposal does not match the current campaign head", async () => {
+    const { app, store } = buildTestApp();
+    store.seed(campaign({ status: "contribution_approval", version: 7 }));
+    store.seedExternalReference("campaign-1", { kind: "commit", value: "a".repeat(40) });
+    await store.appendEvent("campaign-1", {
+      id: "stale-proposal",
+      eventType: "external_action_proposed",
+      occurredAt: "2026-08-26T00:05:00Z",
+      payload: {
+        payload: { action: "create_pr", repository: "owner/repo", issueNumber: 42, branch: "openquest/fix-42", baseBranch: "main", commitSha: "b".repeat(40), title: "Stale", body: "Stale body" },
+        brief: { policy: "Policy", approach: "Approach", files: ["src/a.ts"], risks: ["Risk"], tests: ["npm test"], safetyResult: "Passed", qodoStatus: "Clear", aiDisclosure: "AI-assisted" },
+      },
+    });
+
+    expect((await app.inject({ method: "GET", url: "/api/campaigns/campaign-1" })).json().approvalProposal).toBeNull();
+    await app.close();
+  });
+
   it("maps catalog outages to a fixed non-secret problem", async () => {
     const catalog: GithubCatalogPort = {
       listRepositories: vi.fn(async () => { throw new HarnessUnavailable(); }),

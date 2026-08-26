@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { createOpenQuestApi, type OpenQuestApi, type OpenQuestApiOptions } from "./api.js";
 import { DiscoverPage } from "./routes/DiscoverPage.js";
+import { CampaignPage } from "./routes/CampaignPage.js";
 import { OnboardingPage } from "./routes/OnboardingPage.js";
 import type { Space } from "../domain/discovery.js";
 
@@ -50,8 +51,15 @@ export function App({ api, operatorCapability }: AppProps) {
   const selectedSpaces = spacesFromLocation();
   const disconnect = () => { setEnteredCapability(""); setConnected(false); navigate("/"); };
   if (path === "/discover" && selectedSpaces.length > 0) return <><button className="disconnect" onClick={disconnect} type="button">Disconnect</button><DiscoverPage api={client} navigate={navigate} spaces={selectedSpaces} /></>;
-  if (path.startsWith("/campaigns/")) return <><button className="disconnect" onClick={disconnect} type="button">Disconnect</button><main className="state-card"><h1 tabIndex={-1}>Campaign created</h1><p>Your contribution campaign is ready for its policy review.</p></main></>;
+  const campaignId = campaignIdFromPath(path);
+  if (campaignId !== undefined) return <><button className="disconnect" onClick={disconnect} type="button">Disconnect</button><CampaignPage api={client} campaignId={campaignId} /></>;
   return <><button className="disconnect" onClick={() => { setEnteredCapability(""); setConnected(false); }} type="button">Disconnect</button>{path === "/discover" ? <p className="state-card" role="status">Choose spaces before discovering repositories.</p> : null}<OnboardingPage api={client} navigate={navigate} /></>;
+}
+
+function campaignIdFromPath(path: string): string | undefined {
+  const match = /^\/campaigns\/([^/]+)$/u.exec(path);
+  if (match?.[1] === undefined) return undefined;
+  try { return decodeURIComponent(match[1]); } catch { return undefined; }
 }
 
 function spacesFromLocation(): readonly Space[] {
