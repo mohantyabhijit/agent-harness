@@ -3,7 +3,7 @@
     "fullName": "legacy/famous-dormant",
     "url": "https://github.com/legacy/famous-dormant",
     "description": "A well-known but inactive project.",
-    "spaces": ["developer_tools"],
+    "spaces": ["developer_tools", "web"],
     "license": "MIT",
     "isPublic": true,
     "signals": {
@@ -29,7 +29,7 @@
     "fullName": "friendly/healthy-contributor",
     "url": "https://github.com/friendly/healthy-contributor",
     "description": "An active project with reviewed external pull requests.",
-    "spaces": ["developer_tools"],
+    "spaces": ["developer_tools", "web"],
     "license": "Apache-2.0",
     "isPublic": true,
     "signals": {
@@ -80,6 +80,32 @@
         "sourceUrl": "https://github.com/community/same-score/blob/main/CONTRIBUTING.md",
         "retrievedAt": "2026-08-26T00:00:00Z",
         "observation": "Contribution guide is present.",
+        "kind": "direct"
+      }
+    ]
+  },
+  {
+    "fullName": "private/internal-tool",
+    "url": "https://github.com/private/internal-tool",
+    "description": "An active private repository that must never be recommended.",
+    "spaces": ["developer_tools"],
+    "license": "MIT",
+    "isPublic": false,
+    "signals": {
+      "stars": 0,
+      "recentActivity": 1,
+      "contributionGuide": true,
+      "ciHealthy": true,
+      "externalPrAcceptance": 1,
+      "topicMatch": 1,
+      "maintainerResponse": 1
+    },
+    "evidence": [
+      {
+        "id": "private-visibility",
+        "sourceUrl": "https://github.com/private/internal-tool",
+        "retrievedAt": "2026-08-26T00:00:00Z",
+        "observation": "Repository visibility is private.",
         "kind": "direct"
       }
     ]

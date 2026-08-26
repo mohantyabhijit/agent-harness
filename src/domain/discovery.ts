@@ -30,7 +30,7 @@ export interface RepositoryCandidate {
   readonly description: string;
   readonly spaces: readonly Space[];
   readonly license: string | null;
-  readonly isPublic?: boolean;
+  readonly isPublic: boolean;
   readonly signals: RepositorySignals;
   readonly evidence: readonly Evidence[];
 }
@@ -58,6 +58,7 @@ export interface WeightedContribution {
 export interface RepositoryScoreExplanation {
   readonly inputSignals: RepositorySignals;
   readonly weightedContributions: readonly WeightedContribution[];
+  readonly evidence: readonly Evidence[];
   readonly sourceUrls: readonly string[];
   readonly retrievedAt: readonly string[];
 }
@@ -93,6 +94,7 @@ export function explainRepositoryScore(
   return {
     inputSignals: signals,
     weightedContributions,
+    evidence,
     sourceUrls: evidence.map((item) => item.sourceUrl),
     retrievedAt: evidence.map((item) => item.retrievedAt),
   };
@@ -105,7 +107,8 @@ export function classifyIssue(input: {
   readonly dependencyRisk: number;
   readonly estimatedHours: number;
 }): "easy_win" | "long_term" {
-  return input.affectedAreas <= 2 &&
+  return input.clarity >= 0.7 &&
+    input.affectedAreas <= 2 &&
     input.testComplexity < 0.6 &&
     input.dependencyRisk < 0.5 &&
     input.estimatedHours <= 6

@@ -22,7 +22,8 @@ export class DiscoverRepositories {
       throw new Error("Select at least one known space");
     }
 
-    const repositories = await this.catalog.listRepositories(selectedSpaces);
+    const normalizedSpaces = [...new Set(selectedSpaces)];
+    const repositories = await this.catalog.listRepositories(normalizedSpaces);
     return repositories
       .filter(isDiscoverable)
       .map((repository) => ({
@@ -41,5 +42,7 @@ function isKnownSpace(value: string): value is Space {
 }
 
 function isDiscoverable(repository: RepositoryCandidate): boolean {
-  return repository.isPublic !== false && repository.license !== null && repository.signals.recentActivity > 0;
+  // Catalog adapters are untrusted at runtime; only an explicit true is public.
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-boolean-literal-compare
+  return repository.isPublic === true && repository.license !== null && repository.signals.recentActivity > 0;
 }
