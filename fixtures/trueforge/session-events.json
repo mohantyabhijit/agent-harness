@@ -1,0 +1,34 @@
+[
+  {
+    "createdAt": "2026-08-26T00:00:00Z",
+    "id": "event-message",
+    "threadId": "main",
+    "type": "model.message",
+    "content": "Preparing verified output."
+  },
+  {
+    "createdAt": "2026-08-26T00:00:01Z",
+    "id": "event-done",
+    "threadId": null,
+    "type": "turn.done",
+    "state": {
+      "completedAt": "2026-08-26T00:00:01Z",
+      "status": "done",
+      "requiredActions": [],
+      "output": {
+        "createdAt": "2026-08-26T00:00:01Z",
+        "id": "event-final-message",
+        "threadId": "main",
+        "type": "model.message",
+        "content": "{\"summary\":\"Verified the smallest patch in a fresh sandbox.\",\"artifacts\":[\"artifacts/change-brief.md\"],\"output\":{\"status\":\"verified\"}}"
+      }
+    }
+  },
+  {
+    "createdAt": "2026-08-26T00:00:02Z",
+    "id": "event-after-done",
+    "threadId": "main",
+    "type": "model.message",
+    "content": "This event must not be consumed."
+  }
+]
