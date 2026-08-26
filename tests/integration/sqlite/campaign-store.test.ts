@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { SqliteCampaignStore } from "../../../src/adapters/sqlite/campaign-store.js";
 import { CampaignVersionConflict } from "../../../src/application/ports/campaign-store.js";
 import { issueApproval } from "../../../src/domain/approval.js";
+import { transitionCampaign } from "../../../src/domain/campaign.js";
 import { campaign, evidence } from "../../builders.js";
 
 const databases: Database.Database[] = [];
@@ -313,9 +314,9 @@ describe("SqliteCampaignStore", () => {
   it("atomically replaces the singleton current commit while preserving multi-valued sessions", async () => {
     const { store } = openMemoryStore();
     await store.create(campaign());
-    await store.setExternalReference("campaign-1", { kind: "commit", value: "a".repeat(40) });
+    await store.replaceCurrentCommit("campaign-1", "a".repeat(40), 1, "policy_review");
     await store.setExternalReference("campaign-1", { kind: "child_session", value: "session-1" });
-    await store.setExternalReference("campaign-1", { kind: "commit", value: "b".repeat(40) });
+    await store.replaceCurrentCommit("campaign-1", "b".repeat(40), 2, "policy_review");
     await store.setExternalReference("campaign-1", { kind: "child_session", value: "session-2" });
 
     expect((await store.get("campaign-1"))?.externalReferences).toEqual([
@@ -323,6 +324,55 @@ describe("SqliteCampaignStore", () => {
       { kind: "child_session", value: "session-2" },
       { kind: "commit", value: "b".repeat(40) },
     ]);
+  });
+
+  it("versions current-head replacement and rejects generic commit writes", async () => {
+    const { store } = openMemoryStore();
+    await store.create(campaign({ status: "implementation", version: 4 }));
+
+    await expect(store.setExternalReference("campaign-1", { kind: "commit", value: "a".repeat(40) })).rejects.toThrow(/commit/i);
+    await expect(store.replaceCurrentCommit("campaign-1", "a".repeat(40), 4, "implementation")).resolves.toBe(5);
+    await expect(store.replaceCurrentCommit("campaign-1", "b".repeat(40), 4, "implementation")).rejects.toThrow(/version/i);
+    expect((await store.get("campaign-1"))?.campaign.version).toBe(5);
+    expect((await store.get("campaign-1"))?.externalReferences).toEqual([{ kind: "commit", value: "a".repeat(40) }]);
+  });
+
+  it("atomically fences child result references, event, and commit against recovery", async () => {
+    const { store } = openMemoryStore();
+    await store.create(campaign({ status: "implementation", version: 4 }));
+    const recovered = transitionCampaign(campaign({ status: "implementation", version: 4 }), "human_escalation");
+    await store.update(recovered, 4);
+
+    await expect(store.recordChildResult("campaign-1", {
+      expectedVersion: 4,
+      expectedStatus: "implementation",
+      childSessionId: "late-child",
+      event: { id: "late-event", eventType: "campaign_operation_completed", payload: { claimedCampaignVersion: 4 }, occurredAt: "2026-08-26T00:01:00Z" },
+      newCommitSha: "b".repeat(40),
+    })).rejects.toThrow(/version/i);
+    const snapshot = await store.get("campaign-1");
+    expect(snapshot?.externalReferences).toEqual([]);
+    expect(snapshot?.events).toEqual([]);
+  });
+
+  it("records a child result and changed head as one versioned transaction", async () => {
+    const { store } = openMemoryStore();
+    await store.create(campaign({ status: "implementation", version: 4 }));
+    const version = await store.recordChildResult("campaign-1", {
+      expectedVersion: 4,
+      expectedStatus: "implementation",
+      childSessionId: "child-1",
+      event: { id: "child-event", eventType: "campaign_operation_completed", payload: { claimedCampaignVersion: 4, resultingCampaignVersion: 5 }, occurredAt: "2026-08-26T00:01:00Z" },
+      newCommitSha: "b".repeat(40),
+    });
+
+    expect(version).toBe(5);
+    expect((await store.get("campaign-1"))?.externalReferences).toEqual([
+      { kind: "child_session", value: "child-1" },
+      { kind: "commit", value: "b".repeat(40) },
+      { kind: "sandbox", value: "child-1" },
+    ]);
+    expect((await store.get("campaign-1"))?.events).toHaveLength(1);
   });
 
   it("upgrades existing external-reference tables to retain commit identity", async () => {
@@ -342,7 +392,7 @@ describe("SqliteCampaignStore", () => {
     `);
 
     const migrated = new SqliteCampaignStore(database);
-    await migrated.setExternalReference("campaign-1", { kind: "commit", value: "d".repeat(40) });
+    await migrated.replaceCurrentCommit("campaign-1", "d".repeat(40), 1, "policy_review");
 
     expect((await migrated.get("campaign-1"))?.externalReferences).toEqual([
       { kind: "branch", value: "openquest/fix" },

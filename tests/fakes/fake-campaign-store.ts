@@ -2,6 +2,7 @@ import {
   CampaignIdentityConflict,
   CampaignVersionConflict,
   type CampaignEvent,
+  type ChildResultRecord,
   type CampaignSnapshot,
   type CampaignStore,
   type ExternalReference,
@@ -30,6 +31,7 @@ export class FakeCampaignStore implements CampaignStore {
   readonly #eventIds = new Set<string>();
   createBarrier?: () => Promise<void>;
   beforeConsumeApproval?: () => Promise<void>;
+  beforeUpdate?: () => Promise<void>;
   failNextCreateEvent = false;
   failNextUpdate = false;
   failNextExternalReference = false;
@@ -37,6 +39,10 @@ export class FakeCampaignStore implements CampaignStore {
 
   seed(campaign: Campaign): void {
     this.#insert(campaign);
+  }
+
+  seedExternalReference(campaignId: string, reference: ExternalReference): void {
+    this.#required(campaignId).externalReferences.push(structuredClone(reference));
   }
 
   async create(campaign: Campaign, initialEvent?: CampaignEvent): Promise<void> {
@@ -75,6 +81,9 @@ export class FakeCampaignStore implements CampaignStore {
   }
 
   async update(campaign: Campaign, expectedVersion: number): Promise<void> {
+    const beforeUpdate = this.beforeUpdate;
+    delete this.beforeUpdate;
+    await beforeUpdate?.();
     if (this.failNextUpdate) {
       this.failNextUpdate = false;
       throw new CampaignVersionConflict(campaign.id, expectedVersion);
@@ -190,9 +199,7 @@ export class FakeCampaignStore implements CampaignStore {
       throw new Error("External reference persistence failed");
     }
     const snapshot = this.#required(campaignId);
-    if (reference.kind === "commit") {
-      snapshot.externalReferences = snapshot.externalReferences.filter(({ kind }) => kind !== "commit");
-    }
+    if (reference.kind === "commit") throw new Error("Current commit requires a versioned replacement");
     if (
       !snapshot.externalReferences.some(
         (candidate) => candidate.kind === reference.kind && candidate.value === reference.value,
@@ -200,6 +207,61 @@ export class FakeCampaignStore implements CampaignStore {
     ) {
       snapshot.externalReferences.push(structuredClone(reference));
     }
+  }
+
+  async replaceCurrentCommit(
+    campaignId: string,
+    commitSha: string,
+    expectedVersion: number,
+    expectedStatus: CampaignStatus,
+  ): Promise<number> {
+    assertCommitSha(commitSha);
+    const snapshot = this.#required(campaignId);
+    this.#assertClaim(snapshot, campaignId, expectedVersion, expectedStatus);
+    if (this.failNextExternalReference) {
+      this.failNextExternalReference = false;
+      throw new Error("External reference persistence failed");
+    }
+    const current = snapshot.externalReferences.find(({ kind }) => kind === "commit")?.value;
+    if (current === commitSha) return expectedVersion;
+    snapshot.externalReferences = snapshot.externalReferences.filter(({ kind }) => kind !== "commit");
+    snapshot.externalReferences.push({ kind: "commit", value: commitSha });
+    snapshot.campaign = { ...snapshot.campaign, version: expectedVersion + 1 };
+    return expectedVersion + 1;
+  }
+
+  async recordChildResult(campaignId: string, record: ChildResultRecord): Promise<number> {
+    if (record.childSessionId.trim().length === 0) throw new Error("Invalid child session identifier");
+    if (record.newCommitSha !== undefined) assertCommitSha(record.newCommitSha);
+    const snapshot = this.#required(campaignId);
+    this.#assertClaim(snapshot, campaignId, record.expectedVersion, record.expectedStatus);
+    this.#assertEventAvailable(record.event.id);
+    if (this.failNextExternalReference) {
+      this.failNextExternalReference = false;
+      throw new Error("External reference persistence failed");
+    }
+    if (this.failNextEvent) {
+      this.failNextEvent = false;
+      throw new Error("Campaign event persistence failed");
+    }
+    let resultingVersion = record.expectedVersion;
+    const current = snapshot.externalReferences.find(({ kind }) => kind === "commit")?.value;
+    if (record.newCommitSha !== undefined && current !== record.newCommitSha) resultingVersion += 1;
+    assertChildEventVersion(record.event.payload, record.expectedVersion, resultingVersion);
+    const nextReferences = snapshot.externalReferences.filter(({ kind }) => kind !== "commit" || record.newCommitSha === undefined);
+    if (record.newCommitSha !== undefined) nextReferences.push({ kind: "commit", value: record.newCommitSha });
+    for (const kind of ["child_session", "sandbox"] as const) {
+      if (!nextReferences.some((reference) => reference.kind === kind && reference.value === record.childSessionId)) nextReferences.push({ kind, value: record.childSessionId });
+    }
+    snapshot.externalReferences = nextReferences;
+    snapshot.events.push(structuredClone(record.event));
+    this.#eventIds.add(record.event.id);
+    if (resultingVersion !== record.expectedVersion) snapshot.campaign = { ...snapshot.campaign, version: resultingVersion };
+    return resultingVersion;
+  }
+
+  #assertClaim(snapshot: MutableSnapshot, campaignId: string, expectedVersion: number, expectedStatus: CampaignStatus): void {
+    if (snapshot.campaign.version !== expectedVersion || snapshot.campaign.status !== expectedStatus) throw new CampaignVersionConflict(campaignId, expectedVersion);
   }
 
   #insert(campaign: Campaign): void {
@@ -252,4 +314,16 @@ export class FakeCampaignStore implements CampaignStore {
 
 function cloneSnapshot(snapshot: MutableSnapshot): CampaignSnapshot {
   return structuredClone(snapshot);
+}
+
+function assertCommitSha(commitSha: string): void {
+  if (!/^[0-9a-f]{40}$/u.test(commitSha)) throw new Error("Invalid current commit SHA");
+}
+
+function assertChildEventVersion(payload: unknown, expectedVersion: number, resultingVersion: number): void {
+  if (
+    typeof payload !== "object" || payload === null || Array.isArray(payload) ||
+    !("claimedCampaignVersion" in payload) || payload.claimedCampaignVersion !== expectedVersion ||
+    !("resultingCampaignVersion" in payload) || payload.resultingCampaignVersion !== resultingVersion
+  ) throw new Error("Child result event is not bound to the campaign version");
 }

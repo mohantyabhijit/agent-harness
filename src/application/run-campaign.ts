@@ -4,7 +4,7 @@ import {
 } from "../domain/approval.js";
 import { transitionCampaign, type Campaign } from "../domain/campaign.js";
 import type { Clock, IdGenerator } from "./create-campaign.js";
-import type { CampaignSnapshot, CampaignStore } from "./ports/campaign-store.js";
+import type { CampaignEvent, CampaignSnapshot, CampaignStore } from "./ports/campaign-store.js";
 import type {
   CampaignPacket,
   HarnessOperation,
@@ -177,13 +177,31 @@ export class RunCampaign {
     await this.store.update(claimed, snapshot.campaign.version);
     try {
       const result = await this.harness.runChildSession(this.packet(snapshot), "preflight");
-      await this.recordSessionReferences(claimed.id, result);
-      const output = parsePreflightResult(result.output);
-      await this.store.setExternalReference(claimed.id, { kind: "commit", value: output.commitSha });
-      await this.appendOperationEvent(claimed, "preflight_commit_bound", "preflight", result, output);
-      await this.appendOperationEvent(claimed, "campaign_operation_completed", "preflight", result, output);
-      const transitioned = transitionCampaign(claimed, output.verdict === "pass" ? "baseline" : "quarantined");
-      await this.store.update(transitioned, claimed.version);
+      let output: PreflightResult;
+      try {
+        output = parsePreflightResult(result.output);
+      } catch {
+        const rejectedVersion = await this.store.recordChildResult(claimed.id, {
+          expectedVersion: claimed.version,
+          expectedStatus: "preflight",
+          childSessionId: result.sessionId,
+          event: this.operationEvent(claimed, claimed.version, "campaign_operation_rejected", "preflight", result, { reason: "invalid_preflight_output" }),
+        });
+        await this.failClaimedOperation({ ...claimed, version: rejectedVersion }, "quarantined", "preflight_execution_failed");
+        throw new Error("Invalid preflight output");
+      }
+      const commitChanged = currentCommit(snapshot) !== output.commitSha;
+      const resultingVersion = claimed.version + (commitChanged ? 1 : 0);
+      const recordedVersion = await this.store.recordChildResult(claimed.id, {
+        expectedVersion: claimed.version,
+        expectedStatus: "preflight",
+        childSessionId: result.sessionId,
+        event: this.operationEvent(claimed, resultingVersion, "campaign_operation_completed", "preflight", result, output),
+        newCommitSha: output.commitSha,
+      });
+      const recorded = { ...claimed, version: recordedVersion };
+      const transitioned = transitionCampaign(recorded, output.verdict === "pass" ? "baseline" : "quarantined");
+      await this.store.update(transitioned, recorded.version);
       return transitioned;
     } catch {
       await this.failClaimedOperation(claimed, "quarantined", "preflight_execution_failed");
@@ -196,19 +214,25 @@ export class RunCampaign {
     if (campaign.status !== "baseline" && campaign.status !== "verification") {
       throw new Error("Campaign must pass preflight before implementation");
     }
+    const currentCommitSha = requiredCurrentCommit(snapshot);
+    if (campaign.status === "verification" && !hasOperationCompletion(snapshot, "verify", campaign.version, currentCommitSha)) {
+      throw new Error("Campaign lacks a verification completion event for this version");
+    }
     const claimed = transitionCampaign(campaign, "implementation");
     await this.store.update(claimed, campaign.version);
     try {
-      const currentCommitSha = requiredCurrentCommit(snapshot);
       const result = await this.harness.runChildSession(this.packet(snapshot, currentCommitSha), "implement");
-      await this.recordSessionReferences(campaign.id, result);
       const nextCommitSha = implementationCommit(result.output);
-      if (nextCommitSha !== undefined && nextCommitSha !== currentCommitSha) {
-        await this.store.setExternalReference(campaign.id, { kind: "commit", value: nextCommitSha });
-        await this.appendOperationEvent(claimed, "campaign_commit_updated", "implement", result, { previousCommitSha: currentCommitSha, commitSha: nextCommitSha });
-      }
-      await this.appendOperationEvent(claimed, "campaign_operation_completed", "implement", result, { result: result.output, currentCommitSha: nextCommitSha ?? currentCommitSha });
-      return claimed;
+      const resultingCommitSha = nextCommitSha ?? currentCommitSha;
+      const resultingVersion = claimed.version + (resultingCommitSha === currentCommitSha ? 0 : 1);
+      const recordedVersion = await this.store.recordChildResult(campaign.id, {
+        expectedVersion: claimed.version,
+        expectedStatus: "implementation",
+        childSessionId: result.sessionId,
+        event: this.operationEvent(claimed, resultingVersion, "campaign_operation_completed", "implement", result, { result: result.output, previousCommitSha: currentCommitSha, currentCommitSha: resultingCommitSha }),
+        ...(nextCommitSha === undefined ? {} : { newCommitSha: nextCommitSha }),
+      });
+      return { ...claimed, version: recordedVersion };
     } catch {
       await this.failClaimedOperation(claimed, "human_escalation", "implementation_execution_failed");
       throw new Error("Implementation execution failed; human reconciliation required");
@@ -224,7 +248,7 @@ export class RunCampaign {
       throw new Error(reason);
     }
     const currentCommitSha = requiredCurrentCommit(snapshot);
-    if (!hasImplementationCompletion(snapshot, campaign.version, currentCommitSha)) {
+    if (!hasOperationCompletion(snapshot, "implement", campaign.version, currentCommitSha)) {
       throw new Error("Campaign lacks an implementation completion event for this version");
     }
 
@@ -232,42 +256,34 @@ export class RunCampaign {
     await this.store.update(claimed, campaign.version);
     try {
       const result = await this.harness.runChildSession(this.packet(snapshot, currentCommitSha), "verify");
-      await this.recordSessionReferences(campaign.id, result);
-      await this.appendOperationEvent(claimed, "campaign_operation_completed", "verify", result, { result: result.output, currentCommitSha });
-      return claimed;
+      const recordedVersion = await this.store.recordChildResult(campaign.id, {
+        expectedVersion: claimed.version,
+        expectedStatus: "verification",
+        childSessionId: result.sessionId,
+        event: this.operationEvent(claimed, claimed.version, "campaign_operation_completed", "verify", result, { result: result.output, currentCommitSha }),
+      });
+      return { ...claimed, version: recordedVersion };
     } catch {
       await this.failClaimedOperation(claimed, "human_escalation", "verification_execution_failed");
       throw new Error("Verification execution failed; human reconciliation required");
     }
   }
 
-  private async recordSessionReferences(
-    campaignId: string,
-    result: HarnessSessionResult,
-  ): Promise<void> {
-    await this.store.setExternalReference(campaignId, {
-      kind: "child_session",
-      value: result.sessionId,
-    });
-    await this.store.setExternalReference(campaignId, {
-      kind: "sandbox",
-      value: result.sessionId,
-    });
-  }
-
-  private async appendOperationEvent(
+  private operationEvent(
     claimedCampaign: Campaign,
+    resultingCampaignVersion: number,
     eventType: string,
     operation: HarnessOperation,
     result: HarnessSessionResult,
     output: unknown,
-  ): Promise<void> {
-    await this.store.appendEvent(claimedCampaign.id, {
+  ): CampaignEvent {
+    return {
       id: this.nextId(),
       eventType,
       payload: {
         operation,
         claimedCampaignVersion: claimedCampaign.version,
+        resultingCampaignVersion,
         childSessionId: result.sessionId,
         sandboxSessionId: result.sessionId,
         artifacts: result.artifacts,
@@ -275,7 +291,7 @@ export class RunCampaign {
         output,
       },
       occurredAt: this.clock.now(),
-    });
+    };
   }
 
   private packet(snapshot: CampaignSnapshot, currentCommitSha?: string): CampaignPacket {
@@ -371,14 +387,23 @@ function interruptedRecoveryTarget(status: Campaign["status"]): "quarantined" | 
   return undefined;
 }
 
-function hasImplementationCompletion(snapshot: CampaignSnapshot, version: number, commitSha: string): boolean {
+function hasOperationCompletion(
+  snapshot: CampaignSnapshot,
+  operation: "implement" | "verify",
+  version: number,
+  commitSha: string,
+): boolean {
   return snapshot.events.some((event) => {
     if (event.eventType !== "campaign_operation_completed" || !isRecord(event.payload)) {
       return false;
     }
-    return event.payload.operation === "implement" && event.payload.claimedCampaignVersion === version &&
+    return event.payload.operation === operation && event.payload.resultingCampaignVersion === version &&
       isRecord(event.payload.output) && event.payload.output.currentCommitSha === commitSha;
   });
+}
+
+function currentCommit(snapshot: CampaignSnapshot): string | undefined {
+  return snapshot.externalReferences.find(({ kind }) => kind === "commit")?.value;
 }
 
 function parsePreflightResult(output: unknown): PreflightResult {

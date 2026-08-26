@@ -13,6 +13,7 @@ export class FakeHarness implements HarnessPort {
   readonly packets: CampaignPacket[] = [];
   readonly #results = new Map<HarnessOperation, HarnessSessionResult[]>();
   readonly #failures = new Map<HarnessOperation, Error[]>();
+  beforeResult?: (operation: HarnessOperation) => Promise<void>;
   #nextSession = 1;
 
   enqueueResult(operation: HarnessOperation, result: Omit<HarnessSessionResult, "sessionId">): void {
@@ -50,6 +51,9 @@ export class FakeHarness implements HarnessPort {
     if (failure !== undefined) {
       throw failure;
     }
+    const beforeResult = this.beforeResult;
+    delete this.beforeResult;
+    await beforeResult?.(operation);
     const queued = this.#results.get(operation)?.shift();
     return {
       sessionId,

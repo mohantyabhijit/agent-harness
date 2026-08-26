@@ -101,7 +101,7 @@ describe("SyncReview", () => {
   it("rejects a review for a commit that disagrees with durable campaign memory", async () => {
     const { syncReview, store, harness } = fixture();
     await seedReview(store, campaign({ status: "qodo_review", qodoIteration: 1 }));
-    await store.setExternalReference("campaign-1", { kind: "commit", value: "c".repeat(40) });
+    store.seedExternalReference("campaign-1", { kind: "commit", value: "c".repeat(40) });
 
     await expect(syncReview.execute("campaign-1", reviewBatch())).rejects.toThrow(/stale|commit/i);
     expect(harness.operations).toEqual([]);
@@ -141,6 +141,20 @@ describe("SyncReview", () => {
     expect(harness.operations).toEqual(["repair"]);
   });
 
+  it("writes nothing when current head rotates between review snapshot and claim", async () => {
+    const { syncReview, store, harness } = fixture();
+    await seedReview(store, campaign({ status: "qodo_review", qodoIteration: 0 }));
+    store.beforeUpdate = async () => {
+      await store.replaceCurrentCommit("campaign-1", "c".repeat(40), 1, "qodo_review");
+    };
+
+    await expect(syncReview.execute("campaign-1", reviewBatch({ findings: [openHighFinding] }))).rejects.toThrow(/version/i);
+    const snapshot = await store.get("campaign-1");
+    expect(snapshot?.qodoFindings).toEqual([]);
+    expect(snapshot?.events).toEqual([]);
+    expect(harness.operations).toEqual([]);
+  });
+
   it("escalates with fixed evidence when a claimed repair child fails", async () => {
     const { syncReview, store, harness } = fixture();
     await seedReview(store, campaign({ status: "qodo_review", qodoIteration: 1 }));
@@ -171,8 +185,9 @@ describe("SyncReview", () => {
     await seedReview(store, campaign({ status: "qodo_review", qodoIteration: 0 }));
     const first = reviewBatch({ reviewId: "review-a", findings: [openHighFinding] });
     const repairing = await syncReview.execute("campaign-1", first);
-    await store.setExternalReference("campaign-1", { kind: "commit", value: nextCommit });
-    await store.update(transitionCampaign(repairing, "qodo_review"), repairing.version);
+    const rotatedVersion = await store.replaceCurrentCommit("campaign-1", nextCommit, repairing.version, "repair");
+    const rotated = { ...repairing, version: rotatedVersion };
+    await store.update(transitionCampaign(rotated, "qodo_review"), rotated.version);
     const fixed = { ...openHighFinding, status: "fixed" as const, disposition: "Fixed in repair commit" };
     const second = reviewBatch({ reviewId: "review-b", commitSha: nextCommit, findings: [fixed] });
 
@@ -198,7 +213,7 @@ function reviewBatch(overrides: Partial<QodoReviewBatch> = {}): QodoReviewBatch 
 
 async function seedReview(store: FakeCampaignStore, value: ReturnType<typeof campaign>): Promise<void> {
   store.seed(value);
-  await store.setExternalReference(value.id, { kind: "commit", value: commitSha });
+  store.seedExternalReference(value.id, { kind: "commit", value: commitSha });
   await store.setExternalReference(value.id, { kind: "pull_request", value: "https://github.com/owner/repo/pull/7" });
 }
 

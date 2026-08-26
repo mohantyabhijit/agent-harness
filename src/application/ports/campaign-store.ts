@@ -31,6 +31,14 @@ export interface CampaignSnapshot {
   readonly externalReferences: readonly ExternalReference[];
 }
 
+export interface ChildResultRecord {
+  readonly expectedVersion: number;
+  readonly expectedStatus: CampaignStatus;
+  readonly childSessionId: string;
+  readonly event: CampaignEvent;
+  readonly newCommitSha?: string;
+}
+
 export interface CampaignStore {
   create(campaign: Campaign, initialEvent?: CampaignEvent): Promise<void>;
   get(id: string): Promise<CampaignSnapshot | undefined>;
@@ -48,6 +56,13 @@ export interface CampaignStore {
     expectedCampaignStatus: CampaignStatus,
   ): Promise<Approval>;
   recordQodoFinding(campaignId: string, iteration: number, finding: QodoFinding): Promise<void>;
+  replaceCurrentCommit(
+    campaignId: string,
+    commitSha: string,
+    expectedVersion: number,
+    expectedStatus: CampaignStatus,
+  ): Promise<number>;
+  recordChildResult(campaignId: string, record: ChildResultRecord): Promise<number>;
   setExternalReference(campaignId: string, reference: ExternalReference): Promise<void>;
 }
 

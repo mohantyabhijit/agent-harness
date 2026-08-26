@@ -5,8 +5,8 @@ import {
   type QualityGateResult,
 } from "../domain/quality-gate.js";
 import type { Clock, IdGenerator } from "./create-campaign.js";
-import type { CampaignSnapshot, CampaignStore } from "./ports/campaign-store.js";
-import type { CampaignPacket, HarnessPort, HarnessSessionResult } from "./ports/harness.js";
+import type { CampaignEvent, CampaignSnapshot, CampaignStore } from "./ports/campaign-store.js";
+import type { CampaignPacket, HarnessPort } from "./ports/harness.js";
 import { isPullRequest } from "./external-action.js";
 
 export interface QodoReviewBatch {
@@ -83,39 +83,37 @@ export class SyncReview {
     await this.appendReviewEvent(claimed.campaign, "quality_gate_repair_requested", batch, {
       iteration: gate.nextIteration,
     });
-    let result: HarnessSessionResult;
     try {
-      result = await this.harness.runChildSession(
+      const result = await this.harness.runChildSession(
         this.repairPacket(snapshot, claimed.campaign, batch, combinedFindings),
         "repair",
       );
-    } catch {
-      const escalated = transitionCampaign(claimed.campaign, "human_escalation");
-      await this.store.update(escalated, claimed.campaign.version);
-      await this.appendReviewEvent(claimed.campaign, "repair_execution_failed", batch, {
-        reason: "repair_child_failed",
+      await this.store.recordChildResult(campaignId, {
+        expectedVersion: claimed.campaign.version,
+        expectedStatus: "repair",
+        childSessionId: result.sessionId,
+        event: this.reviewEvent(claimed.campaign, "campaign_operation_completed", batch, {
+          operation: "repair",
+          iteration: gate.nextIteration,
+          childSessionId: result.sessionId,
+          sandboxSessionId: result.sessionId,
+          artifacts: result.artifacts,
+          summary: result.summary,
+          output: result.output,
+          resultingCampaignVersion: claimed.campaign.version,
+        }),
       });
-      return escalated;
+      return claimed.campaign;
+    } catch {
+      try {
+        const escalated = transitionCampaign(claimed.campaign, "human_escalation");
+        await this.store.update(escalated, claimed.campaign.version);
+        await this.appendReviewEvent(claimed.campaign, "repair_execution_failed", batch, { reason: "repair_child_failed" });
+        return escalated;
+      } catch {
+        throw new Error("Repair result was fenced by campaign recovery");
+      }
     }
-
-    await this.store.setExternalReference(campaignId, {
-      kind: "child_session",
-      value: result.sessionId,
-    });
-    await this.store.setExternalReference(campaignId, {
-      kind: "sandbox",
-      value: result.sessionId,
-    });
-    await this.appendReviewEvent(claimed.campaign, "campaign_operation_completed", batch, {
-      operation: "repair",
-      iteration: gate.nextIteration,
-      childSessionId: result.sessionId,
-      sandboxSessionId: result.sessionId,
-      artifacts: result.artifacts,
-      summary: result.summary,
-      output: result.output,
-    });
-    return claimed.campaign;
   }
 
   private repairPacket(
@@ -160,7 +158,16 @@ export class SyncReview {
     batch: QodoReviewBatch,
     payload: Readonly<Record<string, unknown>>,
   ): Promise<void> {
-    await this.store.appendEvent(claimedCampaign.id, {
+    await this.store.appendEvent(claimedCampaign.id, this.reviewEvent(claimedCampaign, eventType, batch, payload));
+  }
+
+  private reviewEvent(
+    claimedCampaign: Campaign,
+    eventType: string,
+    batch: QodoReviewBatch,
+    payload: Readonly<Record<string, unknown>>,
+  ): CampaignEvent {
+    return {
       id: this.nextId(),
       eventType,
       payload: {
@@ -173,7 +180,7 @@ export class SyncReview {
         ...payload,
       },
       occurredAt: this.clock.now(),
-    });
+    };
   }
 
   private nextId(): string {

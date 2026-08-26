@@ -105,15 +105,15 @@ describe("RunCampaign", () => {
     ]);
     expect(snapshot?.events.map(({ payload }) => payload)).toEqual(expect.arrayContaining([
       expect.objectContaining({ claimedCampaignVersion: 2, sandboxSessionId: "session-1" }),
-      expect.objectContaining({ claimedCampaignVersion: 4, sandboxSessionId: "session-2" }),
-      expect.objectContaining({ claimedCampaignVersion: 5, sandboxSessionId: "session-3" }),
+      expect.objectContaining({ claimedCampaignVersion: 5, sandboxSessionId: "session-2" }),
+      expect.objectContaining({ claimedCampaignVersion: 6, sandboxSessionId: "session-3" }),
     ]));
   });
 
   it("requires durable implementation completion for the claimed campaign version", async () => {
     const { service, store, harness } = fixture();
     store.seed(campaign({ status: "implementation", version: 4 }));
-    await store.setExternalReference("campaign-1", { kind: "commit", value: commitSha });
+    store.seedExternalReference("campaign-1", { kind: "commit", value: commitSha });
 
     await expect(service.execute("campaign-1", "verify")).rejects.toThrow(/implementation.*event/i);
     expect(harness.operations).toEqual([]);
@@ -123,7 +123,7 @@ describe("RunCampaign", () => {
     for (const failure of ["claim", "child", "reference", "event"] as const) {
       const { service, store, harness } = fixture();
       store.seed(campaign({ status: "baseline", version: 3 }));
-      await store.setExternalReference("campaign-1", { kind: "commit", value: commitSha });
+      store.seedExternalReference("campaign-1", { kind: "commit", value: commitSha });
       if (failure === "claim") store.failNextUpdate = true;
       if (failure === "child") harness.enqueueFailure("implement", new Error("child failed"));
       if (failure === "reference") store.failNextExternalReference = true;
@@ -138,7 +138,7 @@ describe("RunCampaign", () => {
   it("claims a campaign version before dispatch so a concurrent milestone runs once", async () => {
     const { service, store, harness } = fixture();
     store.seed(campaign({ status: "baseline", version: 3 }));
-    await store.setExternalReference("campaign-1", { kind: "commit", value: commitSha });
+    store.seedExternalReference("campaign-1", { kind: "commit", value: commitSha });
 
     const results = await Promise.allSettled([
       service.execute("campaign-1", "implement"),
@@ -161,7 +161,31 @@ describe("RunCampaign", () => {
     expect(harness.packets.at(-2)?.currentCommitSha).toBe(commitSha);
     expect(harness.packets.at(-1)?.currentCommitSha).toBe(nextCommit);
     expect((await store.get("campaign-1"))?.externalReferences.filter(({ kind }) => kind === "commit")).toEqual([{ kind: "commit", value: nextCommit }]);
-    expect((await store.get("campaign-1"))?.events).toEqual(expect.arrayContaining([expect.objectContaining({ eventType: "campaign_commit_updated", payload: expect.objectContaining({ output: { previousCommitSha: commitSha, commitSha: nextCommit } }) })]));
+    expect((await store.get("campaign-1"))?.events).toEqual(expect.arrayContaining([expect.objectContaining({ eventType: "campaign_operation_completed", payload: expect.objectContaining({ output: expect.objectContaining({ previousCommitSha: commitSha, currentCommitSha: nextCommit }) }) })]));
+  });
+
+  it("fences a delayed verifier after recovery and blocks implementation before completion", async () => {
+    const { service, store, harness } = fixture();
+    store.seed(campaign({ status: "policy_review" }));
+    await service.execute("campaign-1", "preflight");
+    await service.execute("campaign-1", "implement");
+    let releaseResult!: () => void;
+    let resultEntered!: () => void;
+    const entered = new Promise<void>((resolve) => { resultEntered = resolve; });
+    const release = new Promise<void>((resolve) => { releaseResult = resolve; });
+    harness.beforeResult = async (operation) => { if (operation === "verify") { resultEntered(); await release; } };
+
+    const verifying = service.execute("campaign-1", "verify");
+    await entered;
+    await expect(service.execute("campaign-1", "implement")).rejects.toThrow(/verification completion/i);
+    await service.recoverInterrupted("campaign-1");
+    releaseResult();
+    await expect(verifying).rejects.toThrow(/reconciliation|required/i);
+
+    const snapshot = await store.get("campaign-1");
+    expect(snapshot?.campaign.status).toBe("human_escalation");
+    expect(snapshot?.externalReferences.some(({ value }) => value === "session-3")).toBe(false);
+    expect(snapshot?.events.some(({ payload }) => JSON.stringify(payload).includes("session-3"))).toBe(false);
   });
 
   it("recovers interrupted operations without dispatch and only one concurrent recovery wins", async () => {
@@ -282,7 +306,7 @@ describe("RunCampaign", () => {
         actionDigest: externalActionDigest(externalPayload),
         issuedAt: "2026-08-26T00:00:00Z",
       }));
-      await store.setExternalReference("campaign-1", { kind: "commit", value: commitSha });
+      store.seedExternalReference("campaign-1", { kind: "commit", value: commitSha });
       const action = vi.fn(async () => undefined);
 
       await expect(
@@ -305,6 +329,18 @@ describe("RunCampaign", () => {
     await expect(
       service.executeApprovedExternalAction("campaign-1", approvalRequest(), action),
     ).rejects.toThrow(/version|state/i);
+    expect(action).not.toHaveBeenCalled();
+    expect((await store.get("campaign-1"))?.approvals[0]?.status).toBe("approved");
+  });
+
+  it("loses authorization CAS when current head rotates after payload validation", async () => {
+    const { service, store } = await approvedFixture();
+    store.beforeConsumeApproval = async () => {
+      await store.replaceCurrentCommit("campaign-1", "b".repeat(40), 7, "contribution_approval");
+    };
+    const action = vi.fn(async () => undefined);
+
+    await expect(service.executeApprovedExternalAction("campaign-1", approvalRequest(), action)).rejects.toThrow(/version/i);
     expect(action).not.toHaveBeenCalled();
     expect((await store.get("campaign-1"))?.approvals[0]?.status).toBe("approved");
   });
@@ -350,7 +386,7 @@ const externalPayload = {
 async function approvedFixture() {
   const result = fixture();
   result.store.seed(campaign({ status: "contribution_approval", version: 7 }));
-  await result.store.setExternalReference("campaign-1", { kind: "commit", value: commitSha });
+  result.store.seedExternalReference("campaign-1", { kind: "commit", value: commitSha });
   await result.store.recordApproval(issueApproval({
     id: "approval-1",
     campaignId: "campaign-1",

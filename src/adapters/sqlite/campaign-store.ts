@@ -3,6 +3,7 @@ import {
   CampaignIdentityConflict,
   CampaignVersionConflict,
   type CampaignEvent,
+  type ChildResultRecord,
   type CampaignSnapshot,
   type CampaignStore,
   type ExternalReference,
@@ -338,11 +339,53 @@ export class SqliteCampaignStore implements CampaignStore {
     }
   }
 
-  async setExternalReference(campaignId: string, reference: ExternalReference): Promise<void> {
+  async replaceCurrentCommit(
+    campaignId: string,
+    commitSha: string,
+    expectedVersion: number,
+    expectedStatus: CampaignStatus,
+  ): Promise<number> {
+    assertCommitSha(commitSha);
+    const replace = this.#database.transaction(() => {
+      this.#assertClaim(campaignId, expectedVersion, expectedStatus);
+      const current = this.#database.prepare("SELECT value FROM external_references WHERE campaign_id = ? AND kind = 'commit'").get(campaignId) as { value: string } | undefined;
+      if (current?.value === commitSha) return expectedVersion;
+      this.#replaceCommit(campaignId, commitSha);
+      const updated = this.#database.prepare("UPDATE campaigns SET version = version + 1, updated_at = ? WHERE id = ? AND version = ? AND status = ?").run(new Date().toISOString(), campaignId, expectedVersion, expectedStatus);
+      if (updated.changes !== 1) throw new CampaignVersionConflict(campaignId, expectedVersion);
+      return expectedVersion + 1;
+    });
+    return replace.immediate();
+  }
+
+  async recordChildResult(campaignId: string, record: ChildResultRecord): Promise<number> {
+    const occurredAt = normalizeTimestamp(record.event.occurredAt, "event occurredAt");
+    if (record.childSessionId.trim().length === 0) throw new Error("Invalid child session identifier");
+    if (record.newCommitSha !== undefined) assertCommitSha(record.newCommitSha);
     const write = this.#database.transaction(() => {
-      if (reference.kind === "commit") {
-        this.#database.prepare("DELETE FROM external_references WHERE campaign_id = ? AND kind = 'commit'").run(campaignId);
+      this.#assertClaim(campaignId, record.expectedVersion, record.expectedStatus);
+      let resultingVersion = record.expectedVersion;
+      if (record.newCommitSha !== undefined) {
+        const current = this.#database.prepare("SELECT value FROM external_references WHERE campaign_id = ? AND kind = 'commit'").get(campaignId) as { value: string } | undefined;
+        if (current?.value !== record.newCommitSha) {
+          this.#replaceCommit(campaignId, record.newCommitSha);
+          const updated = this.#database.prepare("UPDATE campaigns SET version = version + 1, updated_at = ? WHERE id = ? AND version = ? AND status = ?").run(new Date().toISOString(), campaignId, record.expectedVersion, record.expectedStatus);
+          if (updated.changes !== 1) throw new CampaignVersionConflict(campaignId, record.expectedVersion);
+          resultingVersion += 1;
+        }
       }
+      assertChildEventVersion(record.event.payload, record.expectedVersion, resultingVersion);
+      this.#database.prepare("INSERT INTO external_references (campaign_id, kind, value) VALUES (?, 'child_session', ?) ON CONFLICT DO NOTHING").run(campaignId, record.childSessionId);
+      this.#database.prepare("INSERT INTO external_references (campaign_id, kind, value) VALUES (?, 'sandbox', ?) ON CONFLICT DO NOTHING").run(campaignId, record.childSessionId);
+      this.#database.prepare("INSERT INTO campaign_events (id, campaign_id, event_type, payload_json, occurred_at) VALUES (?, ?, ?, ?, ?)").run(record.event.id, campaignId, record.event.eventType, JSON.stringify(record.event.payload), occurredAt);
+      return resultingVersion;
+    });
+    return write.immediate();
+  }
+
+  async setExternalReference(campaignId: string, reference: ExternalReference): Promise<void> {
+    if (reference.kind === "commit") throw new Error("Current commit requires a versioned replacement");
+    const write = this.#database.transaction(() => {
       this.#database.prepare(`
         INSERT INTO external_references (campaign_id, kind, value)
         VALUES (?, ?, ?)
@@ -350,6 +393,16 @@ export class SqliteCampaignStore implements CampaignStore {
       `).run(campaignId, reference.kind, reference.value);
     });
     write.immediate();
+  }
+
+  #assertClaim(campaignId: string, expectedVersion: number, expectedStatus: CampaignStatus): void {
+    const campaign = this.#database.prepare("SELECT version, status FROM campaigns WHERE id = ?").get(campaignId) as Pick<CampaignRow, "version" | "status"> | undefined;
+    if (campaign === undefined || campaign.version !== expectedVersion || campaign.status !== expectedStatus) throw new CampaignVersionConflict(campaignId, expectedVersion);
+  }
+
+  #replaceCommit(campaignId: string, commitSha: string): void {
+    this.#database.prepare("DELETE FROM external_references WHERE campaign_id = ? AND kind = 'commit'").run(campaignId);
+    this.#database.prepare("INSERT INTO external_references (campaign_id, kind, value) VALUES (?, 'commit', ?)").run(campaignId, commitSha);
   }
 
   #snapshot(row: CampaignRow): CampaignSnapshot {
@@ -448,6 +501,18 @@ function assertCampaignQodoIteration(iteration: number): void {
   if (!Number.isInteger(iteration) || iteration < 0 || iteration > 3) {
     throw new TypeError("Invalid integer campaign Qodo iteration; expected 0 to 3");
   }
+}
+
+function assertCommitSha(commitSha: string): void {
+  if (!/^[0-9a-f]{40}$/u.test(commitSha)) throw new Error("Invalid current commit SHA");
+}
+
+function assertChildEventVersion(payload: unknown, expectedVersion: number, resultingVersion: number): void {
+  if (
+    typeof payload !== "object" || payload === null || Array.isArray(payload) ||
+    !("claimedCampaignVersion" in payload) || payload.claimedCampaignVersion !== expectedVersion ||
+    !("resultingCampaignVersion" in payload) || payload.resultingCampaignVersion !== resultingVersion
+  ) throw new Error("Child result event is not bound to the campaign version");
 }
 
 function assertQodoFindingIteration(iteration: number): void {
