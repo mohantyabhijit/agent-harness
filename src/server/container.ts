@@ -30,13 +30,15 @@ export function createContainer(config: ServerConfig): ServerContainer {
     setInterval: (callback, intervalMs) => setInterval(callback, intervalMs),
     clearInterval: (handle) => { clearInterval(handle as NodeJS.Timeout); },
   };
+  const qodoReview = new TrueForgeQodoReview(harness, new UnavailableQodoReviewAuthority(), { allowlistedBotIdentities: config.QODO_BOT_IDENTITIES });
   const reviewJob: QodoReviewJob = createQodoReviewJob({
     store,
-    review: new TrueForgeQodoReview(harness, new UnavailableQodoReviewAuthority(), { allowlistedBotIdentities: config.QODO_BOT_IDENTITIES }),
+    review: qodoReview,
     syncReview: new SyncReview(store, harness, clock, ids),
     scheduler,
     intervalMs: config.QODO_POLL_INTERVAL_MS,
     shutdownTimeoutMs: config.QODO_SHUTDOWN_TIMEOUT_MS,
+    providerReady: qodoReview.isReady(),
   });
   const dependencies: AppDependencies = {
     store,
@@ -46,6 +48,7 @@ export function createContainer(config: ServerConfig): ServerContainer {
     ids,
     authorization: bearerAuthorizationPolicy({ operator: config.OPERATOR_BEARER_TOKEN, reviewProvider: config.REVIEW_PROVIDER_BEARER_TOKEN }),
     reviewHealth: () => reviewJob.health(),
+    qodoReview,
   };
   return {
     dependencies,

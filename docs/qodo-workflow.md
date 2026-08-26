@@ -34,7 +34,9 @@ qodo --json pr-review-session findings --pr-url https://github.com/owner/repo/pu
 
 ## Imported evidence
 
-Each polling run starts a fresh TrueForge `sync_qodo` child session. The child locates and summarizes a bounded `qodo_github_review_v1` envelope tied to the current repository, pull request, review URL/ID, bot identity, provider receipt, and commit. Child/model JSON is never review authority: an independently injected authenticated GitHub adapter must re-fetch or verify the receipt and return canonical evidence. The quality gate uses only that canonical result. The default container fails review synchronization safely until that adapter is configured.
+Each polling run starts a fresh TrueForge `sync_qodo` child session. Its only accepted output is `qodo_review_locator_v1`: a canonical GitHub review URL plus an opaque provider receipt. It cannot submit identity, completion, test, comment, finding, commit, or disposition facts. The same independently injected `QodoReviewAuthorityPort` resolves both scheduled locators and authenticated `POST /api/campaigns/:id/reviews/sync` locators into canonical evidence. The HTTP route rejects full review batches and extra caller-supplied facts.
+
+The default container deliberately uses an unavailable authority. `/api/healthz` remains a liveness endpoint, while `/api/readyz` returns `503 not_ready` with the sanitized `provider_unavailable` code until authenticated Qodo/GitHub evidence resolution is configured. Zero campaigns never turns an unavailable authority into a false-ready service.
 
 OpenQuest accepts at most 1,000 comments. It excludes non-allowlisted authors, deduplicates identical comments by GitHub comment ID, and rejects conflicting duplicates, malformed fields, unsafe paths, cross-pull-request URLs, and oversized bodies. Durable internal campaign memory preserves only:
 
@@ -53,7 +55,9 @@ Alarming prose is not evidence of high or medium severity. Only an explicit Qodo
 
 The quality gate passes only when required tests pass, no open high/medium finding remains, and every remaining non-fixed finding has a disposition. Otherwise OpenQuest starts one fresh `repair` child session with the current PR, current commit, review ID, iteration, and unresolved findings.
 
-The repair child must return strict `repair_result_v1`: completed status, a new 40-character commit, passed tests, exact commands, and direct verification evidence, with no unknown fields. Missing or failed evidence cannot create durable repair authority. The child may produce a new commit in its sandbox, but Qodo synchronization never pushes it. Publishing requires a new `update_pr` proposal and a fresh, single-use approval for the exact current PR, exact repaired commit, current campaign version, and completed repair output. The store rechecks that authority atomically before the external callback. A successful approved update atomically returns the same campaign to `qodo_review` while preserving its PR, repaired commit, and iteration.
+The repair child must return strict `repair_result_v1`: completed status, a new 40-character commit, passed tests, exact commands, and direct verification evidence, with no unknown fields. This is only a candidate. An injected `RepairVerifierPort`, independently bound to the repository, child session, sandbox, and expected parent commit, must prove the commit exists and descends from that parent and that the approved tests actually passed. Without that verifier, or when it rejects an echo command, attacker URL, unrelated commit, or mismatched sandbox, OpenQuest records no repair completion, rotates no current head, and grants no `update_pr` authority.
+
+The child may produce a new commit in its sandbox, but Qodo synchronization never pushes it. Publishing requires a new `update_pr` proposal and a fresh, single-use approval for the exact current PR, exact independently verified repair commit, and current campaign version. The store rechecks that authority atomically before the external callback. A successful approved update atomically returns the same campaign to `qodo_review` while preserving its PR, repaired commit, and iteration. If the external callback succeeds but durable completion fails, `confirmed_completed` reconciliation performs that same transition atomically and cannot change the approved PR or commit.
 
 Retain non-secret evidence for each iteration:
 
@@ -64,7 +68,7 @@ Retain non-secret evidence for each iteration:
 5. The exact `update_pr` proposal, approval record, and resulting commit.
 6. The next Qodo review or the final pass/escalation event.
 
-There are at most three automatic repair iterations. When durable `qodoIteration` reaches `3`, the polling job transitions the campaign to `human_escalation` before starting another Qodo sync or repair child. There is no iteration four. Verify this with:
+There are at most three automatic repair iterations. Maximum-iteration, repair-failure, and repair-cancellation escalation atomically persist both `human_escalation` and its fixed reason event. When durable `qodoIteration` reaches `3`, the polling job transitions the campaign before starting another Qodo sync or repair child. There is no iteration four. A shutdown deadline detaches an abort-ignoring provider generation, reports `shutdown_timeout`, and fences any late result so a later start can run a fresh generation. Verify this with:
 
 ```sh
 npm test -- tests/integration/jobs/qodo-review-job.test.ts

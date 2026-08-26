@@ -104,3 +104,25 @@ Verification:
 - `git diff --check` — PASS.
 
 Remaining live limitation: a live authenticated GitHub/Qodo evidence adapter and controlled PR receipt still need Task 12 provider verification. Until that adapter is injected, the production review job reports sanitized degraded health and makes no quality-gate mutation.
+
+## Fix Round 2
+
+Closed the remaining trust, durability, shutdown, and readiness findings.
+
+- Replaced the Qodo child contract with locator-only `qodo_review_locator_v1`. Both scheduled polling and the review-provider HTTP route now resolve a canonical URL/opaque receipt through the same `QodoReviewAuthorityPort`; HTTP callers cannot supply identity, completion, tests, findings, comment IDs, commit state, or dispositions.
+- Made authenticated identical review replay an idempotent no-op while rejecting a conflicting batch for the same review ID. Repeated scheduled pass polling remains healthy and version-stable.
+- Added `RepairVerifierPort`. Repair JSON is only a candidate until an injected verifier proves repository/child/sandbox binding, expected-parent ancestry, commit existence, and executed tests. Missing or rejecting verification records no completion, rotates no head, and creates no `update_pr` authority.
+- Added atomic Qodo escalation persistence for the iteration limit, repair failure, and cancellation. Status and fixed reason evidence either commit together or roll back together.
+- Made `confirmed_completed` reconciliation of the exact approved `update_pr` atomically close the uncertain claim, record reconciliation evidence, preserve the singleton PR/commit and Qodo iteration, increment the campaign version, and return `repair` to `qodo_review`.
+- Added scheduler generations. A provider that ignores abort is detached at the shutdown deadline, health becomes sanitized `shutdown_timeout`, late output is fenced, and a later start can run a fresh generation without unhandled rejection.
+- Added readiness distinction. The default unavailable authority reports `provider_unavailable`; `/api/readyz` returns 503 even with zero campaigns, while `/api/healthz` remains available for liveness diagnostics.
+- Added adversarial coverage for attacker identities, receipts, repository URLs, finding IDs, fake commits, echo-only commands, attacker evidence URLs, repeated reviews, uncertain completion reconciliation, cancellation, and unavailable-provider startup.
+
+Final verification:
+
+- Focused Qodo/repair/API/job/SQLite slice: PASS, 5 files / 174 tests.
+- Full suite: PASS, 25 files / 416 tests.
+- `npm run typecheck`: PASS.
+- `npm run lint`: PASS.
+- `npm run build`: PASS; Vite retained the existing large-chunk advisory.
+- `git diff --check`: PASS.

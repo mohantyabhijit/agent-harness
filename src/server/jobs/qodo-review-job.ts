@@ -1,10 +1,9 @@
 import type { CampaignSnapshot, CampaignStore } from "../../application/ports/campaign-store.js";
-import type { CampaignPacket } from "../../application/ports/harness.js";
 import type { HarnessPort } from "../../application/ports/harness.js";
 import type { QodoReviewPort } from "../../application/ports/qodo-review.js";
 import type { QodoReviewBatch, SyncReview } from "../../application/sync-review.js";
-import { isPullRequest } from "../../application/external-action.js";
 import { HarnessUnavailable } from "../../application/ports/harness.js";
+import { authenticatedReviewBatch } from "../../application/sync-authenticated-review.js";
 
 /** Compatibility seam for injected legacy sources; production uses QodoReviewPort. */
 export interface QodoReviewSource {
@@ -25,7 +24,7 @@ export interface QodoReviewJob {
 
 export interface QodoReviewJobHealth {
   readonly status: "ready" | "running" | "degraded";
-  readonly code?: "store_unavailable" | "campaign_retry_pending" | "unexpected_failure";
+  readonly code?: "store_unavailable" | "campaign_retry_pending" | "unexpected_failure" | "shutdown_timeout" | "provider_unavailable";
 }
 
 export interface QodoReviewJobDependencies {
@@ -36,6 +35,7 @@ export interface QodoReviewJobDependencies {
   readonly scheduler: ReviewJobScheduler;
   readonly intervalMs: number;
   readonly shutdownTimeoutMs: number;
+  readonly providerReady?: boolean;
 }
 
 export function createQodoReviewJob(dependencies: QodoReviewJobDependencies): QodoReviewJob {
@@ -52,13 +52,18 @@ export function createQodoReviewJob(dependencies: QodoReviewJobDependencies): Qo
   let started = false;
   let activeTick: Promise<void> | undefined;
   let activeController: AbortController | undefined;
-  let health: QodoReviewJobHealth = { status: "ready" };
-  const runTick = async (signal: AbortSignal): Promise<void> => {
+  let generation = 0;
+  let health: QodoReviewJobHealth = dependencies.providerReady === false ? { status: "degraded", code: "provider_unavailable" } : { status: "ready" };
+  const runTick = async (signal: AbortSignal, runGeneration: number): Promise<void> => {
+    if (dependencies.providerReady === false) {
+      if (runGeneration === generation) health = { status: "degraded", code: "provider_unavailable" };
+      return;
+    }
     let snapshots: readonly CampaignSnapshot[];
     try {
       snapshots = await dependencies.store.listByStatus("qodo_review");
     } catch {
-      health = { status: "degraded", code: "store_unavailable" };
+      if (runGeneration === generation) health = { status: "degraded", code: "store_unavailable" };
       return;
     }
     let retryPending = false;
@@ -71,7 +76,7 @@ export function createQodoReviewJob(dependencies: QodoReviewJobDependencies): Qo
         }
         const batch = dependencies.review === undefined
           ? await dependencies.source?.fetch(snapshot, { signal, timeoutMs: dependencies.shutdownTimeoutMs })
-          : await reviewBatchFromPort(dependencies.review, snapshot, signal, dependencies.shutdownTimeoutMs);
+          : await authenticatedReviewBatch(dependencies.review, snapshot, { signal, timeoutMs: dependencies.shutdownTimeoutMs });
         if (isAborted(signal)) return;
         if (batch !== undefined) await dependencies.syncReview.execute(snapshot.campaign.id, batch, { signal, timeoutMs: dependencies.shutdownTimeoutMs });
       } catch {
@@ -80,18 +85,24 @@ export function createQodoReviewJob(dependencies: QodoReviewJobDependencies): Qo
         // logs provider output because it may contain credential material.
       }
     }
-    health = retryPending ? { status: "degraded", code: "campaign_retry_pending" } : { status: "ready" };
+    if (runGeneration === generation) health = retryPending ? { status: "degraded", code: "campaign_retry_pending" } : { status: "ready" };
   };
   const tick = async (): Promise<void> => {
     if (activeTick !== undefined) return activeTick;
+    const runGeneration = ++generation;
     activeController = new AbortController();
     health = { status: "running" };
-    activeTick = runTick(activeController.signal).catch(() => { health = { status: "degraded", code: "unexpected_failure" }; });
+    const thisTick = runTick(activeController.signal, runGeneration).catch(() => {
+      if (runGeneration === generation) health = { status: "degraded", code: "unexpected_failure" };
+    });
+    activeTick = thisTick;
     try {
-      await activeTick;
+      await thisTick;
     } finally {
-      activeTick = undefined;
-      activeController = undefined;
+      if (activeTick === thisTick) {
+        activeTick = undefined;
+        activeController = undefined;
+      }
     }
   };
   return {
@@ -108,11 +119,23 @@ export function createQodoReviewJob(dependencies: QodoReviewJobDependencies): Qo
       }
       activeController?.abort();
       if (activeTick !== undefined) {
+        const stoppingTick = activeTick;
         let deadline: ReturnType<typeof setTimeout> | undefined;
+        let outcome: "completed" | "timeout";
         try {
-          await Promise.race([activeTick, new Promise<void>((resolve) => { deadline = setTimeout(resolve, dependencies.shutdownTimeoutMs); })]);
+          outcome = await Promise.race([
+            stoppingTick.then(() => "completed" as const),
+            new Promise<"timeout">((resolve) => { deadline = setTimeout(() => { resolve("timeout"); }, dependencies.shutdownTimeoutMs); }),
+          ]);
         } finally {
           if (deadline !== undefined) clearTimeout(deadline);
+        }
+        if (outcome === "timeout") {
+          generation += 1;
+          activeTick = undefined;
+          activeController = undefined;
+          health = { status: "degraded", code: "shutdown_timeout" };
+          void stoppingTick.catch(() => undefined);
         }
       }
     },
@@ -132,59 +155,4 @@ export class HarnessQodoReviewSource implements QodoReviewSource {
     void this.harness;
     throw new HarnessUnavailable();
   }
-}
-
-function singletonReference(snapshot: CampaignSnapshot, kind: "pull_request" | "commit"): string {
-  const references = snapshot.externalReferences.filter((reference) => reference.kind === kind);
-  if (references.length !== 1 || references[0] === undefined) throw new Error(`Campaign ${kind} identity is unavailable`);
-  return references[0].value;
-}
-
-function parsePullRequestNumber(pullRequest: string, repository: string): number {
-  if (!isPullRequest(pullRequest, repository)) throw new Error("Campaign pull request identity is invalid");
-  const segment = pullRequest.slice(pullRequest.lastIndexOf("/") + 1);
-  const pullRequestNumber = Number(segment);
-  if (!Number.isSafeInteger(pullRequestNumber) || pullRequestNumber < 1) throw new Error("Campaign pull request identity is invalid");
-  return pullRequestNumber;
-}
-
-function reviewPacket(snapshot: CampaignSnapshot, pullRequest: string, commitSha: string): CampaignPacket {
-  return {
-    campaignId: snapshot.campaign.id,
-    repository: snapshot.campaign.repository,
-    issueNumber: snapshot.campaign.issueNumber,
-    goal: `Synchronize Qodo review iteration ${String(snapshot.campaign.qodoIteration)}`,
-    verifiedEvidence: snapshot.evidence.filter(({ kind }) => kind === "direct").map(({ sourceUrl, observation }) => ({ sourceUrl, observation })),
-    approvals: snapshot.approvals.map(({ action, actionDigest, status }) => ({ action, digest: actionDigest, status })),
-    currentCommitSha: commitSha,
-    context: { pullRequest, commitSha, iteration: snapshot.campaign.qodoIteration },
-  };
-}
-
-async function reviewBatchFromPort(
-  reviewPort: QodoReviewPort,
-  snapshot: CampaignSnapshot,
-  signal: AbortSignal,
-  timeoutMs: number,
-): Promise<QodoReviewBatch> {
-  const pullRequest = singletonReference(snapshot, "pull_request");
-  const commitSha = singletonReference(snapshot, "commit");
-  const review = await reviewPort.getReview(
-    snapshot.campaign.repository,
-    parsePullRequestNumber(pullRequest, snapshot.campaign.repository),
-    { packet: reviewPacket(snapshot, pullRequest, commitSha), signal, timeoutMs },
-  );
-  return {
-    campaignId: snapshot.campaign.id,
-    syncSessionId: review.syncSessionId,
-    pullRequest,
-    reviewId: review.reviewId,
-    reviewUrl: review.reviewUrl,
-    sourceIdentity: review.sourceIdentity,
-    sourceReceipt: review.sourceReceipt,
-    commitSha: review.commitSha,
-    testsPassed: review.testsPassed,
-    complete: review.complete,
-    findings: review.findings,
-  };
 }

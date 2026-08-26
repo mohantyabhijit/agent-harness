@@ -3,12 +3,13 @@ import { z } from "zod";
 import type { CampaignPacket, HarnessPort } from "../../application/ports/harness.js";
 import { HarnessError, HarnessOutputInvalid } from "../../application/ports/harness.js";
 import { HarnessUnavailable } from "../../application/ports/harness.js";
-import type { QodoReview, QodoReviewAuthorityPort, QodoReviewCandidate, QodoReviewPort, QodoReviewRequest } from "../../application/ports/qodo-review.js";
+import type { QodoReview, QodoReviewAuthorityPort, QodoReviewCandidate, QodoReviewLocator, QodoReviewPort, QodoReviewRequest } from "../../application/ports/qodo-review.js";
 import { hasNonAllowlistedActionableComment, parseQodoReviewComments } from "./github-review-parser.js";
 
 const repositorySchema = z.string().regex(/^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/u);
 const commitSchema = z.string().regex(/^[0-9a-f]{40}$/u);
-const boundedText = z.string().trim().min(1).max(2_000);
+const boundedText = z.string().min(1).max(2_000).refine((value) => value === value.trim());
+const exactOpaqueText = (minimum: number, maximum: number) => z.string().min(minimum).max(maximum).refine((value) => value === value.trim());
 const packetSchema = z.object({
   campaignId: z.string().trim().min(1).max(128),
   repository: repositorySchema,
@@ -21,14 +22,19 @@ const reviewEnvelopeSchema = z.object({
   schemaVersion: z.literal("qodo_github_review_v1"),
   repository: repositorySchema,
   pullRequestNumber: z.number().int().positive(),
-  reviewId: z.string().trim().min(1).max(128),
+  reviewId: exactOpaqueText(1, 128),
   reviewUrl: z.url().max(2_048),
-  sourceIdentity: z.string().trim().min(1).max(100),
-  sourceReceipt: z.string().trim().min(16).max(512),
+  sourceIdentity: exactOpaqueText(1, 100),
+  sourceReceipt: exactOpaqueText(16, 512),
   commitSha: commitSchema,
   testsPassed: z.boolean(),
   complete: z.boolean(),
   comments: z.array(z.unknown()).max(1_000),
+}).strict();
+const reviewLocatorSchema = z.object({
+  schemaVersion: z.literal("qodo_review_locator_v1"),
+  reviewUrl: z.url().max(2_048),
+  sourceReceipt: exactOpaqueText(16, 512),
 }).strict();
 
 export interface TrueForgeQodoReviewConfig {
@@ -37,7 +43,8 @@ export interface TrueForgeQodoReviewConfig {
 
 /** Production-safe placeholder until an authenticated GitHub review adapter is injected. */
 export class UnavailableQodoReviewAuthority implements QodoReviewAuthorityPort {
-  async authenticate(): Promise<never> {
+  isAvailable(): boolean { return false; }
+  async resolve(): Promise<never> {
     throw new HarnessUnavailable();
   }
 }
@@ -53,6 +60,8 @@ export class TrueForgeQodoReview implements QodoReviewPort {
     this.#allowedAuthors = validatedAuthors(config.allowlistedBotIdentities);
   }
 
+  isReady(): boolean { return this.authority.isAvailable(); }
+
   async getReview(
     repository: string,
     pullRequestNumber: number,
@@ -64,12 +73,12 @@ export class TrueForgeQodoReview implements QodoReviewPort {
         throw new HarnessOutputInvalid();
       }
       const pullRequest = `https://github.com/${repository}/pull/${String(pullRequestNumber)}`;
-      const responseSchema = qodoGithubReviewV1Schema(repository, pullRequestNumber, parsedPacket.currentCommitSha, this.#allowedAuthors);
+      const responseSchema = qodoReviewLocatorV1Schema(repository, pullRequestNumber);
       const packet: CampaignPacket = {
         campaignId: parsedPacket.campaignId,
         repository,
         issueNumber: parsedPacket.issueNumber,
-        goal: `Locate the GitHub-hosted Qodo review for ${pullRequest}. Return exactly qodo_github_review_v1. The source receipt is verified independently; never invent review identity, completion, test, comment, or disposition fields. Do not perform GitHub writes.`,
+        goal: `Locate the GitHub-hosted Qodo review for ${pullRequest}. Return only qodo_review_locator_v1 with the canonical review URL and opaque provider receipt. Do not assert identity, completion, tests, findings, comments, commit state, or dispositions. Do not perform GitHub writes.`,
         verifiedEvidence: parsedPacket.verifiedEvidence,
         approvals: parsedPacket.approvals,
         currentCommitSha: parsedPacket.currentCommitSha,
@@ -78,28 +87,28 @@ export class TrueForgeQodoReview implements QodoReviewPort {
           pullRequestNumber,
           commitSha: parsedPacket.currentCommitSha,
           allowedAuthors: this.#allowedAuthors,
-          responseContract: "qodo_github_review_v1",
+          responseContract: "qodo_review_locator_v1",
           responseSchema,
         },
       };
-      const result = await this.harness.runChildSession(
-        packet,
-        "sync_qodo",
-        requestOptions(request),
-      );
-      if (result.sessionId.trim().length === 0 || result.sessionId.length > 512) throw new HarnessOutputInvalid();
-      const candidate = validatedEnvelope(result.output, repository, pullRequestNumber, parsedPacket.currentCommitSha, this.#allowedAuthors);
+      const result = request.locator === undefined
+        ? await this.harness.runChildSession(packet, "sync_qodo", requestOptions(request))
+        : { sessionId: "authenticated-provider-ingress", output: request.locator };
+      if (result.sessionId.trim().length === 0 || result.sessionId.length > 1_024) throw new HarnessOutputInvalid();
+      const locator = validatedLocator(result.output, repository, pullRequestNumber);
       const review = validatedEnvelope(
-        await this.authority.authenticate(candidate, requestOptions(request) ?? {}),
+        await this.authority.resolve(locator, {
+          repository,
+          pullRequestNumber,
+          commitSha: parsedPacket.currentCommitSha,
+          allowlistedBotIdentities: this.#allowedAuthors,
+        }, requestOptions(request) ?? {}),
         repository,
         pullRequestNumber,
         parsedPacket.currentCommitSha,
         this.#allowedAuthors,
       );
-      if (
-        review.reviewId !== candidate.reviewId || review.reviewUrl !== candidate.reviewUrl ||
-        review.sourceIdentity !== candidate.sourceIdentity || review.sourceReceipt !== candidate.sourceReceipt
-      ) {
+      if (review.reviewUrl !== locator.reviewUrl || review.sourceReceipt !== locator.sourceReceipt) {
         throw new HarnessOutputInvalid();
       }
       const findings = parseQodoReviewComments(review.comments, {
@@ -125,6 +134,12 @@ export class TrueForgeQodoReview implements QodoReviewPort {
   }
 }
 
+function validatedLocator(value: unknown, repository: string, pullRequestNumber: number): QodoReviewLocator {
+  const locator = reviewLocatorSchema.parse(value);
+  if (!isCanonicalReviewUrl(locator.reviewUrl, repository, pullRequestNumber)) throw new HarnessOutputInvalid();
+  return locator;
+}
+
 function validatedEnvelope(
   value: unknown,
   repository: string,
@@ -133,35 +148,35 @@ function validatedEnvelope(
   allowedAuthors: readonly string[],
 ): QodoReviewCandidate {
   const review = reviewEnvelopeSchema.parse(value);
-  const expectedUrlPrefix = `https://github.com/${repository}/pull/${String(pullRequestNumber)}#pullrequestreview-`;
   if (review.repository !== repository || review.pullRequestNumber !== pullRequestNumber || review.commitSha !== commitSha ||
-    !review.reviewUrl.startsWith(expectedUrlPrefix) || !allowedAuthors.includes(review.sourceIdentity.toLocaleLowerCase("en-US"))) {
+    !isCanonicalReviewUrl(review.reviewUrl, repository, pullRequestNumber) || !allowedAuthors.includes(review.sourceIdentity.toLocaleLowerCase("en-US"))) {
     throw new HarnessOutputInvalid();
   }
   return review;
 }
 
-function qodoGithubReviewV1Schema(
+function isCanonicalReviewUrl(value: string, repository: string, pullRequestNumber: number): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && url.hostname === "github.com" && url.username === "" && url.password === "" &&
+      url.port === "" && url.search === "" && url.pathname === `/${repository}/pull/${String(pullRequestNumber)}` &&
+      /^#pullrequestreview-[1-9][0-9]*$/u.test(url.hash);
+  } catch {
+    return false;
+  }
+}
+
+function qodoReviewLocatorV1Schema(
   repository: string,
   pullRequestNumber: number,
-  commitSha: string,
-  allowedAuthors: readonly string[],
 ): Readonly<Record<string, unknown>> {
   return Object.freeze({
     additionalProperties: false,
-    required: ["schemaVersion", "repository", "pullRequestNumber", "reviewId", "reviewUrl", "sourceIdentity", "sourceReceipt", "commitSha", "testsPassed", "complete", "comments"],
+    required: ["schemaVersion", "reviewUrl", "sourceReceipt"],
     fields: {
-      schemaVersion: { const: "qodo_github_review_v1" },
-      repository: { const: repository },
-      pullRequestNumber: { const: pullRequestNumber },
-      reviewId: { type: "non-empty GitHub review identifier", maxLength: 128 },
-      reviewUrl: { type: "canonical GitHub pull-request review URL", fragment: "pullrequestreview-<positive id>" },
-      sourceIdentity: { enum: allowedAuthors, semantics: "authenticated GitHub review author; not a model assertion" },
-      sourceReceipt: { type: "opaque authenticated provider receipt", minLength: 16, semantics: "must be returned by the GitHub evidence adapter and is verified outside this session" },
-      commitSha: { const: commitSha },
-      testsPassed: { type: "boolean", semantics: "true only when the authenticated review/check evidence proves the current commit tests passed" },
-      complete: { type: "boolean", semantics: "false until the authenticated provider confirms the review is complete; false causes no gate mutation" },
-      comments: { type: "array", maxItems: 1_000, semantics: "raw GitHub review comments; only configured Qodo authors can become Qodo findings" },
+      schemaVersion: { const: "qodo_review_locator_v1" },
+      reviewUrl: { constPrefix: `https://github.com/${repository}/pull/${String(pullRequestNumber)}#pullrequestreview-`, semantics: "locator only; authority resolves all review facts" },
+      sourceReceipt: { type: "opaque authenticated provider receipt", minLength: 16, semantics: "locator only; authority independently validates and resolves it" },
     },
   });
 }

@@ -18,6 +18,7 @@ import {
   type ExternalActionStaleRecoveryRecord,
   type ExternalReference,
   type QodoReviewClaimRecord,
+  type QodoEscalationRecord,
 } from "../../src/application/ports/campaign-store.js";
 import { parseQodoFinding } from "../../src/application/qodo-review-batch.js";
 import { currentApprovalProposal } from "../../src/application/approval-proposal.js";
@@ -64,6 +65,7 @@ export class FakeCampaignStore implements CampaignStore {
   failNextUpdate = false;
   failNextExternalReference = false;
   failNextEvent = false;
+  failNextExternalCompletion = false;
 
   seed(campaign: Campaign): void {
     this.#insert(campaign);
@@ -347,6 +349,22 @@ export class FakeCampaignStore implements CampaignStore {
     for (const event of events) this.#eventIds.add(event.id);
   }
 
+  async escalateQodoReview(campaignId: string, record: QodoEscalationRecord): Promise<void> {
+    const snapshot = this.#required(campaignId);
+    this.#assertClaim(snapshot, campaignId, record.expectedVersion, record.expectedStatus);
+    this.#assertEventAvailable(record.event.id);
+    if (record.event.eventType !== "quality_gate_escalated" || record.campaign.status !== "human_escalation" || record.campaign.version !== record.expectedVersion + 1) {
+      throw new Error("Invalid Qodo escalation record");
+    }
+    if (this.failNextEvent) {
+      this.failNextEvent = false;
+      throw new Error("Campaign event persistence failed");
+    }
+    snapshot.campaign = structuredClone(record.campaign);
+    this.#pushEvent(snapshot, record.event);
+    this.#eventIds.add(record.event.id);
+  }
+
   async claimExternalAction(campaignId: string, record: ExternalActionClaimRecord): Promise<ExternalActionClaim> {
     const beforeConsume = this.beforeConsumeApproval;
     delete this.beforeConsumeApproval;
@@ -418,6 +436,10 @@ export class FakeCampaignStore implements CampaignStore {
   }
 
   async completeExternalAction(campaignId: string, record: ExternalActionCompletionRecord): Promise<number> {
+    if (this.failNextExternalCompletion) {
+      this.failNextExternalCompletion = false;
+      throw new Error("External completion persistence failed");
+    }
     const snapshot = this.#required(campaignId);
     const claim = this.#requiredExternalActionClaim(snapshot, record.claimId, "active");
     this.#assertClaim(snapshot, campaignId, claim.claimedCampaignVersion, claim.claimedCampaignStatus);
@@ -488,17 +510,22 @@ export class FakeCampaignStore implements CampaignStore {
     if (record.event.eventType !== "external_action_reconciled") throw new Error("Invalid external action reconciliation event");
     if (record.observedCanonicalHead !== undefined) assertCommitSha(record.observedCanonicalHead);
     const current = singletonCommit(snapshot);
-    const resultingVersion = snapshot.campaign.version + (record.observedCanonicalHead !== undefined && record.observedCanonicalHead !== current ? 1 : 0);
+    const changed = record.observedCanonicalHead !== undefined && record.observedCanonicalHead !== current;
+    const confirmedUpdate = record.disposition === "confirmed_completed" && claim.payload.action === "update_pr";
+    if (confirmedUpdate && (record.observedCanonicalHead !== claim.payload.commitSha || current !== claim.payload.commitSha || snapshot.campaign.status !== "repair" || singletonPullRequest(snapshot) !== claim.payload.pullRequest)) {
+      throw new Error("Confirmed update_pr reconciliation does not match current authority");
+    }
+    const resultingVersion = snapshot.campaign.version + (changed || confirmedUpdate ? 1 : 0);
     assertExternalActionEventVersion(record.event.payload, snapshot.campaign.version, resultingVersion);
     if (this.failNextEvent) {
       this.failNextEvent = false;
       throw new Error("Campaign event persistence failed");
     }
-    if (record.observedCanonicalHead !== undefined && record.observedCanonicalHead !== current) {
+    if (changed) {
       snapshot.externalReferences = snapshot.externalReferences.filter(({ kind }) => kind !== "commit");
       snapshot.externalReferences.push({ kind: "commit", value: record.observedCanonicalHead });
-      snapshot.campaign = { ...snapshot.campaign, version: resultingVersion };
     }
+    if (changed || confirmedUpdate) snapshot.campaign = { ...snapshot.campaign, version: resultingVersion, ...(confirmedUpdate ? { status: "qodo_review" as const } : {}) };
     this.#pushEvent(snapshot, record.event);
     this.#eventIds.add(record.event.id);
     Object.assign(claim, {
@@ -590,8 +617,10 @@ export class FakeCampaignStore implements CampaignStore {
     assertChildEventVersion(record.event.payload, record.expectedVersion, resultingVersion);
     const nextReferences = snapshot.externalReferences.filter(({ kind }) => kind !== "commit" || record.newCommitSha === undefined);
     if (record.newCommitSha !== undefined) nextReferences.push({ kind: "commit", value: record.newCommitSha });
+    const childReferences = { child_session: record.childSessionId, sandbox: record.sandboxSessionId ?? record.childSessionId } as const;
     for (const kind of ["child_session", "sandbox"] as const) {
-      if (!nextReferences.some((reference) => reference.kind === kind && reference.value === record.childSessionId)) nextReferences.push({ kind, value: record.childSessionId });
+      const value = childReferences[kind];
+      if (!nextReferences.some((reference) => reference.kind === kind && reference.value === value)) nextReferences.push({ kind, value });
     }
     if (record.event.eventType === "campaign_operation_completed") {
       const result = record.operationResult;

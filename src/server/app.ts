@@ -6,9 +6,10 @@ import { CreateCampaign, type Clock, type IdGenerator } from "../application/cre
 import { DiscoverRepositories } from "../application/discover.js";
 import { ApprovalIssuanceConflict, CampaignIdentityConflict, CampaignVersionConflict, type CampaignStore } from "../application/ports/campaign-store.js";
 import type { GithubCatalogPort } from "../application/ports/github-catalog.js";
-import { HarnessError, type HarnessPort } from "../application/ports/harness.js";
+import { HarnessError, HarnessUnavailable, type HarnessPort } from "../application/ports/harness.js";
 import { RunCampaign } from "../application/run-campaign.js";
 import { SyncReview } from "../application/sync-review.js";
+import { SyncAuthenticatedReview } from "../application/sync-authenticated-review.js";
 import { registerApprovalRoutes } from "./routes/approvals.js";
 import { registerCampaignRoutes } from "./routes/campaigns.js";
 import { registerDiscoveryRoutes } from "./routes/discovery.js";
@@ -17,6 +18,8 @@ import { registerSpaceRoutes } from "./routes/spaces.js";
 import { ApiProblem } from "./routes/support.js";
 import type { AuthorizationPolicy, Capability } from "./authorization.js";
 import type { QodoReviewJobHealth } from "./jobs/qodo-review-job.js";
+import type { QodoReviewPort } from "../application/ports/qodo-review.js";
+import type { RepairVerifierPort } from "../application/ports/repair-verifier.js";
 
 const emptyQuerySchema = z.object({}).strict();
 
@@ -28,6 +31,8 @@ export interface AppDependencies {
   readonly ids: IdGenerator;
   readonly authorization: AuthorizationPolicy;
   readonly reviewHealth?: () => QodoReviewJobHealth;
+  readonly qodoReview?: QodoReviewPort;
+  readonly repairVerifier?: RepairVerifierPort;
 }
 
 export function buildApp(dependencies: AppDependencies): FastifyInstance {
@@ -35,7 +40,9 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
   const discover = new DiscoverRepositories(dependencies.catalog);
   const createCampaign = new CreateCampaign(dependencies.store, dependencies.harness, dependencies.clock, dependencies.ids);
   const runCampaign = new RunCampaign(dependencies.store, dependencies.harness, dependencies.clock, dependencies.ids);
-  const syncReview = new SyncReview(dependencies.store, dependencies.harness, dependencies.clock, dependencies.ids);
+  const syncReview = new SyncReview(dependencies.store, dependencies.harness, dependencies.clock, dependencies.ids, dependencies.repairVerifier);
+  const qodoReview = dependencies.qodoReview ?? { getReview: async () => { throw new HarnessUnavailable(); } };
+  const authenticatedReview = new SyncAuthenticatedReview(dependencies.store, qodoReview, syncReview);
 
   app.addHook("preValidation", async (request) => {
     emptyQuerySchema.parse(request.query);
@@ -57,11 +64,18 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
     const review = dependencies.reviewHealth?.();
     return review?.status === "degraded" ? { status: "degraded", review: { code: review.code ?? "unexpected_failure" } } : { status: "ok" };
   });
+  app.get("/api/readyz", async (_request, reply) => {
+    const review = dependencies.reviewHealth?.();
+    if (review?.status === "degraded") {
+      return reply.code(503).send({ status: "not_ready", review: { code: review.code ?? "unexpected_failure" } });
+    }
+    return reply.send({ status: "ready" });
+  });
   registerSpaceRoutes(app);
   registerDiscoveryRoutes(app, { discover, catalog: dependencies.catalog });
   registerCampaignRoutes(app, { createCampaign, runCampaign, store: dependencies.store, clock: dependencies.clock });
   registerApprovalRoutes(app, { store: dependencies.store, clock: dependencies.clock, ids: dependencies.ids });
-  registerReviewRoutes(app, { syncReview });
+  registerReviewRoutes(app, { syncReview: authenticatedReview });
   return app;
 }
 

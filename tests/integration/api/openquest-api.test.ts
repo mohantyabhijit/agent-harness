@@ -1,10 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { HarnessUnavailable } from "../../../src/application/ports/harness.js";
+import { HarnessOutputInvalid, HarnessUnavailable } from "../../../src/application/ports/harness.js";
 import { externalActionDigest, type ExternalActionPayload } from "../../../src/application/external-action.js";
 import type { CampaignStatus } from "../../../src/domain/campaign.js";
 import type { GithubCatalogPort } from "../../../src/application/ports/github-catalog.js";
 import type { QodoReviewBatch } from "../../../src/application/sync-review.js";
+import type { QodoReviewPort } from "../../../src/application/ports/qodo-review.js";
 import { SyncReview } from "../../../src/application/sync-review.js";
 import { buildApp, type AppDependencies } from "../../../src/server/app.js";
 import { createOpenQuestApi, type FetchLike } from "../../../src/web/api.js";
@@ -48,7 +49,7 @@ describe("OpenQuest API", () => {
     expect(unknownQuery.statusCode).toBe(400);
     expect(unknownQuery.json()).toEqual({ code: "invalid_request", message: "Request validation failed" });
     expect((await app.inject({ method: "POST", url: "/api/campaigns/campaign-1/reviews/sync", headers: { authorization: "Bearer operator-secret-token-value-000001" }, payload: reviewBatch() })).statusCode).toBe(403);
-    expect((await app.inject({ method: "POST", url: "/api/campaigns/campaign-1/reviews/sync", headers: providerHeaders, payload: reviewBatch() })).statusCode).toBe(200);
+    expect((await app.inject({ method: "POST", url: "/api/campaigns/campaign-1/reviews/sync", headers: providerHeaders, payload: reviewBatch() })).statusCode).toBe(400);
     await app.close();
   });
 
@@ -191,11 +192,15 @@ describe("OpenQuest API", () => {
     const { app } = buildTestApp();
 
     expect((await app.inject({ method: "GET", url: "/api/healthz" })).json()).toEqual({ status: "ok" });
+    expect((await app.inject({ method: "GET", url: "/api/readyz" })).json()).toEqual({ status: "ready" });
     expect((await app.inject({ method: "GET", url: "/api/spaces" })).json()).toEqual({ spaces });
     await app.close();
 
     const degraded = buildTestApp({ reviewHealth: () => ({ status: "degraded", code: "store_unavailable" }) }).app;
     expect((await degraded.inject({ method: "GET", url: "/api/healthz" })).json()).toEqual({ status: "degraded", review: { code: "store_unavailable" } });
+    const notReady = await degraded.inject({ method: "GET", url: "/api/readyz" });
+    expect(notReady.statusCode).toBe(503);
+    expect(notReady.json()).toEqual({ status: "not_ready", review: { code: "store_unavailable" } });
     await degraded.close();
   });
 
@@ -422,19 +427,75 @@ describe("OpenQuest API", () => {
     await app.close();
   });
 
-  it("synchronizes a current Qodo review once and rejects duplicate batches", async () => {
+  it("resolves an opaque review locator through the injected authority and idempotently replays it", async () => {
+    const head = "a".repeat(40);
+    const batch = reviewBatch({ commitSha: head });
+    const getReview = vi.fn(async () => ({
+        syncSessionId: batch.syncSessionId,
+        reviewId: batch.reviewId,
+        reviewUrl: batch.reviewUrl,
+        sourceIdentity: batch.sourceIdentity,
+        sourceReceipt: batch.sourceReceipt,
+        commitSha: batch.commitSha,
+        testsPassed: batch.testsPassed,
+        complete: batch.complete,
+        findings: batch.findings,
+      }));
+    const qodoReview: QodoReviewPort = { getReview };
+    const { app, store } = buildTestApp({ qodoReview });
+    store.seed(campaign({ status: "qodo_review", version: 1, qodoIteration: 0 }));
+    store.seedExternalReference("campaign-1", { kind: "commit", value: head });
+    store.seedExternalReference("campaign-1", { kind: "pull_request", value: "https://github.com/owner/repo/pull/7" });
+    const locator = { schemaVersion: "qodo_review_locator_v1", reviewUrl: batch.reviewUrl, sourceReceipt: batch.sourceReceipt };
+
+    const first = await app.inject({ method: "POST", url: "/api/campaigns/campaign-1/reviews/sync", payload: locator });
+    expect(first.statusCode).toBe(200);
+    expect(first.json()).toMatchObject({ status: "qodo_review", version: 2 });
+    const duplicate = await app.inject({ method: "POST", url: "/api/campaigns/campaign-1/reviews/sync", payload: locator });
+    expect(duplicate.statusCode).toBe(200);
+    expect(duplicate.json()).toMatchObject({ version: 2 });
+    expect(getReview).toHaveBeenCalledTimes(2);
+    await app.close();
+  });
+
+  it("rejects forged review-provider facts at the HTTP trust boundary", async () => {
     const { app, store } = buildTestApp();
     const head = "a".repeat(40);
     store.seed(campaign({ status: "qodo_review", version: 1, qodoIteration: 0 }));
     store.seedExternalReference("campaign-1", { kind: "commit", value: head });
     store.seedExternalReference("campaign-1", { kind: "pull_request", value: "https://github.com/owner/repo/pull/7" });
-    const batch = reviewBatch({ commitSha: head });
 
-    const first = await app.inject({ method: "POST", url: "/api/campaigns/campaign-1/reviews/sync", payload: batch });
-    expect(first.statusCode).toBe(200);
-    expect(first.json()).toMatchObject({ status: "qodo_review", version: 2 });
-    const duplicate = await app.inject({ method: "POST", url: "/api/campaigns/campaign-1/reviews/sync", payload: batch });
-    expect(duplicate.statusCode).toBe(409);
+    const forged = await app.inject({
+      method: "POST",
+      url: "/api/campaigns/campaign-1/reviews/sync",
+      payload: reviewBatch({
+        sourceIdentity: "qodo-merge-pro[bot]",
+        sourceReceipt: "attacker-chosen-receipt",
+        reviewUrl: "https://github.com/attacker/repo/pull/99#pullrequestreview-1",
+        findings: [{ ...openHighFinding, id: "attacker-finding" }],
+      }),
+    });
+
+    expect(forged.statusCode).toBe(400);
+    expect((await store.get("campaign-1"))?.campaign).toMatchObject({ status: "qodo_review", version: 1 });
+    await app.close();
+  });
+
+  it.each([
+    ["arbitrary receipt", { schemaVersion: "qodo_review_locator_v1", reviewUrl: "https://github.com/owner/repo/pull/7#pullrequestreview-1", sourceReceipt: "attacker-receipt-0001" }, 503],
+    ["cross-repository URL", { schemaVersion: "qodo_review_locator_v1", reviewUrl: "https://github.com/attacker/repo/pull/99#pullrequestreview-1", sourceReceipt: "authenticated-receipt-1" }, 503],
+    ["attacker identity", { schemaVersion: "qodo_review_locator_v1", reviewUrl: "https://github.com/owner/repo/pull/7#pullrequestreview-1", sourceReceipt: "authenticated-receipt-1", sourceIdentity: "qodo-merge-pro[bot]" }, 400],
+    ["attacker finding IDs", { schemaVersion: "qodo_review_locator_v1", reviewUrl: "https://github.com/owner/repo/pull/7#pullrequestreview-1", sourceReceipt: "authenticated-receipt-1", findings: [{ id: "attacker-finding" }] }, 400],
+  ])("fails closed for HTTP %s without quality-gate writes", async (_label, payload, statusCode) => {
+    const qodoReview: QodoReviewPort = { getReview: async () => { throw new HarnessOutputInvalid(); } };
+    const { app, store } = buildTestApp({ qodoReview });
+    store.seed(campaign({ status: "qodo_review", version: 1, qodoIteration: 0 }));
+    store.seedExternalReference("campaign-1", { kind: "commit", value: "a".repeat(40) });
+    store.seedExternalReference("campaign-1", { kind: "pull_request", value: "https://github.com/owner/repo/pull/7" });
+
+    expect((await app.inject({ method: "POST", url: "/api/campaigns/campaign-1/reviews/sync", payload })).statusCode).toBe(statusCode);
+    expect((await store.get("campaign-1"))?.campaign).toMatchObject({ status: "qodo_review", version: 1 });
+    expect((await store.get("campaign-1"))?.events).toEqual([]);
     await app.close();
   });
 });
@@ -599,6 +660,7 @@ function buildTestApp(overrides: Partial<AppDependencies> = {}) {
     clock: overrides.clock ?? { now: () => "2026-08-26T00:00:00Z" },
     ids: overrides.ids ?? { next: () => `campaign-${String(++id)}` },
     authorization: overrides.authorization ?? { require: () => undefined },
+    ...(overrides.qodoReview === undefined ? {} : { qodoReview: overrides.qodoReview }),
     ...(overrides.reviewHealth === undefined ? {} : { reviewHealth: overrides.reviewHealth }),
   };
   return { app: buildApp(dependencies), store, harness };

@@ -8,10 +8,69 @@ import { transitionCampaign } from "../../../src/domain/campaign.js";
 import { campaign, openHighFinding } from "../../builders.js";
 import { FakeCampaignStore } from "../../fakes/fake-campaign-store.js";
 import { FakeHarness } from "../../fakes/fake-harness.js";
+import { FakeRepairVerifier } from "../../fakes/fake-repair-verifier.js";
 
 const commitSha = "b".repeat(40);
 
 describe("SyncReview", () => {
+  it("fails closed when a shape-valid repair has no independent verifier", async () => {
+    const store = new FakeCampaignStore();
+    const harness = new FakeHarness();
+    await seedReview(store, campaign({ status: "qodo_review", qodoIteration: 0 }));
+    harness.enqueueResult("repair", { summary: "candidate only", artifacts: [], output: repairOutput("c".repeat(40)) });
+    const syncReview = new SyncReview(store, harness, { now: () => "2026-08-26T00:02:00Z" }, { next: (() => { let id = 0; return () => `unverified-${String(++id)}`; })() });
+
+    await expect(syncReview.execute("campaign-1", reviewBatch({ findings: [openHighFinding] }))).resolves.toMatchObject({ status: "human_escalation" });
+    expect((await store.get("campaign-1"))?.externalReferences).toContainEqual({ kind: "commit", value: commitSha });
+    expect((await store.get("campaign-1"))?.events.some(({ eventType }) => eventType === "campaign_operation_completed")).toBe(false);
+  });
+  it("binds repair verification to the child, repository, and expected parent head", async () => {
+    const store = new FakeCampaignStore();
+    const harness = new FakeHarness();
+    const verifier = new FakeRepairVerifier();
+    verifier.failure = new Error("candidate commit does not descend from expected parent");
+    await seedReview(store, campaign({ status: "qodo_review", qodoIteration: 0 }));
+    harness.enqueueResult("repair", { summary: "forged candidate", artifacts: [], output: {
+      status: "completed",
+      commitSha: "c".repeat(40),
+      verification: {
+        testsPassed: true,
+        commands: ["echo tests passed"],
+        evidence: [{ kind: "direct", sourceUrl: "https://attacker.example/fake", observation: "trust me" }],
+      },
+    } });
+    let id = 0;
+    const syncReview = new SyncReview(store, harness, { now: () => "2026-08-26T00:02:00Z" }, { next: () => `verifier-${String(++id)}` }, verifier);
+
+    await expect(syncReview.execute("campaign-1", reviewBatch({ findings: [openHighFinding] }))).resolves.toMatchObject({ status: "human_escalation" });
+    expect(verifier.requests).toEqual([expect.objectContaining({
+      campaignId: "campaign-1",
+      repository: "owner/repo",
+      pullRequest: "https://github.com/owner/repo/pull/7",
+      childSessionId: "session-1",
+      expectedParentCommitSha: commitSha,
+    })]);
+    expect((await store.get("campaign-1"))?.externalReferences).toContainEqual({ kind: "commit", value: commitSha });
+    expect((await store.get("campaign-1"))?.events.some(({ eventType }) => eventType === "campaign_operation_completed")).toBe(false);
+  });
+  it("treats an identical authenticated review replay as an idempotent no-op", async () => {
+    const { syncReview, store } = fixture();
+    await seedReview(store, campaign({ status: "qodo_review", qodoIteration: 0 }));
+    const batch = reviewBatch({ reviewId: "review-replay", complete: true, findings: [] });
+
+    await expect(syncReview.execute("campaign-1", batch)).resolves.toMatchObject({ version: 2 });
+    await expect(syncReview.execute("campaign-1", batch)).resolves.toMatchObject({ version: 2 });
+    expect((await store.get("campaign-1"))?.events.filter(({ eventType }) => eventType === "qodo_review_claimed")).toHaveLength(1);
+  });
+  it("rejects conflicting facts for an already claimed review identity", async () => {
+    const { syncReview, store } = fixture();
+    await seedReview(store, campaign({ status: "qodo_review", qodoIteration: 0 }));
+    const batch = reviewBatch({ reviewId: "review-conflict", complete: true, findings: [] });
+    await syncReview.execute("campaign-1", batch);
+
+    await expect(syncReview.execute("campaign-1", { ...batch, testsPassed: false })).rejects.toMatchObject({ code: "campaign_conflict" });
+    expect((await store.get("campaign-1"))?.campaign.version).toBe(2);
+  });
   it("treats every incomplete review, including one with findings, as a durable no-op", async () => {
     const { syncReview, store, harness } = fixture();
     await seedReview(store, campaign({ status: "qodo_review", qodoIteration: 1 }));
@@ -50,9 +109,9 @@ describe("SyncReview", () => {
     const snapshot = await store.get("campaign-1");
     expect(snapshot?.externalReferences).toContainEqual({ kind: "commit", value: commitSha });
     expect(snapshot?.events.some(({ eventType }) => eventType === "campaign_operation_completed")).toBe(false);
-    expect(snapshot?.events.at(-1)).toMatchObject({ eventType: "repair_execution_failed" });
+    expect(snapshot?.events.at(-1)).toMatchObject({ eventType: "quality_gate_escalated", payload: expect.objectContaining({ reason: "repair_child_failed" }) });
   });
-  it("does not persist a repair result or failure after cancellation wins a late provider completion", async () => {
+  it("atomically escalates a cancelled repair without accepting its late output", async () => {
     const { syncReview, store, harness } = fixture();
     await seedReview(store, campaign({ status: "qodo_review", qodoIteration: 0 }));
     let release!: () => void;
@@ -62,10 +121,20 @@ describe("SyncReview", () => {
     await vi.waitFor(() => { expect(harness.operations).toContain("repair"); });
     controller.abort();
     release();
-    await expect(executing).resolves.toMatchObject({ status: "repair" });
+    await expect(executing).resolves.toMatchObject({ status: "human_escalation" });
     const snapshot = await store.get("campaign-1");
-    expect(snapshot?.events.some(({ eventType }) => eventType === "campaign_operation_completed" || eventType === "repair_execution_failed")).toBe(false);
-    expect(snapshot?.campaign.status).toBe("repair");
+    expect(snapshot?.events.some(({ eventType }) => eventType === "campaign_operation_completed")).toBe(false);
+    expect(snapshot?.events.at(-1)).toMatchObject({ eventType: "quality_gate_escalated", payload: expect.objectContaining({ reason: "repair_cancelled" }) });
+    expect(snapshot?.campaign.status).toBe("human_escalation");
+  });
+  it("rolls back terminal status when escalation evidence cannot be persisted", async () => {
+    const { syncReview, store } = fixture();
+    await seedReview(store, campaign({ status: "qodo_review", qodoIteration: 3 }));
+    store.failNextEvent = true;
+
+    await expect(syncReview.enforceIterationLimit("campaign-1")).rejects.toThrow(/event persistence/i);
+    expect((await store.get("campaign-1"))?.campaign).toMatchObject({ status: "qodo_review", version: 1, qodoIteration: 3 });
+    expect((await store.get("campaign-1"))?.events).toEqual([]);
   });
   it("starts no fourth repair session", async () => {
     const { syncReview, store, harness } = fixture();
@@ -259,7 +328,7 @@ describe("SyncReview", () => {
     expect(result.status).toBe("human_escalation");
     const snapshot = await store.get("campaign-1");
     expect(snapshot?.events.at(-1)).toMatchObject({
-      eventType: "repair_execution_failed",
+      eventType: "quality_gate_escalated",
       payload: { reason: "repair_child_failed", claimedCampaignVersion: 2 },
     });
     expect(JSON.stringify(snapshot?.events)).not.toContain("top-secret");
@@ -394,6 +463,37 @@ describe("SyncReview", () => {
     const fixed = { ...openHighFinding, status: "fixed" as const, disposition: "Fixed in approved repair commit" };
     await expect(syncReview.execute("campaign-1", reviewBatch({ reviewId: "review-b", commitSha: nextCommit, findings: [fixed] }))).resolves.toMatchObject({ status: "qodo_review", qodoIteration: 1 });
   });
+
+  it("reconciles a durably uncertain update_pr completion back to review atomically", async () => {
+    const nextCommit = "c".repeat(40);
+    const { syncReview, store, harness } = fixture();
+    await seedReview(store, campaign({ status: "qodo_review", qodoIteration: 0 }));
+    harness.enqueueResult("repair", { summary: "repair committed", artifacts: [], output: repairOutput(nextCommit) });
+    const repaired = await syncReview.execute("campaign-1", reviewBatch({ reviewId: "review-reconcile", findings: [openHighFinding] }));
+    const payload = {
+      action: "update_pr" as const,
+      repository: "owner/repo",
+      issueNumber: 42,
+      pullRequest: "https://github.com/owner/repo/pull/7",
+      branch: "openquest/fix-42",
+      commitSha: nextCommit,
+      body: "Publish verified repair",
+    };
+    await issueUpdateProposal(store, "approval-reconcile", payload, repaired.version);
+    let event = 0;
+    const runner = new RunCampaign(store, harness, { now: () => "2026-08-26T00:03:00Z" }, { next: () => `reconcile-event-${String(++event)}` });
+    store.failNextExternalCompletion = true;
+    await expect(runner.executeApprovedExternalAction("campaign-1", { approvalId: "approval-reconcile", payload }, async () => undefined)).rejects.toThrow(/reconciliation required/i);
+    const unknown = await store.get("campaign-1");
+    const claimId = unknown?.externalActionClaims[0]?.id;
+    if (claimId === undefined) throw new Error("missing update_pr claim");
+
+    await expect(runner.reconcileExternalAction("campaign-1", { claimId, disposition: "confirmed_completed", observedCanonicalHead: nextCommit })).resolves.toMatchObject({ status: "qodo_review", version: repaired.version + 1 });
+    const reconciled = await store.get("campaign-1");
+    expect(reconciled?.externalReferences.filter(({ kind }) => kind === "commit")).toEqual([{ kind: "commit", value: nextCommit }]);
+    expect(reconciled?.externalReferences.filter(({ kind }) => kind === "pull_request")).toEqual([{ kind: "pull_request", value: payload.pullRequest }]);
+    expect(reconciled?.events.at(-1)).toMatchObject({ eventType: "external_action_reconciled", payload: expect.objectContaining({ resultingCampaignVersion: repaired.version + 1 }) });
+  });
 });
 
 function reviewBatch(overrides: Partial<QodoReviewBatch> = {}): QodoReviewBatch {
@@ -451,6 +551,7 @@ function fixture(): { syncReview: SyncReview; store: FakeCampaignStore; harness:
       harness,
       { now: () => "2026-08-26T00:02:00Z" },
       { next: () => `qodo-event-${String(++eventNumber)}` },
+      new FakeRepairVerifier(),
     ),
     store,
     harness,

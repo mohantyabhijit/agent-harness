@@ -19,6 +19,7 @@ import {
   type ExternalActionStaleRecoveryRecord,
   type ExternalReference,
   type QodoReviewClaimRecord,
+  type QodoEscalationRecord,
 } from "../../application/ports/campaign-store.js";
 import { currentApprovalProposal } from "../../application/approval-proposal.js";
 import {
@@ -467,6 +468,21 @@ export class SqliteCampaignStore implements CampaignStore {
     write.immediate();
   }
 
+  async escalateQodoReview(campaignId: string, record: QodoEscalationRecord): Promise<void> {
+    const occurredAt = normalizeTimestamp(record.event.occurredAt, "event occurredAt");
+    if (record.event.eventType !== "quality_gate_escalated" || record.campaign.status !== "human_escalation" || record.campaign.version !== record.expectedVersion + 1) {
+      throw new Error("Invalid Qodo escalation record");
+    }
+    const escalate = this.#database.transaction(() => {
+      this.#assertClaim(campaignId, record.expectedVersion, record.expectedStatus);
+      const updated = this.#database.prepare("UPDATE campaigns SET status = 'human_escalation', version = ?, updated_at = ? WHERE id = ? AND version = ? AND status = ?")
+        .run(record.campaign.version, occurredAt, campaignId, record.expectedVersion, record.expectedStatus);
+      if (updated.changes !== 1) throw new CampaignVersionConflict(campaignId, record.expectedVersion);
+      this.#insertEvent(campaignId, record.event, occurredAt);
+    });
+    escalate.immediate();
+  }
+
   #upsertQodoFinding(campaignId: string, iteration: number, parsedFinding: QodoFinding): void {
     const result = this.#database.prepare(`
       INSERT INTO qodo_findings (
@@ -638,16 +654,23 @@ export class SqliteCampaignStore implements CampaignStore {
     if (record.observedCanonicalHead !== undefined) assertCommitSha(record.observedCanonicalHead);
     if (record.event.eventType !== "external_action_reconciled") throw new Error("Invalid external action reconciliation event");
     const reconcile = this.#database.transaction(() => {
-      this.#requiredExternalActionClaim(campaignId, record.claimId, "outcome_unknown");
+      const claim = this.#requiredExternalActionClaim(campaignId, record.claimId, "outcome_unknown");
       const campaign = this.#database.prepare("SELECT version, status FROM campaigns WHERE id = ?").get(campaignId) as Pick<CampaignRow, "version" | "status"> | undefined;
       if (campaign === undefined) throw new Error(`Campaign ${campaignId} does not exist`);
       const current = this.#currentCommit(campaignId);
       const changed = record.observedCanonicalHead !== undefined && record.observedCanonicalHead !== current;
-      const resultingVersion = campaign.version + (changed ? 1 : 0);
+      const confirmedUpdate = record.disposition === "confirmed_completed" && claim.payload.action === "update_pr";
+      if (confirmedUpdate && (record.observedCanonicalHead !== claim.payload.commitSha || current !== claim.payload.commitSha || campaign.status !== "repair" || this.#currentPullRequest(campaignId) !== claim.payload.pullRequest)) {
+        throw new Error("Confirmed update_pr reconciliation does not match current authority");
+      }
+      const resultingVersion = campaign.version + (changed || confirmedUpdate ? 1 : 0);
       assertExternalActionEventVersion(record.event.payload, campaign.version, resultingVersion);
       if (changed) {
         this.#replaceCommit(campaignId, record.observedCanonicalHead);
-        const updated = this.#database.prepare("UPDATE campaigns SET version = version + 1, updated_at = ? WHERE id = ? AND version = ?").run(reconciledAt, campaignId, campaign.version);
+      }
+      if (changed || confirmedUpdate) {
+        const nextStatus = confirmedUpdate ? "qodo_review" : campaign.status;
+        const updated = this.#database.prepare("UPDATE campaigns SET version = version + 1, status = ?, updated_at = ? WHERE id = ? AND version = ? AND status = ?").run(nextStatus, reconciledAt, campaignId, campaign.version, campaign.status);
         if (updated.changes !== 1) throw new CampaignVersionConflict(campaignId, campaign.version);
       }
       this.#insertEvent(campaignId, record.event, occurredAt);
@@ -701,7 +724,7 @@ export class SqliteCampaignStore implements CampaignStore {
       }
       assertChildEventVersion(record.event.payload, record.expectedVersion, resultingVersion);
       this.#database.prepare("INSERT INTO external_references (campaign_id, kind, value) VALUES (?, 'child_session', ?) ON CONFLICT DO NOTHING").run(campaignId, record.childSessionId);
-      this.#database.prepare("INSERT INTO external_references (campaign_id, kind, value) VALUES (?, 'sandbox', ?) ON CONFLICT DO NOTHING").run(campaignId, record.childSessionId);
+      this.#database.prepare("INSERT INTO external_references (campaign_id, kind, value) VALUES (?, 'sandbox', ?) ON CONFLICT DO NOTHING").run(campaignId, record.sandboxSessionId ?? record.childSessionId);
       if (record.event.eventType === "campaign_operation_completed") {
         const result = record.operationResult;
         if (result === undefined || result.currentCommitSha !== this.#currentCommit(campaignId)) throw new Error("Completed child result lacks typed operation authority");

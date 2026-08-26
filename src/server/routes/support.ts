@@ -124,7 +124,7 @@ const factEnums: Readonly<Record<string, readonly string[]>> = {
   status: ["policy_review", "coordination_pending", "preflight", "quarantined", "baseline", "implementation", "verification", "contribution_approval", "pull_request_open", "qodo_review", "repair", "human_escalation", "merged", "closed", "withdrawn", "completed", "failed"],
   targetStatus: ["quarantined", "human_escalation"], outcome: ["pass", "repair", "escalate"], verdict: ["pass", "quarantine"],
   disposition: ["confirmed_completed", "confirmed_not_completed"],
-  reason: ["maximum_qodo_iterations", "tests_failed", "repair_child_failed", "invalid_preflight_output", "operation_result_not_safely_recorded", "external_action_result_unknown", "human_external_action_reconciliation", "operator_recovered_stale_active_claim", "operator_recovered_interrupted_operation"],
+  reason: ["maximum_qodo_iterations", "tests_failed", "repair_child_failed", "repair_cancelled", "invalid_preflight_output", "operation_result_not_safely_recorded", "external_action_result_unknown", "human_external_action_reconciliation", "operator_recovered_stale_active_claim", "operator_recovered_interrupted_operation"],
 };
 const publicEventTypes = new Set(["campaign_created", "campaign_operation_completed", "campaign_operation_rejected", "external_action_proposed", "external_action_attempted", "external_action_completed", "external_action_outcome_unknown", "external_action_reconciled", "external_action_stale_recovered", "interrupted_operation_recovered", "preflight_execution_failed", "implementation_execution_failed", "verification_execution_failed", "qodo_review_claimed", "qodo_finding_recorded", "quality_gate_passed", "quality_gate_escalated", "quality_gate_repair_requested", "repair_execution_failed"]);
 function validFact(key: string, value: unknown): value is string | number | boolean {
@@ -152,7 +152,7 @@ function qualityEscalationReason(snapshot: CampaignSnapshot): string | null {
   if (snapshot.campaign.status !== "human_escalation") return null;
   for (const event of snapshot.events.toReversed()) {
     const facts = safeEventFacts(event.eventType, event.payload);
-    if (event.eventType === "quality_gate_escalated" && (facts.reason === "maximum_qodo_iterations" || facts.reason === "tests_failed")) return facts.reason;
+    if (event.eventType === "quality_gate_escalated" && ["maximum_qodo_iterations", "tests_failed", "repair_child_failed", "repair_cancelled"].includes(String(facts.reason))) return String(facts.reason);
     if (event.eventType === "repair_execution_failed" && facts.reason === "repair_child_failed") return "repair_child_failed";
     if ((event.eventType === "implementation_execution_failed" || event.eventType === "verification_execution_failed") && facts.reason === "operation_result_not_safely_recorded") return facts.reason;
     if (event.eventType === "interrupted_operation_recovered" && facts.targetStatus === "human_escalation") return "operator_recovered_interrupted_operation";

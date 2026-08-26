@@ -203,7 +203,16 @@ export class RunCampaign {
     const claim = snapshot.externalActionClaims.find(({ id }) => id === reconciliation.claimId);
     if (claim === undefined || claim.status !== "outcome_unknown") throw new ApplicationError("invalid_transition");
     const current = campaignCurrentCommit(snapshot);
-    const resultingVersion = snapshot.campaign.version + (reconciliation.observedCanonicalHead !== undefined && reconciliation.observedCanonicalHead !== current ? 1 : 0);
+    let confirmedUpdate = false;
+    if (reconciliation.disposition === "confirmed_completed" && claim.payload.action === "update_pr") {
+      confirmedUpdate = true;
+      const updatePayload = claim.payload;
+      if (reconciliation.observedCanonicalHead !== updatePayload.commitSha || current !== updatePayload.commitSha || snapshot.campaign.status !== "repair" ||
+        !snapshot.externalReferences.some(({ kind, value }) => kind === "pull_request" && value === updatePayload.pullRequest)) {
+        throw new ApplicationError("campaign_conflict");
+      }
+    }
+    const resultingVersion = snapshot.campaign.version + (confirmedUpdate || (reconciliation.observedCanonicalHead !== undefined && reconciliation.observedCanonicalHead !== current) ? 1 : 0);
     await this.store.reconcileExternalAction(campaignId, {
       claimId: reconciliation.claimId,
       disposition: reconciliation.disposition,

@@ -26,7 +26,7 @@ export interface CampaignSnapshot extends Campaign {
   readonly externalReferences: readonly { readonly kind: "issue" | "branch" | "pull_request" | "commit" | "sandbox" | "child_session" | "ci_run"; readonly value: string }[];
   readonly externalActionClaims: readonly { readonly id: string; readonly approvalId: string; readonly action: ApprovalAction; readonly actionDigest: string; readonly claimedCampaignVersion: number; readonly claimedCampaignStatus: Campaign["status"]; readonly status: "active" | "outcome_unknown" | "completed" | "reconciled"; readonly attemptedAt: string; readonly leaseStartedAt: string; readonly closedAt?: string; readonly disposition?: "confirmed_completed" | "confirmed_not_completed" }[];
   readonly approvalProposal: ApprovalProposal | null;
-  readonly qualityEscalationReason: "maximum_qodo_iterations" | "tests_failed" | "repair_child_failed" | "operation_result_not_safely_recorded" | "operator_recovered_interrupted_operation" | null;
+  readonly qualityEscalationReason: "maximum_qodo_iterations" | "tests_failed" | "repair_child_failed" | "repair_cancelled" | "operation_result_not_safely_recorded" | "operator_recovered_interrupted_operation" | null;
 }
 export interface OpenQuestApi {
   getSpaces(signal?: AbortSignal): Promise<readonly SpaceOption[]>;
@@ -88,7 +88,7 @@ const publicEvent = z.object({ id: identifier, eventType: publicEventType, occur
     context.addIssue({ code: "custom", message: "Invalid external action reconciliation facts" });
   }
 });
-const qualityEscalationReason = z.enum(["maximum_qodo_iterations", "tests_failed", "repair_child_failed", "operation_result_not_safely_recorded", "operator_recovered_interrupted_operation"]);
+const qualityEscalationReason = z.enum(["maximum_qodo_iterations", "tests_failed", "repair_child_failed", "repair_cancelled", "operation_result_not_safely_recorded", "operator_recovered_interrupted_operation"]);
 const campaignSnapshotResponse = campaignCore.extend({ evidence: z.array(evidence).max(10_000), events: z.array(publicEvent).max(10_000), approvals: z.array(publicApproval).max(1_000), qodoFindings: z.array(qodoFinding).max(10_000), externalReferences: z.array(externalReference).max(10_000), externalActionClaims: z.array(externalActionClaim).max(1_000), approvalProposal: approvalProposal.nullable(), qualityEscalationReason: qualityEscalationReason.nullable() }).strict().superRefine((value, context) => {
   validateCampaignIdentity(value, context);
   const proposal = value.approvalProposal;

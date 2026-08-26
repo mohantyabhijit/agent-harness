@@ -10,6 +10,7 @@ import { createQodoReviewJob, type ReviewJobScheduler } from "../../../src/serve
 import { campaign } from "../../builders.js";
 import { FakeCampaignStore } from "../../fakes/fake-campaign-store.js";
 import { FakeHarness } from "../../fakes/fake-harness.js";
+import { FakeRepairVerifier } from "../../fakes/fake-repair-verifier.js";
 
 const commitSha = "b".repeat(40);
 
@@ -22,6 +23,33 @@ describe("QodoReviewJob", () => {
     expect(fixture.review.requests).toHaveLength(1);
     expect(fixture.harness.operations).toEqual([]);
     expect((await fixture.store.get("campaign-1"))?.campaign).toMatchObject({ status: "qodo_review", qodoIteration: 0, version: 2 });
+  });
+
+  it("keeps repeated authenticated pass polling healthy and idempotent", async () => {
+    const fixture = await jobFixture("pass.json", 0);
+    await fixture.job.tick();
+    await fixture.job.tick();
+
+    expect(fixture.job.health()).toEqual({ status: "ready" });
+    expect(fixture.review.requests).toHaveLength(2);
+    expect((await fixture.store.get("campaign-1"))?.campaign).toMatchObject({ version: 2, status: "qodo_review" });
+  });
+
+  it("is non-ready before polling when authenticated review authority is unavailable", async () => {
+    const fixture = await jobFixture("pass.json", 0);
+    const job = createQodoReviewJob({
+      store: fixture.store,
+      review: fixture.review,
+      syncReview: { execute: async () => campaign() },
+      scheduler: { setInterval: () => 1, clearInterval: () => undefined },
+      intervalMs: 10_000,
+      shutdownTimeoutMs: 50,
+      providerReady: false,
+    });
+    expect(job.health()).toEqual({ status: "degraded", code: "provider_unavailable" });
+    await job.tick();
+    expect(fixture.review.requests).toHaveLength(0);
+    expect(job.health()).toEqual({ status: "degraded", code: "provider_unavailable" });
   });
 
   it("persists actionable source evidence before starting one fresh repair child", async () => {
@@ -92,7 +120,7 @@ describe("QodoReviewJob", () => {
     store.seed(campaign({ status: "qodo_review", qodoIteration: 3 }));
     store.seedExternalReference("campaign-1", { kind: "commit", value: commitSha });
     let eventNumber = 0;
-    const syncReview = new SyncReview(store, fixture.harness, { now: () => "2026-08-26T00:00:00Z" }, { next: () => `authority-event-${String(++eventNumber)}` });
+    const syncReview = new SyncReview(store, fixture.harness, { now: () => "2026-08-26T00:00:00Z" }, { next: () => `authority-event-${String(++eventNumber)}` }, new FakeRepairVerifier());
     const scheduler: ReviewJobScheduler = { setInterval: () => 1, clearInterval: () => undefined };
     const job = createQodoReviewJob({ store, review: fixture.review, syncReview, scheduler, intervalMs: 10_000, shutdownTimeoutMs: 50 });
 
@@ -131,6 +159,22 @@ describe("QodoReviewJob", () => {
     expect(Date.now() - started).toBeLessThan(150);
     expect(fixture.review.requests[0]?.request.signal?.aborted).toBe(true);
     expect((await fixture.store.get("campaign-1"))?.campaign.status).toBe("qodo_review");
+  });
+
+  it("detaches an abort-ignoring provider generation and permits a fresh start", async () => {
+    const fixture = await jobFixture("pass.json", 0);
+    fixture.review.beforeResult = async () => new Promise<void>(() => undefined);
+    void fixture.job.tick();
+    await vi.waitFor(() => { expect(fixture.review.requests).toHaveLength(1); });
+
+    await fixture.job.stop();
+    expect(fixture.job.health()).toEqual({ status: "degraded", code: "shutdown_timeout" });
+
+    delete fixture.review.beforeResult;
+    fixture.job.start();
+    await fixture.job.tick();
+    expect(fixture.review.requests).toHaveLength(2);
+    await fixture.job.stop();
   });
 
   it("catches store enumeration failure and exposes only sanitized health", async () => {
@@ -208,7 +252,7 @@ async function jobFixture(fixtureName: string, iteration: number) {
     }),
   };
   let eventNumber = 0;
-  const syncReview = new SyncReview(store, harness, { now: () => "2026-08-26T00:00:00Z" }, { next: () => `job-event-${String(++eventNumber)}` });
+  const syncReview = new SyncReview(store, harness, { now: () => "2026-08-26T00:00:00Z" }, { next: () => `job-event-${String(++eventNumber)}` }, new FakeRepairVerifier());
   const scheduler: ReviewJobScheduler = { setInterval: () => 1, clearInterval: () => undefined };
   const job = createQodoReviewJob({ store, review, syncReview, scheduler, intervalMs: 10_000, shutdownTimeoutMs: 50 });
   return { store, harness, review, job };

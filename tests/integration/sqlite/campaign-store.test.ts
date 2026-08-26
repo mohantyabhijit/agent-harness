@@ -129,6 +129,59 @@ function insertRepairAuthority(database: Database.Database, input: { eventId: st
 }
 
 describe("SqliteCampaignStore", () => {
+  it("rolls back terminal Qodo status when SQLite cannot persist escalation evidence", async () => {
+    const { database, store } = openMemoryStore();
+    const current = campaign({ status: "qodo_review", version: 1, qodoIteration: 3 });
+    await store.create(current);
+    database.exec(`CREATE TRIGGER fail_qodo_escalation BEFORE INSERT ON campaign_events
+      WHEN NEW.event_type = 'quality_gate_escalated' BEGIN SELECT RAISE(ABORT, 'injected escalation failure'); END`);
+
+    await expect(store.escalateQodoReview("campaign-1", {
+      expectedVersion: 1,
+      expectedStatus: "qodo_review",
+      campaign: transitionCampaign(current, "human_escalation"),
+      event: { id: "escalation", eventType: "quality_gate_escalated", occurredAt: "2026-08-26T00:00:00Z", payload: { reason: "maximum_qodo_iterations" } },
+    })).rejects.toThrow(/injected escalation failure/i);
+
+    expect((await store.get("campaign-1"))?.campaign).toEqual(current);
+    expect((await store.get("campaign-1"))?.events).toEqual([]);
+  });
+
+  it("atomically reconciles uncertain exact update_pr completion back to Qodo review", async () => {
+    const { database, store } = openMemoryStore();
+    const repairedHead = "c".repeat(40);
+    const pullRequest = "https://github.com/owner/repo/pull/7";
+    const payload = { action: "update_pr" as const, repository: "owner/repo", issueNumber: 42, pullRequest, branch: "openquest/fix-42", commitSha: repairedHead, body: "Publish verified repair" };
+    await store.create(campaign({ status: "repair", version: 3, qodoIteration: 1 }));
+    database.prepare("INSERT INTO external_references (campaign_id, kind, value) VALUES ('campaign-1', 'commit', ?)").run(repairedHead);
+    database.prepare("INSERT INTO external_references (campaign_id, kind, value) VALUES ('campaign-1', 'pull_request', ?)").run(pullRequest);
+    insertRepairAuthority(database, { eventId: "repair-authority", currentHead: repairedHead, pullRequest });
+    await issueBoundApproval(store, { id: "approval-update-reconcile", payload, version: 3, status: "repair", currentCommitSha: repairedHead });
+    const digest = externalActionDigest(payload);
+    await store.claimExternalAction("campaign-1", {
+      claimId: "claim-update-reconcile", approvalId: "approval-update-reconcile", actionDigest: digest, payload,
+      expectedCurrentCommitSha: repairedHead, expectedVersion: 3, expectedStatus: "repair", consumedAt: "2026-08-26T00:01:00Z", leaseStartedAt: "2026-08-26T00:01:00Z",
+      attemptedEvent: { id: "attempt-update-reconcile", eventType: "external_action_attempted", occurredAt: "2026-08-26T00:01:00Z", payload: { claimedCampaignVersion: 3, resultingCampaignVersion: 3 } },
+    });
+    database.exec(`CREATE TRIGGER fail_update_completion BEFORE INSERT ON campaign_events
+      WHEN NEW.event_type = 'external_action_completed' BEGIN SELECT RAISE(ABORT, 'injected completion failure'); END`);
+    await expect(store.completeExternalAction("campaign-1", {
+      claimId: "claim-update-reconcile", completedAt: "2026-08-26T00:02:00Z", newCommitSha: repairedHead,
+      completedEvent: { id: "completed-update-reconcile", eventType: "external_action_completed", occurredAt: "2026-08-26T00:02:00Z", payload: { claimedCampaignVersion: 3, resultingCampaignVersion: 4 } },
+    })).rejects.toThrow(/injected completion failure/i);
+    await store.markExternalActionOutcomeUnknown("campaign-1", { claimId: "claim-update-reconcile", event: { id: "unknown-update-reconcile", eventType: "external_action_outcome_unknown", occurredAt: "2026-08-26T00:03:00Z", payload: { reason: "external_action_result_unknown" } } });
+
+    await expect(store.reconcileExternalAction("campaign-1", {
+      claimId: "claim-update-reconcile", disposition: "confirmed_completed", observedCanonicalHead: repairedHead, reconciledAt: "2026-08-26T00:04:00Z",
+      event: { id: "reconciled-update", eventType: "external_action_reconciled", occurredAt: "2026-08-26T00:04:00Z", payload: { claimedCampaignVersion: 3, resultingCampaignVersion: 4 } },
+    })).resolves.toBe(4);
+    const snapshot = await store.get("campaign-1");
+    expect(snapshot?.campaign).toMatchObject({ status: "qodo_review", version: 4, qodoIteration: 1 });
+    expect(snapshot?.externalReferences.filter(({ kind }) => kind === "commit")).toEqual([{ kind: "commit", value: repairedHead }]);
+    expect(snapshot?.externalReferences.filter(({ kind }) => kind === "pull_request")).toEqual([{ kind: "pull_request", value: pullRequest }]);
+    expect(snapshot?.externalActionClaims[0]).toMatchObject({ status: "reconciled", disposition: "confirmed_completed", observedCanonicalHead: repairedHead });
+  });
+
   it("rolls back the Qodo claim, findings, events, and gate transition as one SQLite transaction", async () => {
     const { database, store } = openMemoryStore();
     await store.create(campaign({ status: "qodo_review", qodoIteration: 0 }));

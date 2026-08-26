@@ -101,6 +101,7 @@ export interface ChildResultRecord {
   readonly expectedVersion: number;
   readonly expectedStatus: CampaignStatus;
   readonly childSessionId: string;
+  readonly sandboxSessionId?: string;
   readonly event: CampaignEventInput;
   readonly newCommitSha?: string;
   readonly operationResult?: CampaignOperationResult;
@@ -122,6 +123,13 @@ export interface QodoReviewClaimRecord {
   readonly claimedEvent: CampaignEventInput;
   readonly findings: readonly QodoReviewFindingRecord[];
   readonly outcomeEvent: CampaignEventInput;
+}
+
+export interface QodoEscalationRecord {
+  readonly expectedVersion: number;
+  readonly expectedStatus: "qodo_review" | "repair";
+  readonly campaign: Campaign;
+  readonly event: CampaignEventInput;
 }
 
 export interface CampaignOperationResult {
@@ -168,6 +176,7 @@ export interface CampaignStore {
   ): Promise<Approval>;
   recordQodoFinding(campaignId: string, iteration: number, finding: QodoFinding): Promise<void>;
   applyQodoReview(campaignId: string, record: QodoReviewClaimRecord): Promise<void>;
+  escalateQodoReview(campaignId: string, record: QodoEscalationRecord): Promise<void>;
   claimExternalAction(campaignId: string, record: ExternalActionClaimRecord): Promise<ExternalActionClaim>;
   completeExternalAction(campaignId: string, record: ExternalActionCompletionRecord): Promise<number>;
   markExternalActionOutcomeUnknown(campaignId: string, record: ExternalActionOutcomeUnknownRecord): Promise<void>;
