@@ -11,42 +11,117 @@ import type {
 const finalEnvelopeSchema = z
   .object({
     summary: z.string().trim().min(1),
-    artifacts: z.array(
-      z
-        .string()
-        .trim()
-        .min(1)
-        .refine(isSandboxArtifactPath),
-    ),
+    artifacts: z.array(z.string().min(1).refine(isSandboxArtifactPath)),
     output: z.unknown(),
   })
   .strict();
 
+const nonNegativeNumber = z.number().nonnegative();
+const turnMetricsSchema = z
+  .object({
+    totalCacheReadTokens: nonNegativeNumber.optional(),
+    totalCacheWriteTokens: nonNegativeNumber.optional(),
+    totalCostInUsd: nonNegativeNumber.optional(),
+    totalInputTokens: nonNegativeNumber.optional(),
+    totalOutputTokens: nonNegativeNumber.optional(),
+    totalReasoningTokens: nonNegativeNumber.optional(),
+    totalTokens: nonNegativeNumber.optional(),
+  })
+  .strict();
+const modelMessageUsageSchema = z
+  .object({
+    cacheReadTokens: nonNegativeNumber.optional(),
+    cacheWriteTokens: nonNegativeNumber.optional(),
+    inputTokens: nonNegativeNumber,
+    inputTokensBreakdown: z
+      .object({
+        harness: nonNegativeNumber,
+        instructions: nonNegativeNumber,
+        messages: nonNegativeNumber,
+        skills: nonNegativeNumber,
+        toolDefinitions: nonNegativeNumber,
+      })
+      .strict(),
+    outputTokens: nonNegativeNumber,
+  })
+  .strict();
+
+const modelMessageSchema = z
+  .object({
+    content: z
+      .union([
+        z.string(),
+        z.array(
+          z.discriminatedUnion("type", [
+            z.object({ type: z.literal("text"), text: z.string() }).loose(),
+            z.object({ type: z.literal("refusal"), refusal: z.string() }).loose(),
+          ]),
+        ),
+      ])
+      .nullable()
+      .optional(),
+    createdAt: z.iso.datetime(),
+    finishReason: z
+      .enum(["stop", "length", "tool_calls", "content_filter", "function_call"])
+      .nullable()
+      .optional(),
+    id: z.string().min(1),
+    name: z.string().optional(),
+    reasoningContent: z.string().optional(),
+    refusal: z.string().nullable().optional(),
+    threadId: z.string().min(1),
+    toolCalls: z.array(z.unknown()).optional(),
+    type: z.literal("model.message"),
+    usage: modelMessageUsageSchema.optional(),
+  })
+  .loose();
+
+const turnCreatedSchema = z
+  .object({
+    createdAt: z.iso.datetime(),
+    id: z.string().min(1),
+    previousTurnId: z.string().min(1).nullable(),
+    state: z.object({ status: z.literal("running") }).strict(),
+    threadId: z.null(),
+    turnId: z.string().min(1),
+    type: z.literal("turn.created"),
+  })
+  .loose();
+
 const turnDoneSchema = z
   .object({
+    createdAt: z.iso.datetime(),
+    id: z.string().min(1),
+    threadId: z.null(),
     type: z.literal("turn.done"),
     state: z.discriminatedUnion("status", [
-      z.object({ status: z.literal("cancelled") }).loose(),
-      z.object({ status: z.literal("error") }).loose(),
       z
         .object({
+          completedAt: z.iso.datetime(),
+          metrics: turnMetricsSchema.optional(),
+          reason: z.enum([
+            "server-execution-timeout",
+            "client-cancelled",
+            "cancelled-for-next-turn",
+            "abandoned",
+          ]),
+          status: z.literal("cancelled"),
+        })
+        .loose(),
+      z
+        .object({
+          completedAt: z.iso.datetime(),
+          message: z.string(),
+          metrics: turnMetricsSchema.optional(),
+          status: z.literal("error"),
+        })
+        .loose(),
+      z
+        .object({
+          completedAt: z.iso.datetime(),
+          metrics: turnMetricsSchema.optional(),
           status: z.literal("done"),
-          output: z
-            .object({
-              content: z.union([
-                z.string(),
-                z.array(
-                  z.discriminatedUnion("type", [
-                    z.object({ type: z.literal("text"), text: z.string() }),
-                    z.object({ type: z.literal("refusal"), refusal: z.string() }),
-                  ]),
-                ),
-              ])
-              .nullable()
-              .optional(),
-            })
-            .loose()
-            .nullable(),
+          output: modelMessageSchema.nullable(),
           requiredActions: z.array(z.object({ type: z.string() }).loose()),
         })
         .loose(),
@@ -110,21 +185,56 @@ export class TrueForgeHarness implements HarnessPort {
       // milestone or repair runs in a fresh child context and fresh sandbox.
       const sessionId = await this.createNamedSession();
       const stream = await this.streamSession(sessionId, packet, operation);
+      const createdTurnIds: string[] = [];
+      let terminalState: z.infer<typeof turnDoneSchema>["state"] | undefined;
+      let terminalCount = 0;
+      let eventAfterTerminal = false;
+      let malformedLifecycleEvent = false;
+      let authenticationRequired = false;
 
       for await (const event of stream) {
+        if (terminalCount > 0) {
+          eventAfterTerminal = true;
+        }
         if (isMcpAuthRequired(event)) {
-          throw new HarnessAuthRequired();
+          authenticationRequired = true;
         }
 
-        const turnDone = turnDoneSchema.safeParse(event);
-        if (!turnDone.success) {
-          continue;
+        if (hasEventType(event, "turn.created")) {
+          const turnCreated = turnCreatedSchema.safeParse(event);
+          if (!turnCreated.success) {
+            malformedLifecycleEvent = true;
+          } else {
+            createdTurnIds.push(turnCreated.data.turnId);
+          }
         }
 
-        return parseCompletedTurn(sessionId, turnDone.data.state);
+        if (hasEventType(event, "turn.done")) {
+          terminalCount += 1;
+          const turnDone = turnDoneSchema.safeParse(event);
+          if (!turnDone.success) {
+            malformedLifecycleEvent = true;
+          } else {
+            terminalState = turnDone.data.state;
+          }
+        }
       }
 
-      throw new HarnessExecutionFailed();
+      if (authenticationRequired) {
+        throw new HarnessAuthRequired();
+      }
+      if (malformedLifecycleEvent) {
+        throw new HarnessOutputInvalid();
+      }
+      if (
+        createdTurnIds.length !== 1 ||
+        terminalCount !== 1 ||
+        terminalState === undefined ||
+        eventAfterTerminal
+      ) {
+        throw new HarnessExecutionFailed();
+      }
+      return parseCompletedTurn(sessionId, terminalState);
     } catch (error) {
       throw normalizeSdkError(error);
     }
@@ -182,6 +292,9 @@ function parseCompletedTurn(
   if (state.requiredActions.length > 0 || state.output === null) {
     throw new HarnessExecutionFailed();
   }
+  if (state.output.refusal !== undefined && state.output.refusal !== null) {
+    throw new HarnessOutputInvalid();
+  }
 
   const content = extractText(state.output.content);
   if (content === null) {
@@ -220,23 +333,37 @@ function extractText(
 }
 
 function isMcpAuthRequired(event: unknown): boolean {
-  return (
-    typeof event === "object" &&
-    event !== null &&
-    "type" in event &&
-    event.type === "mcp.auth_required"
-  );
+  return hasEventType(event, "mcp.auth_required");
+}
+
+function hasEventType(event: unknown, type: string): boolean {
+  return typeof event === "object" && event !== null && "type" in event && event.type === type;
 }
 
 function isSandboxArtifactPath(value: string): boolean {
-  const pathSegments = value.replaceAll("\\", "/").split("/");
+  const normalizedSeparators = value.replaceAll("\\", "/");
+  const pathSegments = normalizedSeparators.split("/");
+  const hasControlCharacter = containsControlCharacter(value);
   return (
-    !value.includes("\0") &&
-    !/^[a-z][a-z\d+.-]*:\/\//iu.test(value) &&
+    value === value.trim() &&
+    value === normalizedSeparators &&
+    !hasControlCharacter &&
+    !/[?#%:]/u.test(value) &&
     !value.startsWith("/") &&
-    !/^[a-z]:[\\/]/iu.test(value) &&
-    !pathSegments.includes("..")
+    pathSegments[0] === "artifacts" &&
+    pathSegments.length > 1 &&
+    pathSegments.every((segment) => segment !== "" && segment !== "." && segment !== "..")
   );
+}
+
+function containsControlCharacter(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit <= 31 || codeUnit === 127) {
+      return true;
+    }
+  }
+  return false;
 }
 
 async function* normalizeStreamErrors(source: AsyncIterable<unknown>): AsyncGenerator {

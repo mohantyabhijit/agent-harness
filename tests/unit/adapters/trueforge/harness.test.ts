@@ -56,13 +56,14 @@ describe("TrueForgeHarness", () => {
       input: [{ type: "user.message", content: JSON.stringify({ operation: "implement", packet }) }],
       previousTurnId: "auto",
     });
-    expect(consumed).toBe(2);
+    expect(consumed).toBe(events.length);
   });
 
-  it("returns all persisted session events from the SDK page", async () => {
+  it("returns persisted events across every SDK page", async () => {
     const pageItems = [
       { turnId: "turn-2", event: { type: "turn.done" } },
       { turnId: "turn-1", event: { type: "turn.created" } },
+      { turnId: "turn-1", event: { type: "model.message" } },
     ];
     const client = {
       sessions: {
@@ -132,37 +133,163 @@ describe("TrueForgeHarness", () => {
     );
   });
 
-  it("rejects artifact paths that can escape the session sandbox", async () => {
-    const client = {
-      sessions: {
-        create: vi.fn().mockResolvedValue({ data: { id: "child-session-1" } }),
-        createTurnStream: vi.fn().mockResolvedValue(
-          stream([
-            {
-              type: "turn.done",
-              state: {
-                status: "done",
-                requiredActions: [],
-                output: {
-                  content: JSON.stringify({
-                    summary: "Unsafe artifact claim",
-                    artifacts: ["../credentials"],
-                    output: {},
-                  }),
-                },
-              },
-            },
-          ]),
-        ),
-      },
-    };
-    const harness = new TrueForgeHarness(client as never);
+  it("rejects a top-level model refusal even when content contains valid JSON", async () => {
+    const harness = harnessStreaming([
+      turnCreatedEvent(),
+      turnDoneEvent({ refusal: "I cannot provide this result." }),
+    ]);
 
     await expect(harness.runChildSession(packet, "verify")).rejects.toBeInstanceOf(
       HarnessOutputInvalid,
     );
   });
+
+  it("rejects duplicate terminal events after consuming the full stream", async () => {
+    const harness = harnessStreaming([turnCreatedEvent(), turnDoneEvent(), turnDoneEvent()]);
+
+    await expect(harness.runChildSession(packet, "verify")).rejects.toBeInstanceOf(
+      HarnessExecutionFailed,
+    );
+  });
+
+  it("rejects a malformed terminal event instead of treating it as absent", async () => {
+    const harness = harnessStreaming([
+      turnCreatedEvent(),
+      { type: "turn.done", state: { status: "done" } },
+    ]);
+
+    await expect(harness.runChildSession(packet, "verify")).rejects.toBeInstanceOf(
+      HarnessOutputInvalid,
+    );
+  });
+
+  it("rejects a terminal event followed by conflicting stream content", async () => {
+    const harness = harnessStreaming([
+      turnCreatedEvent(),
+      turnDoneEvent(),
+      {
+        createdAt: "2026-08-26T00:00:02Z",
+        id: "late-message",
+        threadId: "main",
+        type: "model.message",
+        content: "conflicting content",
+      },
+    ]);
+
+    await expect(harness.runChildSession(packet, "verify")).rejects.toBeInstanceOf(
+      HarnessExecutionFailed,
+    );
+  });
+
+  it("rejects multiple turn-created identities in one child stream", async () => {
+    const harness = harnessStreaming([
+      turnCreatedEvent(),
+      { ...turnCreatedEvent(), turnId: "turn-2", id: "event-created-2" },
+      turnDoneEvent(),
+    ]);
+
+    await expect(harness.runChildSession(packet, "verify")).rejects.toBeInstanceOf(
+      HarnessExecutionFailed,
+    );
+  });
+
+  it("normalizes stream iteration failures without leaking their message", async () => {
+    const client = {
+      sessions: {
+        create: vi.fn().mockResolvedValue({ data: { id: "child-session-1" } }),
+        createTurnStream: vi.fn().mockResolvedValue(throwingStream("token=top-secret")),
+      },
+    };
+    const harness = new TrueForgeHarness(client as never);
+
+    const result = harness.runChildSession(packet, "verify");
+    await expect(result).rejects.toBeInstanceOf(HarnessUnavailable);
+    await expect(result).rejects.not.toThrow(/top-secret/u);
+  });
+
+  it.each([
+    ["parent traversal", "artifacts/../credentials"],
+    ["encoded traversal", "artifacts/%2e%2e/credentials"],
+    ["empty segment", "artifacts//change.md"],
+    ["dot segment", "artifacts/./change.md"],
+    ["UNC root", "\\\\server\\share"],
+    ["backslash root", "\\credentials"],
+    ["device root", "\\\\?\\C:\\credentials"],
+    ["drive root", "C:\\credentials"],
+    ["forward-slash absolute", "/artifacts/change.md"],
+    ["file URI", "file:artifacts/change.md"],
+    ["HTTPS URI", "https://example.com/artifacts/change.md"],
+    ["query trick", "artifacts/change.md?path=../credentials"],
+    ["fragment trick", "artifacts/change.md#../credentials"],
+    ["control character", "artifacts/change\n.md"],
+  ])("rejects non-canonical artifact paths: %s", async (_label, artifact) => {
+    const harness = harnessStreaming([turnCreatedEvent(), turnDoneEvent({ artifacts: [artifact] })]);
+
+    await expect(harness.runChildSession(packet, "verify")).rejects.toBeInstanceOf(
+      HarnessOutputInvalid,
+    );
+  });
+
+  it("accepts a canonical artifact path rooted under artifacts", async () => {
+    const harness = harnessStreaming([
+      turnCreatedEvent(),
+      turnDoneEvent({ artifacts: ["artifacts/reports/change-brief.md"] }),
+    ]);
+
+    await expect(harness.runChildSession(packet, "verify")).resolves.toMatchObject({
+      artifacts: ["artifacts/reports/change-brief.md"],
+    });
+  });
 });
+
+function harnessStreaming(events: readonly unknown[]): TrueForgeHarness {
+  return new TrueForgeHarness({
+    sessions: {
+      create: vi.fn().mockResolvedValue({ data: { id: "child-session-1" } }),
+      createTurnStream: vi.fn().mockResolvedValue(stream(events)),
+    },
+  } as never);
+}
+
+function turnCreatedEvent(): Record<string, unknown> {
+  return {
+    createdAt: "2026-08-26T00:00:00Z",
+    id: "event-created",
+    previousTurnId: null,
+    state: { status: "running" },
+    threadId: null,
+    turnId: "turn-1",
+    type: "turn.created",
+  };
+}
+
+function turnDoneEvent(
+  options: { artifacts?: readonly string[]; refusal?: string } = {},
+): Record<string, unknown> {
+  return {
+    createdAt: "2026-08-26T00:00:01Z",
+    id: "event-done",
+    threadId: null,
+    type: "turn.done",
+    state: {
+      completedAt: "2026-08-26T00:00:01Z",
+      status: "done",
+      requiredActions: [],
+      output: {
+        createdAt: "2026-08-26T00:00:01Z",
+        id: "event-final-message",
+        threadId: "main",
+        type: "model.message",
+        content: JSON.stringify({
+          summary: "Verified result",
+          artifacts: options.artifacts ?? ["artifacts/change-brief.md"],
+          output: { status: "verified" },
+        }),
+        ...(options.refusal === undefined ? {} : { refusal: options.refusal }),
+      },
+    },
+  };
+}
 
 async function loadSessionEvents(): Promise<readonly unknown[]> {
   const contents = await readFile(
@@ -180,4 +307,9 @@ async function* stream(
     onItem();
     yield item;
   }
+}
+
+async function* throwingStream(message: string): AsyncGenerator {
+  yield turnCreatedEvent();
+  throw new Error(message);
 }

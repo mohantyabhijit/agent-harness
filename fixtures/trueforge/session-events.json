@@ -1,6 +1,15 @@
 [
   {
     "createdAt": "2026-08-26T00:00:00Z",
+    "id": "event-created",
+    "previousTurnId": null,
+    "state": { "status": "running" },
+    "threadId": null,
+    "turnId": "turn-1",
+    "type": "turn.created"
+  },
+  {
+    "createdAt": "2026-08-26T00:00:00Z",
     "id": "event-message",
     "threadId": "main",
     "type": "model.message",
@@ -23,12 +32,5 @@
         "content": "{\"summary\":\"Verified the smallest patch in a fresh sandbox.\",\"artifacts\":[\"artifacts/change-brief.md\"],\"output\":{\"status\":\"verified\"}}"
       }
     }
-  },
-  {
-    "createdAt": "2026-08-26T00:00:02Z",
-    "id": "event-after-done",
-    "threadId": "main",
-    "type": "model.message",
-    "content": "This event must not be consumed."
   }
 ]

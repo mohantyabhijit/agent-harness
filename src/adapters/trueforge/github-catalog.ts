@@ -5,7 +5,13 @@ import type { HarnessPort } from "../../application/ports/harness.js";
 import { spaces, type IssueCandidate, type RepositoryCandidate, type Space } from "../../domain/discovery.js";
 import { HarnessOutputInvalid } from "./harness.js";
 
-const scoreSchema = z.number().min(0).max(1);
+const finiteNumberSchema = z.number();
+const scoreSchema = finiteNumberSchema.min(0).max(1);
+const nonNegativeSafeIntegerSchema = finiteNumberSchema
+  .int()
+  .nonnegative()
+  .refine(Number.isSafeInteger);
+const positiveSafeIntegerSchema = nonNegativeSafeIntegerSchema.positive();
 const repositoryNameSchema = z.string().regex(/^[^/\s]+\/[^/\s]+$/u);
 const evidenceSchema = z
   .object({
@@ -26,7 +32,7 @@ const repositorySchema = z
     isPublic: z.boolean(),
     signals: z
       .object({
-        stars: z.number().int().nonnegative(),
+        stars: nonNegativeSafeIntegerSchema,
         recentActivity: scoreSchema,
         contributionGuide: z.boolean(),
         ciHealthy: z.boolean(),
@@ -41,14 +47,14 @@ const repositorySchema = z
 const issueSchema = z
   .object({
     repository: repositoryNameSchema,
-    number: z.number().int().positive(),
+    number: positiveSafeIntegerSchema,
     title: z.string().trim().min(1),
     url: z.url(),
     clarity: scoreSchema,
-    affectedAreas: z.number().int().nonnegative(),
+    affectedAreas: nonNegativeSafeIntegerSchema,
     testComplexity: scoreSchema,
     dependencyRisk: scoreSchema,
-    estimatedHours: z.number().positive(),
+    estimatedHours: finiteNumberSchema.nonnegative(),
     maintainerSignals: z.array(z.string().trim().min(1)),
   })
   .strict();
@@ -76,12 +82,11 @@ export class TrueForgeGithubCatalog implements GithubCatalogPort {
     );
     const envelope = parseOutput(repositoryEnvelopeSchema, result.output);
 
-    if (
-      envelope.items.some(
-        (repository) => !repository.spaces.some((space) => normalizedSpaces.includes(space)),
-      )
-    ) {
-      throw new HarnessOutputInvalid();
+    for (const repository of envelope.items) {
+      if (repository.spaces.some((space) => !normalizedSpaces.includes(space))) {
+        throw new HarnessOutputInvalid();
+      }
+      assertRepositoryIdentity(repository);
     }
     return envelope.items;
   }
@@ -102,10 +107,13 @@ export class TrueForgeGithubCatalog implements GithubCatalogPort {
       "discover",
     );
     const envelope = parseOutput(issueEnvelopeSchema, result.output);
-    if (envelope.items.some((issue) => issue.repository !== repository)) {
-      throw new HarnessOutputInvalid();
+    for (const issue of envelope.items) {
+      if (!sameRepository(issue.repository, repository)) {
+        throw new HarnessOutputInvalid();
+      }
+      assertIssueIdentity(issue, repository);
     }
-    return envelope.items;
+    return envelope.items.map((issue) => ({ ...issue, repository }));
   }
 }
 
@@ -116,6 +124,71 @@ function parseOutput<T>(schema: z.ZodType<T>, output: unknown): T {
   } catch {
     throw new HarnessOutputInvalid();
   }
+}
+
+function assertRepositoryIdentity(repository: RepositoryCandidate): void {
+  const repositoryUrl = parseGithubUrl(repository.url);
+  if (
+    repositoryUrl.search !== "" ||
+    repositoryUrl.hash !== "" ||
+    repositoryUrl.segments.length !== 2 ||
+    !sameRepository(repository.fullName, repositoryUrl.segments.join("/"))
+  ) {
+    throw new HarnessOutputInvalid();
+  }
+
+  for (const evidence of repository.evidence) {
+    const evidenceUrl = parseGithubUrl(evidence.sourceUrl);
+    if (
+      evidenceUrl.segments.length < 2 ||
+      !sameRepository(repository.fullName, evidenceUrl.segments.slice(0, 2).join("/"))
+    ) {
+      throw new HarnessOutputInvalid();
+    }
+  }
+}
+
+function assertIssueIdentity(issue: IssueCandidate, requestedRepository: string): void {
+  const issueUrl = parseGithubUrl(issue.url);
+  const expectedSegments = [...requestedRepository.split("/"), "issues", String(issue.number)];
+  if (
+    issueUrl.search !== "" ||
+    issueUrl.hash !== "" ||
+    issueUrl.segments.length !== expectedSegments.length ||
+    issueUrl.segments.some(
+      (segment, index) => segment.toLowerCase() !== expectedSegments[index]?.toLowerCase(),
+    )
+  ) {
+    throw new HarnessOutputInvalid();
+  }
+}
+
+function parseGithubUrl(value: string): { hash: string; search: string; segments: readonly string[] } {
+  try {
+    const url = new URL(value);
+    if (
+      url.protocol !== "https:" ||
+      url.hostname.toLowerCase() !== "github.com" ||
+      url.port !== "" ||
+      url.username !== "" ||
+      url.password !== "" ||
+      url.pathname.includes("%")
+    ) {
+      throw new HarnessOutputInvalid();
+    }
+    const path = url.pathname.endsWith("/") ? url.pathname.slice(0, -1) : url.pathname;
+    const segments = path.slice(1).split("/");
+    if (path === "" || !path.startsWith("/") || segments.some((segment) => segment === "")) {
+      throw new HarnessOutputInvalid();
+    }
+    return { hash: url.hash, search: url.search, segments };
+  } catch {
+    throw new HarnessOutputInvalid();
+  }
+}
+
+function sameRepository(left: string, right: string): boolean {
+  return left.toLowerCase() === right.toLowerCase();
 }
 
 function repositoryDiscoveryGoal(selectedSpaces: readonly Space[]): string {
