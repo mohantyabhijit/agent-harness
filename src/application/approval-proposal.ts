@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { externalActionDigest, validateExternalActionPayload, type ExternalActionPayload } from "./external-action.js";
+import { canonicalExternalActionJson, externalActionDigest, validateExternalActionPayload, type ExternalActionPayload } from "./external-action.js";
 import type { CampaignSnapshot } from "./ports/campaign-store.js";
 import type { CampaignStatus } from "../domain/campaign.js";
 import { isApprovalActionAllowed } from "../domain/approval.js";
@@ -54,9 +54,8 @@ export function currentApprovalProposal(snapshot: CampaignSnapshot): DurableAppr
   if (!parsed.success || parsed.data.proposalId !== newest.id) return null;
   const proposal = parsed.data as DurableApprovalProposal;
   const { payload } = proposal;
-  if (snapshot.approvals.some((approval) => approval.status === "consumed" && approval.proposalId === proposal.proposalId &&
-    approval.actionDigest === proposal.actionDigest && approval.expectedCampaignVersion === proposal.expectedCampaignVersion)) return null;
   const currentCommit = singleton(snapshot, "commit");
+  if (snapshot.approvals.some((approval) => consumedApprovalMatchesProposal(approval, proposal, snapshot.campaign.id))) return null;
   if (
     proposal.actionDigest !== externalActionDigest(payload) ||
     proposal.expectedCampaignVersion !== snapshot.campaign.version ||
@@ -69,6 +68,19 @@ export function currentApprovalProposal(snapshot: CampaignSnapshot): DurableAppr
   if ((payload.action === "create_pr" || payload.action === "update_pr") && payload.commitSha !== currentCommit) return null;
   if (payload.action === "update_pr" && singleton(snapshot, "pull_request") !== payload.pullRequest) return null;
   return proposal;
+}
+
+function consumedApprovalMatchesProposal(approval: CampaignSnapshot["approvals"][number], proposal: DurableApprovalProposal, campaignId: string): boolean {
+  if (approval.status !== "consumed" || approval.trustedProposalAuthority !== true || approval.payload === undefined) return false;
+  try {
+    return approval.campaignId === campaignId && approval.proposalId === proposal.proposalId &&
+      approval.action === proposal.payload.action && approval.actionDigest === proposal.actionDigest &&
+      approval.expectedCampaignVersion === proposal.expectedCampaignVersion && approval.expectedCampaignStatus === proposal.expectedCampaignStatus &&
+      approval.expectedCurrentCommitSha === (proposal.expectedCurrentCommitSha ?? null) &&
+      canonicalExternalActionJson(approval.payload as ExternalActionPayload) === canonicalExternalActionJson(proposal.payload);
+  } catch {
+    return false;
+  }
 }
 
 function hasValidEventSequence(snapshot: CampaignSnapshot): boolean {

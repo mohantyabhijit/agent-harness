@@ -9,6 +9,7 @@ import { externalActionDigest, type ExternalActionPayload } from "../../src/appl
 import type { CampaignStatus } from "../../src/domain/campaign.js";
 import { buildApp } from "../../src/server/app.js";
 import { createOpenQuestApi, type ApprovalActionSummary, type ApprovalProposal, type CampaignSnapshot, type FetchLike, type OpenQuestApi } from "../../src/web/api.js";
+import { CampaignTimeline } from "../../src/web/components/CampaignTimeline.js";
 import { ChangeBrief } from "../../src/web/components/ChangeBrief.js";
 import { CampaignPage } from "../../src/web/routes/CampaignPage.js";
 import { campaign } from "../builders.js";
@@ -139,10 +140,37 @@ describe("ChangeBrief", () => {
       await app.close();
     }
   });
+
+  it("accepts a legacy reconciled event without a disposition through Fastify and renders a generic label", async () => {
+    const routeStore = {
+      get: async () => ({
+        campaign: campaign({ status: "contribution_approval", version: 7 }),
+        evidence: [],
+        events: [{ id: "legacy-reconciled", eventType: "external_action_reconciled", occurredAt: "2026-08-26T00:00:00Z", sequence: 1, payload: { action: "create_pr", reason: "human_external_action_reconciliation", claimedCampaignVersion: 7, resultingCampaignVersion: 7 } }],
+        approvals: [],
+        qodoFindings: [],
+        externalReferences: [],
+        externalActionClaims: [],
+      }),
+    };
+    const app = buildApp({ store: routeStore as never, harness: new FakeHarness(), catalog: { listRepositories: async () => [], listIssues: async () => [] }, clock: { now: () => "2026-08-26T00:00:00Z" }, ids: { next: () => "unused-id" }, authorization: { require: () => undefined } });
+    const fetcher: FetchLike = async (input, init) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      const response = await app.inject({ method: "GET", url, headers: Object.fromEntries(new Headers(init?.headers).entries()) });
+      return new Response(response.body, { status: response.statusCode, headers: new Headers(response.headers as Record<string, string>) });
+    };
+
+    const loaded = await createOpenQuestApi({ fetch: fetcher }).getCampaign("campaign-1");
+    render(<CampaignTimeline approvals={loaded.approvals} events={loaded.events} />);
+
+    expect(screen.getByText("External action reconciled")).toBeVisible();
+    expect(screen.queryByText(/confirmed completed/i)).not.toBeInTheDocument();
+    await app.close();
+  });
 });
 
 describe("Campaign approval", () => {
-  afterEach(cleanup);
+  afterEach(() => { cleanup(); vi.useRealTimers(); });
 
   it("generates one bounded visible-ASCII key per explicit click and prevents double submission", async () => {
     let release!: () => void;
@@ -220,6 +248,27 @@ describe("Campaign approval", () => {
     expect(await screen.findByText("Pull request approval approved")).toBeVisible();
   });
 
+  it("clears POST optimism and exposes refresh retry when the authoritative GET fails", async () => {
+    const postApproval = { id: "approval-post", action: "create_pr" as const, actionDigest: proposal.actionDigest, status: "approved" as const, issuedAt: "2026-08-26T00:00:00Z", expiresAt: "2099-08-26T00:10:00Z", proposalId: proposal.proposalId, expectedCampaignVersion: 7, isActive: true };
+    const getCampaign = vi.fn<OpenQuestApi["getCampaign"]>()
+      .mockResolvedValueOnce(snapshot)
+      .mockRejectedValueOnce(new Error("refresh offline"))
+      .mockResolvedValueOnce({ ...snapshot, approvals: [] });
+    render(<CampaignPage api={{ getCampaign, issueApproval: async () => postApproval }} campaignId="campaign-1" createIdempotencyKey={() => "approval-refresh-failure"} />);
+    await screen.findByText(payload.title);
+    fireEvent.click(screen.getByRole("checkbox", { name: /reviewed every field/i }));
+    fireEvent.click(screen.getByRole("button", { name: /approve scoped pull request/i }));
+
+    expect(await screen.findByRole("alert", { name: /campaign facts refresh failed/i })).toBeVisible();
+    expect(screen.getByRole("heading", { level: 1, name: /owner\/repo/i })).toBeVisible();
+    expect(screen.queryByRole("button", { name: /scoped proposal approved/i })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /retry campaign refresh/i }));
+    await waitFor(() => { expect(getCampaign).toHaveBeenCalledTimes(3); });
+    expect(screen.queryByRole("alert", { name: /campaign facts refresh failed/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /approve scoped pull request/i })).toBeEnabled();
+  });
+
   it.each([
     ["inactive", { approvals: [{ id: "approval-inactive", action: "create_pr" as const, actionDigest: proposal.actionDigest, status: "approved" as const, issuedAt: "2026-08-26T00:10:00Z", proposalId: proposal.proposalId, expectedCampaignVersion: 7, isActive: false }] }],
     ["expired", { approvals: [{ id: "approval-expired", action: "create_pr" as const, actionDigest: proposal.actionDigest, status: "approved" as const, issuedAt: "2026-08-26T00:00:00Z", expiresAt: "2026-08-26T00:10:00Z", proposalId: proposal.proposalId, expectedCampaignVersion: 7, isActive: false }] }],
@@ -269,6 +318,31 @@ describe("Campaign approval", () => {
     await waitFor(() => { expect(getCampaign).toHaveBeenCalledTimes(2); });
     expect(screen.getByRole("button", { name: /approve scoped pull request/i })).toBeDisabled();
     vi.useRealTimers();
+  });
+
+  it("treats an expired snapshot as non-authoritative while refresh fails, then retries successfully", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date("2026-08-26T00:00:00Z"));
+    const expiring = { id: "approval-expiring-retry", action: "create_pr" as const, actionDigest: proposal.actionDigest, status: "approved" as const, issuedAt: "2026-08-25T23:59:00Z", expiresAt: "2026-08-26T00:00:01Z", proposalId: proposal.proposalId, expectedCampaignVersion: 7, isActive: true };
+    let rejectRefresh!: (reason: Error) => void;
+    const getCampaign = vi.fn<OpenQuestApi["getCampaign"]>()
+      .mockResolvedValueOnce({ ...snapshot, approvals: [expiring] })
+      .mockImplementationOnce(async () => new Promise<CampaignSnapshot>((_resolve, reject) => { rejectRefresh = reject; }))
+      .mockResolvedValueOnce({ ...snapshot, approvals: [] });
+    render(<CampaignPage api={{ getCampaign, issueApproval: async () => expiring }} campaignId="campaign-1" />);
+    await screen.findByText(payload.title);
+    expect(screen.getByRole("button", { name: /scoped proposal approved/i })).toBeDisabled();
+
+    await vi.advanceTimersByTimeAsync(1_001);
+    expect(await screen.findByRole("status", { name: /refreshing campaign facts/i })).toBeVisible();
+    expect(screen.queryByRole("button", { name: /scoped proposal approved/i })).not.toBeInTheDocument();
+    rejectRefresh(new Error("expiry refresh offline"));
+    expect(await screen.findByRole("alert", { name: /campaign facts refresh failed/i })).toBeVisible();
+
+    fireEvent.click(screen.getByRole("button", { name: /retry campaign refresh/i }));
+    await waitFor(() => { expect(getCampaign).toHaveBeenCalledTimes(3); });
+    expect(screen.queryByRole("alert", { name: /campaign facts refresh failed/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /scoped proposal approved/i })).not.toBeInTheDocument();
   });
 
   it("immediately refreshes an already-expired active DTO once", async () => {

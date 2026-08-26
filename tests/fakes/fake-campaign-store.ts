@@ -185,14 +185,21 @@ export class FakeCampaignStore implements CampaignStore {
   async issueApprovalForProposal(record: import("../../src/application/ports/campaign-store.js").ProposalApprovalIssuanceRecord): Promise<Approval> {
     if (record.idempotencyKey.length < 8 || record.idempotencyKey.length > 128) throw new ApprovalIssuanceConflict();
     const snapshot = this.#required(record.campaignId);
+    const staged = structuredClone(snapshot);
+    for (let index = 0; index < staged.approvals.length; index += 1) {
+      const approval = staged.approvals[index];
+      if (approval?.status === "approved" && approval.active === true && approval.expiresAt !== undefined && Date.parse(approval.expiresAt) <= Date.parse(record.issuedAt)) {
+        staged.approvals[index] = { ...approval, active: false };
+      }
+    }
     const mapKey = `${record.campaignId}\u0000${record.idempotencyKey}`;
     const replayId = this.#approvalKeys.get(mapKey);
     if (replayId !== undefined) {
-      const replay = snapshot.approvals.find(({ id }) => id === replayId);
+      const replay = staged.approvals.find(({ id }) => id === replayId);
       if (replay === undefined || replay.proposalId !== record.proposalId || replay.actionDigest !== record.actionDigest || replay.expectedCampaignVersion !== record.expectedVersion) throw new ApprovalIssuanceConflict();
+      this.#snapshots.set(record.campaignId, staged);
       return structuredClone(replay);
     }
-    const staged = structuredClone(snapshot);
     const proposal = currentApprovalProposal(cloneSnapshot(staged));
     if (proposal === null || proposal.proposalId !== record.proposalId || proposal.actionDigest !== record.actionDigest || proposal.expectedCampaignVersion !== record.expectedVersion) throw new ApprovalIssuanceConflict();
     const approval = issueDomainApproval({

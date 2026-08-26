@@ -83,7 +83,7 @@ const publicEvent = z.object({ id: identifier, eventType: publicEventType, occur
   if (event.eventType !== "external_action_reconciled") return;
   const allowed = new Set(["action", "disposition", "observedCanonicalHead", "reason", "claimedCampaignVersion", "resultingCampaignVersion"]);
   if (Object.keys(event.facts).some((key) => !allowed.has(key)) ||
-    (event.facts.disposition !== "confirmed_completed" && event.facts.disposition !== "confirmed_not_completed") ||
+    (event.facts.disposition !== undefined && event.facts.disposition !== "confirmed_completed" && event.facts.disposition !== "confirmed_not_completed") ||
     (event.facts.observedCanonicalHead !== undefined && (typeof event.facts.observedCanonicalHead !== "string" || !/^[0-9a-f]{40}$/u.test(event.facts.observedCanonicalHead)))) {
     context.addIssue({ code: "custom", message: "Invalid external action reconciliation facts" });
   }

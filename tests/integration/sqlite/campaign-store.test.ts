@@ -289,6 +289,42 @@ describe("SqliteCampaignStore", () => {
   it.each([
     ["SQLite", () => openMemoryStore().store as CampaignStore],
     ["fake", () => new FakeCampaignStore() as CampaignStore],
+  ])("does not let an untrusted consumed audit row suppress the current proposal in the %s store", async (_label, factory) => {
+    const store = factory();
+    if (store instanceof FakeCampaignStore) store.seed(campaign({ status: "contribution_approval", version: 7 }));
+    else await store.create(campaign({ status: "contribution_approval", version: 6 }));
+    if (store instanceof FakeCampaignStore) store.seedExternalReference("campaign-1", { kind: "commit", value: externalPayload.commitSha });
+    else await store.replaceCurrentCommit("campaign-1", externalPayload.commitSha, 6, "contribution_approval");
+    await appendApprovalProposal(store, "proposal-current");
+    await store.recordApproval({
+      id: "audit-consumed", campaignId: "campaign-1", action: "create_pr", actionDigest: externalActionDigest(externalPayload), status: "consumed", issuedAt: "2026-08-26T00:00:00Z", consumedAt: "2026-08-26T00:00:01Z",
+      proposalId: "proposal-current", expectedCampaignVersion: 7, expectedCampaignStatus: "contribution_approval", expectedCurrentCommitSha: externalPayload.commitSha, payload: externalPayload, trustedProposalAuthority: true, active: true,
+    });
+
+    await expect(store.issueApprovalForProposal({ campaignId: "campaign-1", proposalId: "proposal-current", actionDigest: externalActionDigest(externalPayload), expectedVersion: 7, approvalId: "approval-current", issuedAt: "2026-08-26T00:01:00Z", expiresAt: "2026-08-26T01:01:00Z", idempotencyKey: "current-proposal-key" })).resolves.toMatchObject({ id: "approval-current", trustedProposalAuthority: true, active: true });
+    expect((await store.get("campaign-1"))?.approvals[0]).toMatchObject({ id: "audit-consumed", status: "consumed", trustedProposalAuthority: false, active: false });
+  });
+
+  it.each([
+    ["SQLite", () => openMemoryStore().store as CampaignStore],
+    ["fake", () => new FakeCampaignStore() as CampaignStore],
+  ])("returns an inactive expired idempotent replay in the %s store", async (_label, factory) => {
+    const store = factory();
+    if (store instanceof FakeCampaignStore) store.seed(campaign({ status: "contribution_approval", version: 7 }));
+    else await store.create(campaign({ status: "contribution_approval", version: 6 }));
+    if (store instanceof FakeCampaignStore) store.seedExternalReference("campaign-1", { kind: "commit", value: externalPayload.commitSha });
+    else await store.replaceCurrentCommit("campaign-1", externalPayload.commitSha, 6, "contribution_approval");
+    await appendApprovalProposal(store, "proposal-expired-replay");
+    const request = { campaignId: "campaign-1", proposalId: "proposal-expired-replay", actionDigest: externalActionDigest(externalPayload), expectedVersion: 7, approvalId: "approval-expired-replay", issuedAt: "2026-08-26T00:00:00Z", expiresAt: "2026-08-26T00:10:00Z", idempotencyKey: "expired-replay-key" };
+    await store.issueApprovalForProposal(request);
+
+    await expect(store.issueApprovalForProposal({ ...request, approvalId: "ignored-replay", issuedAt: "2026-08-26T00:11:00Z", expiresAt: "2026-08-26T00:21:00Z" })).resolves.toMatchObject({ id: "approval-expired-replay", active: false });
+    expect((await store.get("campaign-1"))?.approvals[0]).toMatchObject({ id: "approval-expired-replay", active: false });
+  });
+
+  it.each([
+    ["SQLite", () => openMemoryStore().store as CampaignStore],
+    ["fake", () => new FakeCampaignStore() as CampaignStore],
   ])("permanently retires an expiry observed by the %s store even after clock rollback", async (_label, factory) => {
     const store = factory();
     if (store instanceof FakeCampaignStore) store.seed(campaign({ status: "contribution_approval", version: 7 }));
