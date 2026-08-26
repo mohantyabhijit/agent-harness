@@ -1,0 +1,19 @@
+{
+  "repository": "owner/repo",
+  "pullRequestNumber": 7,
+  "reviewId": "qodo-review-third-iteration",
+  "commitSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "testsPassed": true,
+  "complete": true,
+  "comments": [
+    {
+      "id": 401,
+      "html_url": "https://github.com/owner/repo/pull/7#discussion_r401",
+      "body": "**Severity:** High\nThe write remains replayable after the third repair.",
+      "path": "src/application/external-action.ts",
+      "line": 77,
+      "user": { "login": "qodo-merge-pro[bot]" },
+      "status": "open"
+    }
+  ]
+}

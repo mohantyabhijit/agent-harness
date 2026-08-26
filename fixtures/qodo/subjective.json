@@ -1,0 +1,20 @@
+{
+  "repository": "owner/repo",
+  "pullRequestNumber": 7,
+  "reviewId": "qodo-review-subjective-1",
+  "commitSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "testsPassed": true,
+  "complete": true,
+  "comments": [
+    {
+      "id": 201,
+      "html_url": "https://github.com/owner/repo/pull/7#discussion_r201",
+      "body": "**Severity:** Low\nA broader abstraction could be aesthetically preferable.",
+      "path": "src/application/sync-review.ts",
+      "line": 18,
+      "user": { "login": "qodo-merge-pro[bot]" },
+      "status": "dismissed",
+      "disposition": "The broader refactor is outside the issue contract and adds unrelated risk."
+    }
+  ]
+}

@@ -4,6 +4,9 @@ export interface QodoFinding {
   status: "open" | "fixed" | "dismissed";
   summary: string;
   sourceUrl?: string;
+  body?: string;
+  path?: string;
+  line?: number;
   disposition?: string;
 }
 

@@ -1,0 +1,9 @@
+{
+  "repository": "owner/repo",
+  "pullRequestNumber": 7,
+  "reviewId": "qodo-review-pass-1",
+  "commitSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "testsPassed": true,
+  "complete": true,
+  "comments": []
+}

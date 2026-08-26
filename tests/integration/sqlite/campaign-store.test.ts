@@ -680,6 +680,10 @@ describe("SqliteCampaignStore", () => {
       severity: "low",
       status: "fixed",
       summary: "Retry guarded",
+      sourceUrl: "https://github.com/owner/repo/pull/7#discussion_r101",
+      body: "**Severity:** Low\nThe retry is now guarded.",
+      path: "src/application/retry.ts",
+      line: 42,
       disposition: "Fixed in tests",
     });
 
@@ -689,6 +693,10 @@ describe("SqliteCampaignStore", () => {
         severity: "low",
         status: "fixed",
         summary: "Retry guarded",
+        sourceUrl: "https://github.com/owner/repo/pull/7#discussion_r101",
+        body: "**Severity:** Low\nThe retry is now guarded.",
+        path: "src/application/retry.ts",
+        line: 42,
         disposition: "Fixed in tests",
       },
     ]);
@@ -707,6 +715,14 @@ describe("SqliteCampaignStore", () => {
       summary: "Stale finding",
     })).rejects.toThrow(/stale.*iteration/i);
     expect((await store.get("campaign-1"))?.qodoFindings[0]?.summary).toBe("Retry guarded");
+    await expect(store.recordQodoFinding("campaign-1", 3, {
+      id: "qodo-oversized",
+      severity: "low",
+      status: "open",
+      summary: "Oversized source evidence",
+      body: "x".repeat(20_001),
+    })).rejects.toThrow(/invalid.*qodo/i);
+    expect((await store.get("campaign-1"))?.qodoFindings).toHaveLength(1);
 
     expect(() => database.prepare(
       "UPDATE campaigns SET qodo_iteration = 1.5 WHERE id = 'campaign-1'",

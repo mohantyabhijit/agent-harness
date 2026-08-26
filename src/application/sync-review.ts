@@ -27,6 +27,29 @@ export class SyncReview {
     private readonly ids: IdGenerator,
   ) {}
 
+  async enforceIterationLimit(campaignId: string): Promise<Campaign> {
+    const snapshot = await this.requiredSnapshot(campaignId);
+    if (snapshot.campaign.status !== "qodo_review") throw new ApplicationError("invalid_transition");
+    if (snapshot.campaign.qodoIteration !== 3) throw new ApplicationError("invalid_transition");
+    const pullRequest = singletonExternalReference(snapshot, "pull_request");
+    const commitSha = singletonExternalReference(snapshot, "commit");
+    const escalated = transitionCampaign(snapshot.campaign, "human_escalation");
+    await this.store.update(escalated, snapshot.campaign.version);
+    await this.store.appendEvent(campaignId, {
+      id: this.nextId(),
+      eventType: "quality_gate_escalated",
+      occurredAt: this.clock.now(),
+      payload: {
+        pullRequest,
+        commitSha,
+        iteration: 3,
+        reason: "maximum_qodo_iterations",
+        claimedCampaignVersion: escalated.version,
+      },
+    });
+    return escalated;
+  }
+
   async execute(campaignId: string, input: QodoReviewBatch, context?: HarnessRequestOptions): Promise<Campaign> {
     const batch = parseQodoReviewBatch(input);
     if (batch.campaignId !== campaignId) {
@@ -53,7 +76,10 @@ export class SyncReview {
     });
 
     const findingIteration = Math.max(1, claimed.campaign.qodoIteration);
-    for (const finding of batch.findings) {
+    const changedFindings = batch.findings.filter((finding) =>
+      !snapshot.qodoFindings.some((persisted) => equalFinding(persisted, finding)),
+    );
+    for (const finding of changedFindings) {
       await this.store.recordQodoFinding(campaignId, findingIteration, finding);
       await this.appendReviewEvent(claimed.campaign, "qodo_finding_recorded", batch, {
         iteration: findingIteration,
@@ -157,6 +183,8 @@ export class SyncReview {
         complete: batch.complete,
         iteration: claimedCampaign.qodoIteration,
         unresolvedFindings,
+        externalWritesAllowed: false,
+        publicationRequiresFreshUpdatePrApproval: true,
       },
     };
   }
@@ -263,6 +291,12 @@ function mergeFindings(
   return [...findings.values()];
 }
 
+function equalFinding(left: QodoFinding, right: QodoFinding): boolean {
+  return left.id === right.id && left.severity === right.severity && left.status === right.status &&
+    left.summary === right.summary && left.sourceUrl === right.sourceUrl && left.body === right.body &&
+    left.path === right.path && left.line === right.line && left.disposition === right.disposition;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -275,4 +309,10 @@ function repairCommit(output: unknown): string | undefined {
 
 function isCancelled(context?: HarnessRequestOptions): boolean {
   return context?.signal?.aborted === true;
+}
+
+function singletonExternalReference(snapshot: CampaignSnapshot, kind: "pull_request" | "commit"): string {
+  const references = snapshot.externalReferences.filter((reference) => reference.kind === kind);
+  if (references.length !== 1 || references[0] === undefined) throw new ApplicationError("campaign_conflict");
+  return references[0].value;
 }

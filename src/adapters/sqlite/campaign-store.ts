@@ -36,6 +36,7 @@ import {
 import type { Campaign, CampaignStatus } from "../../domain/campaign.js";
 import type { Evidence } from "../../domain/evidence.js";
 import type { QodoFinding } from "../../domain/quality-gate.js";
+import { parseQodoFinding } from "../../application/qodo-review-batch.js";
 import { migrateCampaignStore } from "./migrate.js";
 
 export { CampaignIdentityConflict, CampaignVersionConflict };
@@ -92,6 +93,9 @@ interface QodoFindingRow {
   status: QodoFinding["status"];
   summary: string;
   source_url: string | null;
+  body: string | null;
+  path: string | null;
+  line: number | null;
   disposition: string | null;
 }
 
@@ -411,30 +415,38 @@ export class SqliteCampaignStore implements CampaignStore {
 
   async recordQodoFinding(campaignId: string, iteration: number, finding: QodoFinding): Promise<void> {
     assertQodoFindingIteration(iteration);
+    let parsedFinding: QodoFinding;
+    try { parsedFinding = parseQodoFinding(finding); } catch { throw new TypeError("Invalid Qodo finding"); }
     const result = this.#database.prepare(`
       INSERT INTO qodo_findings (
-        id, campaign_id, severity, status, summary, source_url, disposition, iteration
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        id, campaign_id, severity, status, summary, source_url, body, path, line, disposition, iteration
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(campaign_id, id) DO UPDATE SET
         severity = excluded.severity,
         status = excluded.status,
         summary = excluded.summary,
         source_url = excluded.source_url,
+        body = excluded.body,
+        path = excluded.path,
+        line = excluded.line,
         disposition = excluded.disposition,
         iteration = excluded.iteration
       WHERE excluded.iteration >= qodo_findings.iteration
     `).run(
-      finding.id,
+      parsedFinding.id,
       campaignId,
-      finding.severity,
-      finding.status,
-      finding.summary,
-      finding.sourceUrl ?? null,
-      finding.disposition ?? null,
+      parsedFinding.severity,
+      parsedFinding.status,
+      parsedFinding.summary,
+      parsedFinding.sourceUrl ?? null,
+      parsedFinding.body ?? null,
+      parsedFinding.path ?? null,
+      parsedFinding.line ?? null,
+      parsedFinding.disposition ?? null,
       iteration,
     );
     if (result.changes !== 1) {
-      throw new Error(`Stale Qodo finding iteration for ${finding.id}`);
+      throw new Error(`Stale Qodo finding iteration for ${parsedFinding.id}`);
     }
   }
 
@@ -795,7 +807,7 @@ export class SqliteCampaignStore implements CampaignStore {
       SELECT * FROM approvals WHERE campaign_id = ? ORDER BY issued_at, id
     `).all(row.id) as ApprovalRow[];
     const qodoFindings = this.#database.prepare(`
-      SELECT id, severity, status, summary, source_url, disposition
+      SELECT id, severity, status, summary, source_url, body, path, line, disposition
       FROM qodo_findings WHERE campaign_id = ? ORDER BY iteration, id
     `).all(row.id) as QodoFindingRow[];
     const externalReferences = this.#database.prepare(`
@@ -906,6 +918,9 @@ function mapQodoFinding(row: QodoFindingRow): QodoFinding {
     status: row.status,
     summary: row.summary,
     ...(row.source_url === null ? {} : { sourceUrl: row.source_url }),
+    ...(row.body === null ? {} : { body: row.body }),
+    ...(row.path === null ? {} : { path: row.path }),
+    ...(row.line === null ? {} : { line: row.line }),
     ...(row.disposition === null ? {} : { disposition: row.disposition }),
   };
 }

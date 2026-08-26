@@ -568,11 +568,14 @@ describe("server configuration", () => {
       PORT: 8788,
       DATABASE_PATH: "openquest.sqlite",
       TRUEFORGE_BASE_URL: "http://localhost:8790",
+      QODO_BOT_IDENTITIES: ["qodo-merge-pro[bot]"],
       QODO_POLL_INTERVAL_MS: 60_000,
       QODO_SHUTDOWN_TIMEOUT_MS: 5_000,
       ...environment,
     });
     expect(() => parseConfig({ ...environment, QODO_POLL_INTERVAL_MS: "9999" })).toThrow();
+    expect(parseConfig({ ...environment, QODO_BOT_IDENTITIES: "qodo-merge-pro[bot],qodo-ai[bot]" }).QODO_BOT_IDENTITIES).toEqual(["qodo-merge-pro[bot]", "qodo-ai[bot]"]);
+    expect(() => parseConfig({ ...environment, QODO_BOT_IDENTITIES: "qodo-merge-pro[bot],../../attacker" })).toThrow();
   });
 });
 

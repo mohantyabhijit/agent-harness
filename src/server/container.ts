@@ -6,10 +6,11 @@ import Database from "better-sqlite3";
 import { SqliteCampaignStore } from "../adapters/sqlite/campaign-store.js";
 import { TrueForgeGithubCatalog } from "../adapters/trueforge/github-catalog.js";
 import { TrueForgeHarness } from "../adapters/trueforge/harness.js";
+import { TrueForgeQodoReview } from "../adapters/qodo/trueforge-qodo-review.js";
 import { SyncReview } from "../application/sync-review.js";
 import type { AppDependencies } from "./app.js";
 import type { ServerConfig } from "./config.js";
-import { createQodoReviewJob, HarnessQodoReviewSource, type QodoReviewJob, type ReviewJobScheduler } from "./jobs/qodo-review-job.js";
+import { createQodoReviewJob, type QodoReviewJob, type ReviewJobScheduler } from "./jobs/qodo-review-job.js";
 import { bearerAuthorizationPolicy } from "./authorization.js";
 
 export interface ServerContainer {
@@ -39,7 +40,7 @@ export function createContainer(config: ServerConfig): ServerContainer {
   };
   const reviewJob = createQodoReviewJob({
     store,
-    source: new HarnessQodoReviewSource(harness),
+    review: new TrueForgeQodoReview(harness, { allowlistedBotIdentities: config.QODO_BOT_IDENTITIES }),
     syncReview: new SyncReview(store, harness, clock, ids),
     scheduler,
     intervalMs: config.QODO_POLL_INTERVAL_MS,

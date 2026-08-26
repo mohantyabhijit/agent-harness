@@ -37,6 +37,24 @@ function snapshot(): CampaignSnapshot {
 }
 
 describe("public campaign support", () => {
+  it("projects only bounded Qodo source evidence fields", () => {
+    const source = snapshot();
+    const finding = {
+      id: "comment-101", severity: "high" as const, status: "open" as const,
+      summary: "Unsafe retry", sourceUrl: "https://github.com/owner/repo/pull/7#discussion_r101",
+      body: "**Severity:** High\nUnsafe retry", path: "src/retry.ts", line: 42,
+    };
+
+    expect(publicCampaignSnapshot({ ...source, qodoFindings: [finding] }, Date.parse("2026-08-26T00:10:00Z"))).toMatchObject({
+      qodoFindings: [finding],
+    });
+    const invalid = { ...finding, path: "../secret", line: 0, body: "x".repeat(20_001) };
+    const invalidProjection = publicCampaignSnapshot({ ...source, qodoFindings: [invalid] }, Date.parse("2026-08-26T00:10:00Z"));
+    expect(invalidProjection.qodoFindings).toEqual([
+      { id: "comment-101", severity: "high", status: "open", summary: "Unsafe retry", sourceUrl: finding.sourceUrl },
+    ]);
+  });
+
   it("marks authority active only when trusted, unconsumed, and bound to the current proposal", () => {
     const trusted = issueApproval({
       id: "approval-1", campaignId: "campaign-1", action: "create_pr", actionDigest: digest, issuedAt: "2026-08-26T00:00:01Z", expiresAt: "2026-08-26T01:00:00Z",

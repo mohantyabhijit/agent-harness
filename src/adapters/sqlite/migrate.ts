@@ -68,6 +68,9 @@ const schema = `
     status TEXT NOT NULL CHECK (status IN ('open', 'fixed', 'dismissed')),
     summary TEXT NOT NULL,
     source_url TEXT,
+    body TEXT CHECK (body IS NULL OR length(body) BETWEEN 1 AND 20000),
+    path TEXT CHECK (path IS NULL OR length(path) BETWEEN 1 AND 1024),
+    line INTEGER CHECK (line IS NULL OR (typeof(line) = 'integer' AND line > 0)),
     disposition TEXT,
     iteration INTEGER NOT NULL
       CHECK (typeof(iteration) = 'integer' AND iteration BETWEEN 1 AND 3),
@@ -178,6 +181,14 @@ export function migrateCampaignStore(database: Database.Database): void {
       CREATE UNIQUE INDEX IF NOT EXISTS campaign_events_sequence_idx ON campaign_events(campaign_id, sequence);
       CREATE INDEX campaign_events_order_idx ON campaign_events(campaign_id, sequence);
     `);
+    const qodoFindingColumns = database.prepare("PRAGMA table_info(qodo_findings)").all() as { name: string }[];
+    for (const [name, declaration] of [
+      ["body", "TEXT CHECK (body IS NULL OR length(body) BETWEEN 1 AND 20000)"],
+      ["path", "TEXT CHECK (path IS NULL OR length(path) BETWEEN 1 AND 1024)"],
+      ["line", "INTEGER CHECK (line IS NULL OR (typeof(line) = 'integer' AND line > 0))"],
+    ] as const) {
+      if (!qodoFindingColumns.some((column) => column.name === name)) database.exec(`ALTER TABLE qodo_findings ADD COLUMN ${name} ${declaration}`);
+    }
     // Incomplete or untrusted rows are immutable audit history, not authority.
     database.exec("UPDATE approvals SET active = 0 WHERE status = 'approved' AND (trusted_proposal_authority <> 1 OR proposal_id IS NULL OR expected_campaign_version IS NULL OR expected_campaign_status IS NULL OR payload_json IS NULL)");
     const duplicateLiveApproval = database.prepare(`

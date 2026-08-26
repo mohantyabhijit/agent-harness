@@ -18,6 +18,7 @@ import {
   type ExternalActionStaleRecoveryRecord,
   type ExternalReference,
 } from "../../src/application/ports/campaign-store.js";
+import { parseQodoFinding } from "../../src/application/qodo-review-batch.js";
 import { currentApprovalProposal } from "../../src/application/approval-proposal.js";
 import { issueApproval as issueDomainApproval } from "../../src/domain/approval.js";
 import { canonicalExternalActionJson, externalActionDigest, isPullRequest, validateExternalActionPayload } from "../../src/application/external-action.js";
@@ -269,17 +270,19 @@ export class FakeCampaignStore implements CampaignStore {
     if (!Number.isInteger(iteration) || iteration < 1 || iteration > 3) {
       throw new TypeError("Invalid integer Qodo finding iteration; expected 1 to 3");
     }
+    let parsedFinding: QodoFinding;
+    try { parsedFinding = parseQodoFinding(finding); } catch { throw new TypeError("Invalid Qodo finding"); }
     const snapshot = this.#required(campaignId);
-    const key = `${campaignId}\u0000${finding.id}`;
+    const key = `${campaignId}\u0000${parsedFinding.id}`;
     const previousIteration = this.#findingIterations.get(key);
     if (previousIteration !== undefined && iteration < previousIteration) {
-      throw new Error(`Stale Qodo finding iteration for ${finding.id}`);
+      throw new Error(`Stale Qodo finding iteration for ${parsedFinding.id}`);
     }
-    const index = snapshot.qodoFindings.findIndex(({ id }) => id === finding.id);
+    const index = snapshot.qodoFindings.findIndex(({ id }) => id === parsedFinding.id);
     if (index === -1) {
-      snapshot.qodoFindings.push(structuredClone(finding));
+      snapshot.qodoFindings.push(structuredClone(parsedFinding));
     } else {
-      snapshot.qodoFindings[index] = structuredClone(finding);
+      snapshot.qodoFindings[index] = structuredClone(parsedFinding);
     }
     this.#findingIterations.set(key, iteration);
   }

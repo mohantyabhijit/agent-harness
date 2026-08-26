@@ -55,6 +55,8 @@ describe("SyncReview", () => {
         reviewId: `review-${String(iteration)}`,
         commitSha,
         testsPassed: true,
+        externalWritesAllowed: false,
+        publicationRequiresFreshUpdatePrApproval: true,
       });
       const reviewPending = transitionCampaign(repairing, "qodo_review");
       await store.update(reviewPending, repairing.version);
@@ -77,6 +79,9 @@ describe("SyncReview", () => {
       status: "dismissed" as const,
       summary: "Prefer a broader refactor",
       sourceUrl: "https://github.com/owner/repo/pull/7#discussion_r1",
+      body: "**Severity:** Low\nPrefer a broader refactor",
+      path: "src/application/sync-review.ts",
+      line: 18,
       disposition: "Out of scope for the focused issue fix",
     };
 
@@ -105,6 +110,10 @@ describe("SyncReview", () => {
     ["noncanonical commit", reviewBatch({ commitSha: "abc123" })],
     ["incomplete empty", reviewBatch({ complete: false, findings: [] })],
     ["malformed finding", reviewBatch({ findings: [{ ...openHighFinding, severity: "critical" as never }] })],
+    ["oversized finding body", reviewBatch({ findings: [{ ...openHighFinding, body: "x".repeat(20_001) }] })],
+    ["unsafe finding path", reviewBatch({ findings: [{ ...openHighFinding, path: "../secret" }] })],
+    ["invalid finding line", reviewBatch({ findings: [{ ...openHighFinding, line: 0 }] })],
+    ["non-GitHub finding source", reviewBatch({ findings: [{ ...openHighFinding, sourceUrl: "https://attacker.example/review/1" }] })],
     ["duplicate finding id", reviewBatch({ findings: [openHighFinding, { ...openHighFinding }] })],
     ["unknown batch field", { ...reviewBatch(), repository: "other/repo" }],
   ])("rejects a strict invalid review batch: %s", async (_label, batch) => {
@@ -143,6 +152,16 @@ describe("SyncReview", () => {
     expect(result.status).toBe("qodo_review");
     expect(result.version).toBe(2);
     expect(harness.operations).toEqual([]);
+  });
+
+  it("does not rewrite an unchanged finding observed in a later review", async () => {
+    const { syncReview, store } = fixture();
+    await seedReview(store, campaign({ status: "qodo_review", qodoIteration: 1 }));
+    await store.recordQodoFinding("campaign-1", 1, openHighFinding);
+
+    await syncReview.execute("campaign-1", reviewBatch({ reviewId: "review-later", findings: [openHighFinding] }));
+
+    expect((await store.get("campaign-1"))?.events.filter(({ eventType }) => eventType === "qodo_finding_recorded")).toEqual([]);
   });
 
   it("claims review state before findings and dispatch so duplicate sync launches once", async () => {
