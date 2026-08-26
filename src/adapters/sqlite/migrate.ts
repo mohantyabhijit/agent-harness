@@ -73,7 +73,7 @@ const schema = `
 export function migrateCampaignStore(database: Database.Database): void {
   database.pragma("foreign_keys = ON");
   const foreignKeysEnabled = database.pragma("foreign_keys", { simple: true });
-  if (foreignKeysEnabled !== 1) {
+  if (foreignKeysEnabled !== 1 && foreignKeysEnabled !== 1n) {
     throw new Error("SQLite foreign key enforcement could not be enabled");
   }
   database.transaction(() => {

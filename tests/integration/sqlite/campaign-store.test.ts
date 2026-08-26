@@ -442,4 +442,13 @@ describe("SqliteCampaignStore", () => {
     expect(() => new SqliteCampaignStore(database)).toThrow(/foreign key enforcement/i);
     database.exec("ROLLBACK");
   });
+
+  it("accepts enabled foreign keys when SQLite safe integers return 1n", () => {
+    const database = new Database(":memory:");
+    databases.push(database);
+    database.defaultSafeIntegers(true);
+
+    expect(database.pragma("foreign_keys", { simple: true })).toBe(1n);
+    expect(() => new SqliteCampaignStore(database)).not.toThrow();
+  });
 });
