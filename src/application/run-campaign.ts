@@ -104,7 +104,7 @@ export class RunCampaign {
       case "verify":
         return this.runVerification(snapshot);
       default:
-        throw new Error("Unknown campaign operation");
+        throw new ApplicationError("invalid_request");
     }
   }
 
@@ -116,22 +116,22 @@ export class RunCampaign {
     validateExternalActionPayload(request.payload);
     const snapshot = await this.requiredSnapshot(campaignId);
     if (request.payload.repository !== snapshot.campaign.repository || request.payload.issueNumber !== snapshot.campaign.issueNumber) {
-      throw new Error("External action payload does not match campaign identity");
+      throw new ApplicationError("campaign_conflict");
     }
     this.assertExternalPayloadReferences(snapshot, request.payload);
     const digest = externalActionDigest(request.payload);
     const approval = snapshot.approvals.find(({ id }) => id === request.approvalId);
     if (approval === undefined || approval.campaignId !== campaignId) {
-      throw new Error("Approval does not exist for this campaign");
+      throw new ApplicationError("approval_required");
     }
     if (approval.action !== request.payload.action || approval.actionDigest !== digest) {
-      throw new Error("Approval does not match this external action");
+      throw new ApplicationError("approval_required");
     }
     if (approval.status !== "approved") {
-      throw new Error("Approval is not available");
+      throw new ApplicationError("approval_required");
     }
     if (!isApprovalActionAllowed(approval.action, snapshot.campaign.status)) {
-      throw new Error("Campaign state does not allow this external action");
+      throw new ApplicationError("invalid_transition");
     }
 
     const claimId = this.nextId();
@@ -199,7 +199,7 @@ export class RunCampaign {
     const reconciliation = parseExternalActionReconciliation(input);
     const snapshot = await this.requiredSnapshot(campaignId);
     const claim = snapshot.externalActionClaims.find(({ id }) => id === reconciliation.claimId);
-    if (claim === undefined || claim.status !== "outcome_unknown") throw new Error("External action claim is not awaiting reconciliation");
+    if (claim === undefined || claim.status !== "outcome_unknown") throw new ApplicationError("invalid_transition");
     const current = campaignCurrentCommit(snapshot);
     const resultingVersion = snapshot.campaign.version + (reconciliation.observedCanonicalHead !== undefined && reconciliation.observedCanonicalHead !== current ? 1 : 0);
     await this.store.reconcileExternalAction(campaignId, {
@@ -230,11 +230,11 @@ export class RunCampaign {
     const recovery = parseExternalActionStaleRecovery(input);
     const snapshot = await this.requiredSnapshot(campaignId);
     const claim = snapshot.externalActionClaims.find(({ id }) => id === recovery.claimId);
-    if (claim === undefined || claim.status !== "active") throw new Error("External action claim is not active");
+    if (claim === undefined || claim.status !== "active") throw new ApplicationError("invalid_transition");
     const recoveredAt = canonicalTimestamp(this.clock.now(), "stale claim recovery");
     const staleBefore = new Date(Date.parse(recoveredAt) - this.#externalActionClaimStaleAfterMs).toISOString();
     if (Date.parse(claim.leaseStartedAt) > Date.parse(staleBefore)) {
-      throw new Error("External action claim is not stale");
+      throw new ApplicationError("invalid_transition");
     }
     await this.store.recoverStaleExternalActionClaim(campaignId, {
       claimId: recovery.claimId,
@@ -264,7 +264,7 @@ export class RunCampaign {
     const snapshot = await this.requiredSnapshot(campaignId);
     const fromStatus = snapshot.campaign.status;
     const target = interruptedRecoveryTarget(fromStatus);
-    if (target === undefined) throw new Error("Campaign has no interrupted operation to recover");
+    if (target === undefined) throw new ApplicationError("invalid_transition");
     const recovered = transitionCampaign(snapshot.campaign, target);
     await this.store.update(recovered, snapshot.campaign.version);
     await this.store.appendEvent(campaignId, {
@@ -277,14 +277,14 @@ export class RunCampaign {
 
   private async runPreflight(snapshot: CampaignSnapshot): Promise<Campaign> {
     if (snapshot.campaign.status === "preflight") {
-      throw new Error("Campaign preflight requires explicit human recovery");
+      throw new ApplicationError("invalid_transition");
     }
     if (
       snapshot.campaign.status !== "policy_review" &&
       snapshot.campaign.status !== "coordination_pending" &&
       snapshot.campaign.status !== "quarantined"
     ) {
-      throw new Error("Campaign cannot run preflight from its current state");
+      throw new ApplicationError("invalid_transition");
     }
 
     const claimed = transitionCampaign(snapshot.campaign, "preflight");
@@ -328,11 +328,11 @@ export class RunCampaign {
   private async runImplementation(snapshot: CampaignSnapshot): Promise<Campaign> {
     const { campaign } = snapshot;
     if (campaign.status !== "baseline" && campaign.status !== "verification") {
-      throw new Error("Campaign must pass preflight before implementation");
+      throw new ApplicationError("invalid_transition");
     }
     const currentCommitSha = requiredCurrentCommit(snapshot);
     if (campaign.status === "verification" && !hasOperationCompletion(snapshot, "verify", campaign.version, currentCommitSha)) {
-      throw new Error("Campaign lacks a verification completion event for this version");
+      throw new ApplicationError("invalid_transition");
     }
     const claimed = transitionCampaign(campaign, "implementation");
     await this.store.update(claimed, campaign.version);
@@ -360,14 +360,11 @@ export class RunCampaign {
   private async runVerification(snapshot: CampaignSnapshot): Promise<Campaign> {
     const { campaign } = snapshot;
     if (campaign.status !== "implementation") {
-      const reason = campaign.status === "quarantined" || campaign.status === "policy_review"
-        ? "Campaign must pass preflight before verification"
-        : "Campaign must be implemented before verification";
-      throw new Error(reason);
+      throw new ApplicationError("invalid_transition");
     }
     const currentCommitSha = requiredCurrentCommit(snapshot);
     if (!hasOperationCompletion(snapshot, "implement", campaign.version, currentCommitSha)) {
-      throw new Error("Campaign lacks an implementation completion event for this version");
+      throw new ApplicationError("invalid_transition");
     }
 
     const claimed = transitionCampaign(campaign, "verification");

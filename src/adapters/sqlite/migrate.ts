@@ -107,9 +107,6 @@ const schema = `
   CREATE UNIQUE INDEX IF NOT EXISTS external_action_claims_one_blocking_idx
     ON external_action_claims(campaign_id)
     WHERE status IN ('active', 'outcome_unknown');
-  CREATE UNIQUE INDEX IF NOT EXISTS approvals_one_approved_digest_idx
-    ON approvals(campaign_id, action_digest)
-    WHERE status = 'approved';
   CREATE INDEX IF NOT EXISTS campaign_operation_results_authority_idx
     ON campaign_operation_results(campaign_id, operation, resulting_campaign_version, current_commit_sha, pull_request, qodo_iteration);
 `;
@@ -146,7 +143,23 @@ export function migrateCampaignStore(database: Database.Database): void {
         UPDATE external_action_claims SET lease_started_at = attempted_at WHERE lease_started_at IS NULL;
       `);
     }
+    const duplicateLiveApproval = database.prepare(`
+      SELECT 1 FROM approvals WHERE status = 'approved'
+      GROUP BY campaign_id, action_digest HAVING COUNT(*) > 1 LIMIT 1
+    `).get();
+    if (duplicateLiveApproval !== undefined) throw new CampaignMigrationConflict();
+    database.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS approvals_one_approved_digest_idx
+      ON approvals(campaign_id, action_digest)
+      WHERE status = 'approved'
+    `);
   })();
+}
+
+export class CampaignMigrationConflict extends Error {
+  override readonly name = "CampaignMigrationConflict";
+  readonly code = "duplicate_live_approvals";
+  constructor() { super("Campaign database requires duplicate approval remediation"); }
 }
 
 export const migrate = migrateCampaignStore;

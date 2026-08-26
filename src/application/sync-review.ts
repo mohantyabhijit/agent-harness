@@ -10,6 +10,7 @@ import type { CampaignPacket, HarnessPort } from "./ports/harness.js";
 import { isPullRequest } from "./external-action.js";
 import { parseQodoReviewBatch, type QodoReviewBatch } from "./qodo-review-batch.js";
 import { ApplicationError } from "./errors.js";
+import type { HarnessRequestOptions } from "./ports/harness.js";
 
 export type { QodoReviewBatch } from "./qodo-review-batch.js";
 
@@ -26,7 +27,7 @@ export class SyncReview {
     private readonly ids: IdGenerator,
   ) {}
 
-  async execute(campaignId: string, input: QodoReviewBatch): Promise<Campaign> {
+  async execute(campaignId: string, input: QodoReviewBatch, context?: HarnessRequestOptions): Promise<Campaign> {
     const batch = parseQodoReviewBatch(input);
     if (batch.campaignId !== campaignId) {
       throw new ApplicationError("campaign_conflict");
@@ -81,9 +82,11 @@ export class SyncReview {
       const result = await this.harness.runChildSession(
         this.repairPacket(snapshot, claimed.campaign, batch, combinedFindings),
         "repair",
+        context,
       );
       const nextCommitSha = repairCommit(result.output);
       const resultingVersion = claimed.campaign.version + (nextCommitSha !== undefined && nextCommitSha !== batch.commitSha ? 1 : 0);
+      if (isCancelled(context)) return claimed.campaign;
       const recordedVersion = await this.store.recordChildResult(campaignId, {
         expectedVersion: claimed.campaign.version,
         expectedStatus: "repair",
@@ -110,11 +113,14 @@ export class SyncReview {
     } catch {
       try {
         const escalated = transitionCampaign(claimed.campaign, "human_escalation");
+        if (isCancelled(context)) return claimed.campaign;
         await this.store.update(escalated, claimed.campaign.version);
+        if (isCancelled(context)) return escalated;
         await this.appendReviewEvent(claimed.campaign, "repair_execution_failed", batch, { reason: "repair_child_failed" });
         return escalated;
-      } catch {
-        throw new Error("Repair result was fenced by campaign recovery");
+      } catch (recoveryError) {
+        if (isCancelled(context)) return claimed.campaign;
+        throw new Error("Repair result was fenced by campaign recovery", { cause: recoveryError });
       }
     }
   }
@@ -265,4 +271,8 @@ function repairCommit(output: unknown): string | undefined {
   if (!isRecord(output) || output.commitSha === undefined) return undefined;
   if (typeof output.commitSha !== "string" || !/^[0-9a-f]{40}$/u.test(output.commitSha)) throw new Error("Invalid repair commit");
   return output.commitSha;
+}
+
+function isCancelled(context?: HarnessRequestOptions): boolean {
+  return context?.signal?.aborted === true;
 }

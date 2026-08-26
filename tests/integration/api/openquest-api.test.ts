@@ -33,6 +33,40 @@ describe("OpenQuest API", () => {
     await app.close();
   });
 
+  it("binds review-provider authorization to the matched route before query validation", async () => {
+    const authorization = bearerAuthorizationPolicy({ operator: "operator-secret-token-value-000001", reviewProvider: "review-provider-token-value-000002" });
+    const { app, store } = buildTestApp({ authorization });
+    const head = "a".repeat(40);
+    store.seed(campaign({ status: "qodo_review", version: 1, qodoIteration: 0 }));
+    store.seedExternalReference("campaign-1", { kind: "commit", value: head });
+    store.seedExternalReference("campaign-1", { kind: "pull_request", value: "https://github.com/owner/repo/pull/7" });
+    const providerHeaders = { authorization: "Bearer review-provider-token-value-000002" };
+
+    const unknownQuery = await app.inject({ method: "POST", url: "/api/campaigns/campaign-1/reviews/sync?debug=1", headers: providerHeaders, payload: reviewBatch() });
+    expect(unknownQuery.statusCode).toBe(400);
+    expect(unknownQuery.json()).toEqual({ code: "invalid_request", message: "Request validation failed" });
+    expect((await app.inject({ method: "POST", url: "/api/campaigns/campaign-1/reviews/sync", headers: { authorization: "Bearer operator-secret-token-value-000001" }, payload: reviewBatch() })).statusCode).toBe(403);
+    expect((await app.inject({ method: "POST", url: "/api/campaigns/campaign-1/reviews/sync", headers: providerHeaders, payload: reviewBatch() })).statusCode).toBe(200);
+    await app.close();
+  });
+
+  it("maps expected transition failures to 422 and unexpected store failures to 500", async () => {
+    const { app, store } = buildTestApp();
+    store.seed(campaign({ status: "baseline" }));
+    expect((await app.inject({ method: "POST", url: "/api/campaigns/campaign-1/actions/preflight", payload: {} })).statusCode).toBe(422);
+    await app.close();
+
+    class FailingStore extends FakeCampaignStore {
+      override async get(): Promise<never> { throw new Error("secret database logic failure"); }
+    }
+    const failing = buildTestApp({ store: new FailingStore() }).app;
+    const response = await failing.inject({ method: "POST", url: "/api/campaigns/campaign-1/actions/preflight", payload: {} });
+    expect(response.statusCode).toBe(500);
+    expect(response.json()).toEqual({ code: "internal_error", message: "Request could not be completed" });
+    expect(response.body).not.toContain("secret database");
+    await failing.close();
+  });
+
   it("replays one approval confirmation without minting a second approval", async () => {
     const { app, store } = buildTestApp();
     const head = "a".repeat(40);
@@ -283,6 +317,46 @@ describe("OpenQuest API", () => {
 });
 
 describe("Qodo review job", () => {
+  it("stops during a hung repair and fences a provider that completes after shutdown", async () => {
+    const innerStore = new FakeCampaignStore();
+    const harness = new FakeHarness();
+    const head = "a".repeat(40);
+    innerStore.seed(campaign({ status: "qodo_review", qodoIteration: 0 }));
+    innerStore.seedExternalReference("campaign-1", { kind: "commit", value: head });
+    innerStore.seedExternalReference("campaign-1", { kind: "pull_request", value: "https://github.com/owner/repo/pull/7" });
+    let releaseRepair!: () => void;
+    const repairBlocked = new Promise<void>((resolve) => { releaseRepair = resolve; });
+    harness.beforeResult = async () => repairBlocked;
+    let closed = false;
+    const callsAfterClose: string[] = [];
+    const mutating = new Set(["update", "appendEvent", "recordQodoFinding", "recordChildResult"]);
+    const store = new Proxy(innerStore, {
+      get(target, property) {
+        const value = Reflect.get(target, property, target) as unknown;
+        if (typeof value !== "function") return value;
+        return async (...args: unknown[]) => {
+          if (closed && mutating.has(String(property))) callsAfterClose.push(String(property));
+          return Reflect.apply(value, target, args) as unknown;
+        };
+      },
+    });
+    const syncReview = new SyncReview(store, harness, { now: () => "2026-08-26T00:00:00Z" }, { next: (() => { let id = 0; return () => `cancel-${String(++id)}`; })() });
+    const source: QodoReviewSource = { fetch: async () => reviewBatch({ findings: [openHighFinding], complete: false }) };
+    const scheduler: ReviewJobScheduler = { setInterval: () => "timer", clearInterval: () => undefined };
+    const job = createQodoReviewJob({ store, source, syncReview, scheduler, intervalMs: 10_000, shutdownTimeoutMs: 20 });
+
+    const tick = job.tick();
+    await vi.waitFor(() => { expect(harness.operations).toContain("repair"); });
+    await job.stop();
+    closed = true;
+    releaseRepair();
+    await tick;
+
+    expect(harness.requestOptions[0]?.signal?.aborted).toBe(true);
+    expect(harness.requestOptions[0]?.timeoutMs).toBe(20);
+    expect(callsAfterClose).toEqual([]);
+    expect((await innerStore.get("campaign-1"))?.events.some(({ eventType }) => eventType === "campaign_operation_completed")).toBe(false);
+  });
   it("rejects oversized provider output before durable review writes or repair children", async () => {
     const store = new FakeCampaignStore();
     const harness = new FakeHarness();

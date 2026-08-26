@@ -11,7 +11,7 @@ export interface ReviewRouteDependencies {
 }
 
 export function registerReviewRoutes(app: FastifyInstance, dependencies: ReviewRouteDependencies): void {
-  app.post("/api/campaigns/:id/reviews/sync", async (request) => {
+  app.post("/api/campaigns/:id/reviews/sync", { config: { capability: "review_provider" } }, async (request) => {
     const { id } = paramsSchema.parse(request.params);
     const batch = parseQodoReviewBatch(request.body);
     return dependencies.syncReview.execute(id, batch);

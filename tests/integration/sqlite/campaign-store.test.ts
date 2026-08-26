@@ -102,6 +102,19 @@ function insertRepairAuthority(database: Database.Database, input: { eventId: st
 }
 
 describe("SqliteCampaignStore", () => {
+  it("fails migration with a fixed non-secret conflict when duplicate live approvals predate the unique index", async () => {
+    const { database, store } = openMemoryStore();
+    await store.create(campaign({ status: "contribution_approval" }));
+    database.exec("DROP INDEX approvals_one_approved_digest_idx");
+    const secretDigest = "sha256:secret-duplicate-action";
+    database.prepare("INSERT INTO approvals (id, campaign_id, action, action_digest, status, issued_at) VALUES (?, 'campaign-1', 'create_pr', ?, 'approved', '2026-08-26T00:00:00Z')").run("legacy-a", secretDigest);
+    database.prepare("INSERT INTO approvals (id, campaign_id, action, action_digest, status, issued_at) VALUES (?, 'campaign-1', 'create_pr', ?, 'approved', '2026-08-26T00:00:00Z')").run("legacy-b", secretDigest);
+
+    let migrationError: unknown;
+    try { new SqliteCampaignStore(database); } catch (error) { migrationError = error; }
+    expect(migrationError).toMatchObject({ name: "CampaignMigrationConflict", code: "duplicate_live_approvals" });
+    expect(String(migrationError)).not.toContain(secretDigest);
+  });
   it.each([
     ["SQLite", () => openMemoryStore().store],
     ["fake", () => new FakeCampaignStore()],
@@ -854,7 +867,7 @@ describe("SqliteCampaignStore", () => {
       { next: () => `restart-event-${String(++eventNumber)}` },
       { externalActionClaimStaleAfterMs: 5 * 60_000 },
     );
-    await expect(freshService("2026-08-26T00:03:00Z").recoverStaleExternalAction("campaign-1", { claimId: "claim-1", disposition: "operator checked process state" })).rejects.toThrow(/not stale/i);
+    await expect(freshService("2026-08-26T00:03:00Z").recoverStaleExternalAction("campaign-1", { claimId: "claim-1", disposition: "operator checked process state" })).rejects.toMatchObject({ code: "invalid_transition" });
     const active = await secondStore.get("campaign-1");
     expect(active?.externalActionClaims[0]?.status).toBe("active");
     expect(active?.events.map(({ eventType }) => eventType)).toEqual(["external_action_attempted"]);

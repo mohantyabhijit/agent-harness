@@ -46,7 +46,7 @@ export function createQodoReviewJob(dependencies: QodoReviewJobDependencies): Qo
       try {
         const batch = await dependencies.source.fetch(snapshot, { signal, timeoutMs: dependencies.shutdownTimeoutMs });
         if (isAborted(signal)) return;
-        if (batch !== undefined) await dependencies.syncReview.execute(snapshot.campaign.id, batch);
+        if (batch !== undefined) await dependencies.syncReview.execute(snapshot.campaign.id, batch, { signal, timeoutMs: dependencies.shutdownTimeoutMs });
       } catch {
         // A later tick retries from durable campaign state. The job never
         // logs provider output because it may contain credential material.

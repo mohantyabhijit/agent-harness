@@ -3,6 +3,7 @@ import type {
   HarnessOperation,
   HarnessPort,
   HarnessSessionResult,
+  HarnessRequestOptions,
 } from "../../src/application/ports/harness.js";
 
 export class FakeHarness implements HarnessPort {
@@ -11,6 +12,7 @@ export class FakeHarness implements HarnessPort {
   readonly childSessions: string[] = [];
   readonly deletedSessions: string[] = [];
   readonly packets: CampaignPacket[] = [];
+  readonly requestOptions: (HarnessRequestOptions | undefined)[] = [];
   readonly #results = new Map<HarnessOperation, HarnessSessionResult[]>();
   readonly #failures = new Map<HarnessOperation, Error[]>();
   beforeResult?: (operation: HarnessOperation) => Promise<void>;
@@ -42,11 +44,13 @@ export class FakeHarness implements HarnessPort {
   async runChildSession(
     packet: CampaignPacket,
     operation: HarnessOperation,
+    options?: HarnessRequestOptions,
   ): Promise<HarnessSessionResult> {
     const sessionId = this.#sessionId();
     this.operations.push(operation);
     this.childSessions.push(sessionId);
     this.packets.push(structuredClone(packet));
+    this.requestOptions.push(options);
     const failure = this.#failures.get(operation)?.shift();
     if (failure !== undefined) {
       throw failure;

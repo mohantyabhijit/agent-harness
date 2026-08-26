@@ -24,7 +24,7 @@ describe("RunCampaign", () => {
     const { service, store, harness } = fixture();
     store.seed(campaign({ status: "policy_review" }));
 
-    await expect(service.execute("campaign-1", "implement")).rejects.toThrow(/preflight/i);
+    await expect(service.execute("campaign-1", "implement")).rejects.toMatchObject({ code: "invalid_transition" });
     expect(harness.operations).not.toContain("implement");
   });
 
@@ -49,8 +49,8 @@ describe("RunCampaign", () => {
     const result = await service.execute("campaign-1", "preflight");
 
     expect(result.status).toBe("quarantined");
-    await expect(service.execute("campaign-1", "implement")).rejects.toThrow(/preflight/i);
-    await expect(service.execute("campaign-1", "verify")).rejects.toThrow(/preflight/i);
+    await expect(service.execute("campaign-1", "implement")).rejects.toMatchObject({ code: "invalid_transition" });
+    await expect(service.execute("campaign-1", "verify")).rejects.toMatchObject({ code: "invalid_transition" });
     expect(harness.operations).toEqual(["preflight"]);
   });
 
@@ -115,7 +115,7 @@ describe("RunCampaign", () => {
     store.seed(campaign({ status: "implementation", version: 4 }));
     store.seedExternalReference("campaign-1", { kind: "commit", value: commitSha });
 
-    await expect(service.execute("campaign-1", "verify")).rejects.toThrow(/implementation.*event/i);
+    await expect(service.execute("campaign-1", "verify")).rejects.toMatchObject({ code: "invalid_transition" });
     expect(harness.operations).toEqual([]);
   });
 
@@ -177,7 +177,7 @@ describe("RunCampaign", () => {
 
     const verifying = service.execute("campaign-1", "verify");
     await entered;
-    await expect(service.execute("campaign-1", "implement")).rejects.toThrow(/verification completion/i);
+    await expect(service.execute("campaign-1", "implement")).rejects.toMatchObject({ code: "invalid_transition" });
     await service.recoverInterrupted("campaign-1");
     releaseResult();
     await expect(verifying).rejects.toThrow(/reconciliation|required/i);
@@ -211,7 +211,7 @@ describe("RunCampaign", () => {
   it("rejects a typed external payload for another campaign before consuming", async () => {
     const { service, store } = await approvedFixture();
     const action = vi.fn(async () => undefined);
-    await expect(service.executeApprovedExternalAction("campaign-1", { approvalId: "approval-1", payload: { ...externalPayload, repository: "other/repo" } }, action)).rejects.toThrow(/identity/i);
+    await expect(service.executeApprovedExternalAction("campaign-1", { approvalId: "approval-1", payload: { ...externalPayload, repository: "other/repo" } }, action)).rejects.toMatchObject({ code: "campaign_conflict" });
     expect(action).not.toHaveBeenCalled();
     expect((await store.get("campaign-1"))?.approvals[0]?.status).toBe("approved");
   });
@@ -259,7 +259,7 @@ describe("RunCampaign", () => {
     ]);
     await expect(
       service.executeApprovedExternalAction("campaign-1", approvalRequest(), action),
-    ).rejects.toThrow(/available/i);
+    ).rejects.toMatchObject({ code: "approval_required" });
     expect(action).toHaveBeenCalledOnce();
   });
 
@@ -310,7 +310,7 @@ describe("RunCampaign", () => {
 
       await expect(
         service.executeApprovedExternalAction("campaign-1", approvalRequest(), action),
-      ).rejects.toThrow(/state/i);
+      ).rejects.toMatchObject({ code: "invalid_transition" });
       expect(action).not.toHaveBeenCalled();
       expect((await store.get("campaign-1"))?.approvals[0]?.status).toBe("approved");
     },
@@ -386,7 +386,7 @@ describe("RunCampaign", () => {
       childSessionId: "conflicting-child",
       event: { id: "conflicting-event", eventType: "campaign_operation_completed", payload: { claimedCampaignVersion: claimed.campaign.version, resultingCampaignVersion: claimed.campaign.version }, occurredAt: "2026-08-26T00:01:00Z" },
     })).rejects.toThrow(/external action/i);
-    await expect(service.executeApprovedExternalAction("campaign-1", approvalRequest(), async () => undefined)).rejects.toThrow(/external action|available/i);
+    await expect(service.executeApprovedExternalAction("campaign-1", approvalRequest(), async () => undefined)).rejects.toMatchObject({ code: "approval_required" });
     release();
     await expect(executing).resolves.toBe("pull-request-7");
     expect((await store.get("campaign-1"))?.externalActionClaims[0]?.status).toBe("completed");
@@ -416,7 +416,7 @@ describe("RunCampaign", () => {
     if (claim === undefined) throw new Error("missing external action claim");
     expect(claim.status).toBe("outcome_unknown");
     await expect(store.replaceCurrentCommit("campaign-1", "b".repeat(40), unknown.campaign.version, unknown.campaign.status)).rejects.toThrow(/external action/i);
-    await expect(service.reconcileExternalAction("campaign-1", { claimId: "stale-claim", disposition: "confirmed_not_completed" })).rejects.toThrow(/claim/i);
+    await expect(service.reconcileExternalAction("campaign-1", { claimId: "stale-claim", disposition: "confirmed_not_completed" })).rejects.toMatchObject({ code: "invalid_transition" });
     await expect(service.reconcileExternalAction("campaign-1", { claimId: claim.id, disposition: "confirmed_completed", observedCanonicalHead: "b".repeat(40) })).resolves.toMatchObject({ version: 8 });
 
     const reconciled = await store.get("campaign-1");
@@ -597,7 +597,7 @@ describe("RunCampaign", () => {
     const claimId = (await store.get("campaign-1"))?.externalActionClaims[0]?.id;
     if (claimId === undefined) throw new Error("missing active claim");
 
-    await expect(service.recoverStaleExternalAction("campaign-1", { claimId, disposition: "operator checked process ownership" })).rejects.toThrow(/not stale/i);
+    await expect(service.recoverStaleExternalAction("campaign-1", { claimId, disposition: "operator checked process ownership" })).rejects.toMatchObject({ code: "invalid_transition" });
     now = "2026-08-26T00:03:00Z";
     await expect(service.recoverStaleExternalAction("campaign-1", { claimId, disposition: " " })).rejects.toThrow(/disposition/i);
     await expect(service.recoverStaleExternalAction("campaign-1", { claimId, disposition: "operator checked process ownership" })).resolves.toMatchObject({ status: "contribution_approval" });

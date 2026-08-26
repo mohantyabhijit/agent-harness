@@ -15,7 +15,7 @@ import { registerDiscoveryRoutes } from "./routes/discovery.js";
 import { registerReviewRoutes } from "./routes/reviews.js";
 import { registerSpaceRoutes } from "./routes/spaces.js";
 import { ApiProblem } from "./routes/support.js";
-import type { AuthorizationPolicy } from "./authorization.js";
+import type { AuthorizationPolicy, Capability } from "./authorization.js";
 
 const emptyQuerySchema = z.object({}).strict();
 
@@ -40,7 +40,8 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
   });
   app.addHook("onRequest", async (request) => {
     if (request.method === "GET" || request.method === "HEAD") return;
-    dependencies.authorization.require(request, request.url.endsWith("/reviews/sync") ? "review_provider" : "operator");
+    const routeConfig = request.routeOptions.config as { capability?: Capability };
+    dependencies.authorization.require(request, routeConfig.capability ?? "operator");
   });
   app.setErrorHandler((error, _request, reply) => {
     const problem = mapError(error);

@@ -12,6 +12,21 @@ import { FakeHarness } from "../../fakes/fake-harness.js";
 const commitSha = "b".repeat(40);
 
 describe("SyncReview", () => {
+  it("does not persist a repair result or failure after cancellation wins a late provider completion", async () => {
+    const { syncReview, store, harness } = fixture();
+    await seedReview(store, campaign({ status: "qodo_review", qodoIteration: 0 }));
+    let release!: () => void;
+    harness.beforeResult = async () => new Promise<void>((resolve) => { release = resolve; });
+    const controller = new AbortController();
+    const executing = syncReview.execute("campaign-1", reviewBatch({ complete: false, findings: [openHighFinding] }), { signal: controller.signal, timeoutMs: 50 });
+    await vi.waitFor(() => { expect(harness.operations).toContain("repair"); });
+    controller.abort();
+    release();
+    await expect(executing).resolves.toMatchObject({ status: "repair" });
+    const snapshot = await store.get("campaign-1");
+    expect(snapshot?.events.some(({ eventType }) => eventType === "campaign_operation_completed" || eventType === "repair_execution_failed")).toBe(false);
+    expect(snapshot?.campaign.status).toBe("repair");
+  });
   it("starts no fourth repair session", async () => {
     const { syncReview, store, harness } = fixture();
     await seedReview(store, campaign({ status: "qodo_review", qodoIteration: 3 }));
