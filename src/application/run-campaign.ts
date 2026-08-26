@@ -5,6 +5,7 @@ import {
 import { transitionCampaign, type Campaign } from "../domain/campaign.js";
 import type { Clock, IdGenerator } from "./create-campaign.js";
 import type { CampaignEvent, CampaignSnapshot, CampaignStore } from "./ports/campaign-store.js";
+import type { ExternalActionDisposition } from "./ports/campaign-store.js";
 import type {
   CampaignPacket,
   HarnessOperation,
@@ -33,6 +34,12 @@ export interface AuthorizedExternalAction {
   readonly action: ApprovalAction;
   readonly actionDigest: string;
   readonly payload: ExternalActionPayload;
+}
+
+export interface ExternalActionReconciliation {
+  readonly claimId: string;
+  readonly disposition: ExternalActionDisposition;
+  readonly observedCanonicalHead?: string;
 }
 
 export const requiredPreflightChecks = [
@@ -107,6 +114,24 @@ export class RunCampaign {
       throw new Error("Campaign state does not allow this external action");
     }
 
+    const claimId = this.nextId();
+    const expectedCurrentCommitSha = campaignCurrentCommit(snapshot);
+    const claimed = await this.store.claimExternalAction(campaignId, {
+      claimId,
+      approvalId: request.approvalId,
+      actionDigest: digest,
+      payload: structuredClone(request.payload),
+      ...(expectedCurrentCommitSha === undefined ? {} : { expectedCurrentCommitSha }),
+      expectedVersion: snapshot.campaign.version,
+      expectedStatus: snapshot.campaign.status,
+      consumedAt: this.clock.now(),
+      attemptedEvent: {
+        id: this.nextId(),
+        eventType: "external_action_attempted",
+        payload: externalActionEvidence(claimId, approval.action, approval.actionDigest, snapshot.campaign.version, snapshot.campaign.version, snapshot.campaign.status),
+        occurredAt: this.clock.now(),
+      },
+    });
     const authorized: Readonly<AuthorizedExternalAction> = deepFreeze({
       campaignId,
       repository: snapshot.campaign.repository,
@@ -114,36 +139,69 @@ export class RunCampaign {
       issueUrl: snapshot.campaign.issueUrl,
       action: approval.action,
       actionDigest: approval.actionDigest,
-      payload: structuredClone(request.payload),
+      payload: structuredClone(claimed.payload),
     });
-    await this.store.consumeApproval(
-      request.approvalId,
-      digest,
-      this.clock.now(),
-      snapshot.campaign.version,
-      snapshot.campaign.status,
-    );
-    try {
-      await this.appendExternalEvent(snapshot, "external_action_attempted", authorized);
-    } catch {
-      throw new Error("External action was not attempted; consumed approval reconciliation required");
-    }
 
     let result: T;
     try {
       result = await action(authorized);
     } catch {
-      await this.appendOutcomeUnknown(snapshot, authorized);
+      await this.markOutcomeUnknown(campaignId, claimId, approval.action, approval.actionDigest, snapshot);
       throw new Error("External action outcome is unknown; reconciliation required");
     }
 
     try {
-      await this.appendExternalEvent(snapshot, "external_action_completed", authorized);
+      const newCommitSha = claimed.payload.action === "push_branch" || claimed.payload.action === "update_pr"
+        ? claimed.payload.commitSha
+        : undefined;
+      const resultingVersion = snapshot.campaign.version + (newCommitSha !== undefined && newCommitSha !== campaignCurrentCommit(snapshot) ? 1 : 0);
+      await this.store.completeExternalAction(campaignId, {
+        claimId,
+        completedAt: this.clock.now(),
+        completedEvent: {
+          id: this.nextId(),
+          eventType: "external_action_completed",
+          payload: externalActionEvidence(claimId, approval.action, approval.actionDigest, snapshot.campaign.version, resultingVersion, snapshot.campaign.status),
+          occurredAt: this.clock.now(),
+        },
+        ...(newCommitSha === undefined ? {} : { newCommitSha }),
+      });
     } catch {
-      await this.appendOutcomeUnknown(snapshot, authorized);
+      await this.markOutcomeUnknown(campaignId, claimId, approval.action, approval.actionDigest, snapshot);
       throw new Error("External action outcome is unknown; reconciliation required");
     }
     return result;
+  }
+
+  async reconcileExternalAction(campaignId: string, input: unknown): Promise<Campaign> {
+    const reconciliation = parseExternalActionReconciliation(input);
+    const snapshot = await this.requiredSnapshot(campaignId);
+    const claim = snapshot.externalActionClaims.find(({ id }) => id === reconciliation.claimId);
+    if (claim === undefined || claim.status !== "outcome_unknown") throw new Error("External action claim is not awaiting reconciliation");
+    const current = campaignCurrentCommit(snapshot);
+    const resultingVersion = snapshot.campaign.version + (reconciliation.observedCanonicalHead !== undefined && reconciliation.observedCanonicalHead !== current ? 1 : 0);
+    await this.store.reconcileExternalAction(campaignId, {
+      claimId: reconciliation.claimId,
+      disposition: reconciliation.disposition,
+      ...(reconciliation.observedCanonicalHead === undefined ? {} : { observedCanonicalHead: reconciliation.observedCanonicalHead }),
+      reconciledAt: this.clock.now(),
+      event: {
+        id: this.nextId(),
+        eventType: "external_action_reconciled",
+        payload: {
+          claimId: reconciliation.claimId,
+          action: claim.payload.action,
+          actionDigest: claim.actionDigest,
+          disposition: reconciliation.disposition,
+          ...(reconciliation.observedCanonicalHead === undefined ? {} : { observedCanonicalHead: reconciliation.observedCanonicalHead }),
+          claimedCampaignVersion: snapshot.campaign.version,
+          resultingCampaignVersion: resultingVersion,
+          reason: "human_external_action_reconciliation",
+        },
+        occurredAt: this.clock.now(),
+      },
+    });
+    return (await this.requiredSnapshot(campaignId)).campaign;
   }
 
   async recoverInterrupted(campaignId: string): Promise<Campaign> {
@@ -321,46 +379,32 @@ export class RunCampaign {
   }
 
   private assertExternalPayloadReferences(snapshot: CampaignSnapshot, payload: ExternalActionPayload): void {
-    if ("commitSha" in payload && requiredCurrentCommit(snapshot) !== payload.commitSha) throw new Error("External action commit does not match current campaign head");
+    if (payload.action === "create_pr" && requiredCurrentCommit(snapshot) !== payload.commitSha) throw new Error("External action commit does not match current campaign head");
     if (payload.action === "update_pr" && !snapshot.externalReferences.some(({ kind, value }) => kind === "pull_request" && value === payload.pullRequest)) throw new Error("External action pull request does not match campaign memory");
   }
 
-  private async appendExternalEvent(
-    snapshot: CampaignSnapshot,
-    eventType: string,
-    authorized: Readonly<AuthorizedExternalAction>,
-  ): Promise<void> {
-    await this.store.appendEvent(snapshot.campaign.id, {
-      id: this.nextId(),
-      eventType,
-      payload: {
-        authorized,
-        claimedCampaignVersion: snapshot.campaign.version,
-        claimedCampaignStatus: snapshot.campaign.status,
-      },
-      occurredAt: this.clock.now(),
-    });
-  }
-
-  private async appendOutcomeUnknown(
-    snapshot: CampaignSnapshot,
-    authorized: Readonly<AuthorizedExternalAction>,
-  ): Promise<void> {
+  private async markOutcomeUnknown(campaignId: string, claimId: string, action: ApprovalAction, actionDigest: string, snapshot: CampaignSnapshot): Promise<void> {
     try {
-      await this.store.appendEvent(snapshot.campaign.id, {
-        id: this.nextId(),
-        eventType: "external_action_outcome_unknown",
-        payload: {
-          authorized,
-          claimedCampaignVersion: snapshot.campaign.version,
-          claimedCampaignStatus: snapshot.campaign.status,
-          reason: "external_action_result_unknown",
+      await this.store.markExternalActionOutcomeUnknown(campaignId, {
+        claimId,
+        event: {
+          id: this.nextId(),
+          eventType: "external_action_outcome_unknown",
+          payload: {
+            claimId,
+            action,
+            actionDigest,
+            claimedCampaignVersion: snapshot.campaign.version,
+            resultingCampaignVersion: snapshot.campaign.version,
+            claimedCampaignStatus: snapshot.campaign.status,
+            reason: "external_action_result_unknown",
+          },
+          occurredAt: this.clock.now(),
         },
-        occurredAt: this.clock.now(),
       });
     } catch {
-      // The approval remains consumed. Never retry an external action merely
-      // because durable outcome evidence also failed to persist.
+      // The durable active claim still blocks mutation and retries if outcome
+      // evidence itself cannot be recorded.
     }
   }
 
@@ -404,6 +448,46 @@ function hasOperationCompletion(
 
 function currentCommit(snapshot: CampaignSnapshot): string | undefined {
   return snapshot.externalReferences.find(({ kind }) => kind === "commit")?.value;
+}
+
+function campaignCurrentCommit(snapshot: CampaignSnapshot): string | undefined {
+  const commits = snapshot.externalReferences.filter(({ kind }) => kind === "commit");
+  if (commits.length > 1) throw new Error("Campaign current commit is ambiguous");
+  return commits[0]?.value;
+}
+
+function externalActionEvidence(
+  claimId: string,
+  action: ApprovalAction,
+  actionDigest: string,
+  claimedCampaignVersion: number,
+  resultingCampaignVersion: number,
+  claimedCampaignStatus: Campaign["status"],
+): Readonly<Record<string, unknown>> {
+  return {
+    claimId,
+    action,
+    actionDigest,
+    claimedCampaignVersion,
+    resultingCampaignVersion,
+    claimedCampaignStatus,
+  };
+}
+
+function parseExternalActionReconciliation(input: unknown): ExternalActionReconciliation {
+  if (!isRecord(input)) throw new Error("Invalid external action reconciliation");
+  const keys = Object.keys(input);
+  if (
+    keys.some((key) => !["claimId", "disposition", "observedCanonicalHead"].includes(key)) ||
+    typeof input.claimId !== "string" || input.claimId.trim().length === 0 ||
+    (input.disposition !== "confirmed_completed" && input.disposition !== "confirmed_not_completed") ||
+    (input.observedCanonicalHead !== undefined && (typeof input.observedCanonicalHead !== "string" || !/^[0-9a-f]{40}$/u.test(input.observedCanonicalHead)))
+  ) throw new Error("Invalid external action reconciliation");
+  return {
+    claimId: input.claimId,
+    disposition: input.disposition,
+    ...(input.observedCanonicalHead === undefined ? {} : { observedCanonicalHead: input.observedCanonicalHead }),
+  };
 }
 
 function parsePreflightResult(output: unknown): PreflightResult {

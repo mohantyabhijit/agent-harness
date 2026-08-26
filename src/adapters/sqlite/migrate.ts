@@ -66,8 +66,28 @@ const schema = `
     PRIMARY KEY (campaign_id, kind, value)
   );
 
+  CREATE TABLE IF NOT EXISTS external_action_claims (
+    id TEXT PRIMARY KEY,
+    campaign_id TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+    approval_id TEXT NOT NULL UNIQUE REFERENCES approvals(id) ON DELETE RESTRICT,
+    action_digest TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    current_commit_sha TEXT,
+    claimed_campaign_version INTEGER NOT NULL
+      CHECK (typeof(claimed_campaign_version) = 'integer' AND claimed_campaign_version >= 1),
+    claimed_campaign_status TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('active', 'outcome_unknown', 'completed', 'reconciled')),
+    attempted_at TEXT NOT NULL,
+    closed_at TEXT,
+    disposition TEXT CHECK (disposition IS NULL OR disposition IN ('confirmed_completed', 'confirmed_not_completed')),
+    observed_canonical_head TEXT
+  );
+
   CREATE INDEX IF NOT EXISTS campaigns_status_idx ON campaigns(status, created_at, id);
   CREATE INDEX IF NOT EXISTS campaign_events_order_idx ON campaign_events(campaign_id, occurred_at, id);
+  CREATE UNIQUE INDEX IF NOT EXISTS external_action_claims_one_blocking_idx
+    ON external_action_claims(campaign_id)
+    WHERE status IN ('active', 'outcome_unknown');
 `;
 
 export function migrateCampaignStore(database: Database.Database): void {

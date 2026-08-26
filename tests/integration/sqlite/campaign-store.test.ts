@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { SqliteCampaignStore } from "../../../src/adapters/sqlite/campaign-store.js";
 import { CampaignVersionConflict } from "../../../src/application/ports/campaign-store.js";
+import type { ExternalActionClaimRecord } from "../../../src/application/ports/campaign-store.js";
+import { externalActionDigest } from "../../../src/application/external-action.js";
 import { issueApproval } from "../../../src/domain/approval.js";
 import { transitionCampaign } from "../../../src/domain/campaign.js";
 import { campaign, evidence } from "../../builders.js";
@@ -27,6 +29,63 @@ function openMemoryStore(): { database: Database.Database; store: SqliteCampaign
   const database = new Database(":memory:");
   databases.push(database);
   return { database, store: new SqliteCampaignStore(database) };
+}
+
+function openTwoConnectionStore(prefix: string): {
+  databaseA: Database.Database;
+  databaseB: Database.Database;
+  storeA: SqliteCampaignStore;
+  storeB: SqliteCampaignStore;
+} {
+  const directory = mkdtempSync(join(tmpdir(), prefix));
+  temporaryDirectories.push(directory);
+  const path = join(directory, "campaigns.sqlite");
+  const databaseA = new Database(path);
+  const databaseB = new Database(path);
+  databases.push(databaseA, databaseB);
+  return { databaseA, databaseB, storeA: new SqliteCampaignStore(databaseA), storeB: new SqliteCampaignStore(databaseB) };
+}
+
+const externalPayload = {
+  action: "create_pr" as const,
+  repository: "owner/repo",
+  issueNumber: 42,
+  branch: "openquest/fix-42",
+  baseBranch: "main",
+  commitSha: "a".repeat(40),
+  title: "Fix issue 42",
+  body: "Verified remediation",
+};
+
+async function seedExternalActionCampaign(store: SqliteCampaignStore, database: Database.Database): Promise<void> {
+  await store.create(campaign({ status: "contribution_approval", version: 7 }));
+  database.prepare("INSERT INTO external_references (campaign_id, kind, value) VALUES (?, 'commit', ?)").run("campaign-1", "a".repeat(40));
+  await store.recordApproval(issueApproval({
+    id: "approval-1",
+    campaignId: "campaign-1",
+    action: "create_pr",
+    actionDigest: externalActionDigest(externalPayload),
+    issuedAt: "2026-08-26T00:00:00Z",
+  }));
+}
+
+function externalClaimRecord(): ExternalActionClaimRecord {
+  return {
+    claimId: "claim-1",
+    approvalId: "approval-1",
+    actionDigest: externalActionDigest(externalPayload),
+    payload: externalPayload,
+    expectedCurrentCommitSha: "a".repeat(40),
+    expectedVersion: 7,
+    expectedStatus: "contribution_approval",
+    consumedAt: "2026-08-26T00:01:00Z",
+    attemptedEvent: {
+      id: "attempt-1",
+      eventType: "external_action_attempted",
+      payload: { claimedCampaignVersion: 7, resultingCampaignVersion: 7 },
+      occurredAt: "2026-08-26T00:01:00Z",
+    },
+  };
 }
 
 describe("SqliteCampaignStore", () => {
@@ -373,6 +432,122 @@ describe("SqliteCampaignStore", () => {
       { kind: "sandbox", value: "child-1" },
     ]);
     expect((await store.get("campaign-1"))?.events).toHaveLength(1);
+  });
+
+  it("forbids generic repair-time rotation while the claimed child can atomically publish its commit", async () => {
+    const { store } = openMemoryStore();
+    await store.create(campaign({ status: "repair", version: 2, qodoIteration: 1 }));
+    await expect(store.replaceCurrentCommit("campaign-1", "b".repeat(40), 2, "repair")).rejects.toThrow(/repair/i);
+    const version = await store.recordChildResult("campaign-1", {
+      expectedVersion: 2,
+      expectedStatus: "repair",
+      childSessionId: "repair-child",
+      event: { id: "repair-completed", eventType: "campaign_operation_completed", payload: { claimedCampaignVersion: 2, resultingCampaignVersion: 3 }, occurredAt: "2026-08-26T00:01:00Z" },
+      newCommitSha: "b".repeat(40),
+    });
+    expect(version).toBe(3);
+    expect((await store.get("campaign-1"))?.externalReferences).toContainEqual({ kind: "commit", value: "b".repeat(40) });
+  });
+
+  it("durably claims approval, frozen payload identity, and attempted evidence before blocking other connections", async () => {
+    const { storeA, storeB, databaseA } = openTwoConnectionStore("openquest-external-claim-");
+    await seedExternalActionCampaign(storeA, databaseA);
+    const record = externalClaimRecord();
+    await storeA.claimExternalAction("campaign-1", record);
+
+    const claimed = await storeB.get("campaign-1");
+    expect(claimed?.approvals[0]?.status).toBe("consumed");
+    expect(claimed?.events.map(({ eventType }) => eventType)).toEqual(["external_action_attempted"]);
+    expect(claimed?.externalActionClaims).toEqual([expect.objectContaining({ id: "claim-1", status: "active", payload: externalPayload })]);
+    await expect(storeB.replaceCurrentCommit("campaign-1", "b".repeat(40), 7, "contribution_approval")).rejects.toThrow(/external action/i);
+    await expect(storeB.recordChildResult("campaign-1", {
+      expectedVersion: 7,
+      expectedStatus: "contribution_approval",
+      childSessionId: "late-child",
+      event: { id: "late-child-event", eventType: "campaign_operation_completed", payload: { claimedCampaignVersion: 7, resultingCampaignVersion: 7 }, occurredAt: "2026-08-26T00:02:00Z" },
+    })).rejects.toThrow(/external action/i);
+    await storeB.recordApproval(issueApproval({ id: "approval-2", campaignId: "campaign-1", action: "create_pr", actionDigest: externalActionDigest(externalPayload), issuedAt: "2026-08-26T00:00:00Z" }));
+    await expect(storeB.claimExternalAction("campaign-1", { ...externalClaimRecord(), claimId: "claim-2", approvalId: "approval-2", attemptedEvent: { ...externalClaimRecord().attemptedEvent, id: "attempt-2" } })).rejects.toThrow(/external action|unique/i);
+  });
+
+  it("rolls back approval consumption when attempted evidence prevents durable claim creation", async () => {
+    const { storeA, databaseA } = openTwoConnectionStore("openquest-external-attempt-rollback-");
+    await seedExternalActionCampaign(storeA, databaseA);
+    databaseA.exec(`CREATE TRIGGER fail_external_attempt BEFORE INSERT ON campaign_events WHEN NEW.event_type = 'external_action_attempted' BEGIN SELECT RAISE(ABORT, 'attempt rejected'); END;`);
+    await expect(storeA.claimExternalAction("campaign-1", externalClaimRecord())).rejects.toThrow(/attempt rejected/i);
+    const snapshot = await storeA.get("campaign-1");
+    expect(snapshot?.approvals[0]?.status).toBe("approved");
+    expect(snapshot?.externalActionClaims).toEqual([]);
+    expect(snapshot?.events).toEqual([]);
+  });
+
+  it("atomically completes the exact approved push, rotates head, and closes its claim", async () => {
+    const { storeA, storeB, databaseA } = openTwoConnectionStore("openquest-external-complete-");
+    const nextCommit = "b".repeat(40);
+    const payload = { action: "push_branch" as const, repository: "owner/repo", issueNumber: 42, branch: "openquest/fix-42", commitSha: nextCommit };
+    await storeA.create(campaign({ status: "contribution_approval", version: 7 }));
+    databaseA.prepare("INSERT INTO external_references (campaign_id, kind, value) VALUES (?, 'commit', ?)").run("campaign-1", "a".repeat(40));
+    await storeA.recordApproval(issueApproval({ id: "approval-push", campaignId: "campaign-1", action: "push_branch", actionDigest: externalActionDigest(payload), issuedAt: "2026-08-26T00:00:00Z" }));
+    await storeA.claimExternalAction("campaign-1", { ...externalClaimRecord(), approvalId: "approval-push", actionDigest: externalActionDigest(payload), payload });
+    const version = await storeB.completeExternalAction("campaign-1", {
+      claimId: "claim-1",
+      completedAt: "2026-08-26T00:03:00Z",
+      completedEvent: { id: "completed-push", eventType: "external_action_completed", payload: { claimedCampaignVersion: 7, resultingCampaignVersion: 8 }, occurredAt: "2026-08-26T00:03:00Z" },
+      newCommitSha: nextCommit,
+    });
+    expect(version).toBe(8);
+    const completed = await storeA.get("campaign-1");
+    expect(completed?.externalActionClaims[0]?.status).toBe("completed");
+    expect(completed?.externalReferences).toContainEqual({ kind: "commit", value: nextCommit });
+    expect(completed?.campaign.version).toBe(8);
+  });
+
+  it("rolls back duplicate multi-connection claims and leaves exactly one consumed approval", async () => {
+    const { storeA, storeB, databaseA } = openTwoConnectionStore("openquest-external-duplicate-");
+    await seedExternalActionCampaign(storeA, databaseA);
+    const results = await Promise.allSettled([
+      storeA.claimExternalAction("campaign-1", externalClaimRecord()),
+      storeB.claimExternalAction("campaign-1", { ...externalClaimRecord(), claimId: "claim-2", attemptedEvent: { ...externalClaimRecord().attemptedEvent, id: "attempt-2" } }),
+    ]);
+    expect(results.filter(({ status }) => status === "fulfilled")).toHaveLength(1);
+    expect((await storeA.get("campaign-1"))?.externalActionClaims).toHaveLength(1);
+    expect((await storeA.get("campaign-1"))?.approvals[0]?.status).toBe("consumed");
+  });
+
+  it("compensates completion uncertainty to outcome unknown and reconciles without reusing approval", async () => {
+    const { storeA, storeB, databaseA } = openTwoConnectionStore("openquest-external-reconcile-");
+    await seedExternalActionCampaign(storeA, databaseA);
+    await storeA.claimExternalAction("campaign-1", externalClaimRecord());
+    databaseA.exec(`CREATE TRIGGER fail_external_completion BEFORE INSERT ON campaign_events WHEN NEW.event_type = 'external_action_completed' BEGIN SELECT RAISE(ABORT, 'completion uncertain'); END;`);
+    await expect(storeA.completeExternalAction("campaign-1", {
+      claimId: "claim-1",
+      completedAt: "2026-08-26T00:03:00Z",
+      completedEvent: { id: "completed-1", eventType: "external_action_completed", payload: { claimedCampaignVersion: 7, resultingCampaignVersion: 7 }, occurredAt: "2026-08-26T00:03:00Z" },
+    })).rejects.toThrow(/completion uncertain/i);
+    await storeA.markExternalActionOutcomeUnknown("campaign-1", {
+      claimId: "claim-1",
+      event: { id: "unknown-1", eventType: "external_action_outcome_unknown", payload: { claimId: "claim-1", reason: "external_action_result_unknown" }, occurredAt: "2026-08-26T00:04:00Z" },
+    });
+    await expect(storeB.replaceCurrentCommit("campaign-1", "b".repeat(40), 7, "contribution_approval")).rejects.toThrow(/external action/i);
+    await expect(storeB.reconcileExternalAction("campaign-1", {
+      claimId: "stale-claim",
+      disposition: "confirmed_completed",
+      reconciledAt: "2026-08-26T00:05:00Z",
+      event: { id: "stale-reconcile", eventType: "external_action_reconciled", payload: { claimedCampaignVersion: 7, resultingCampaignVersion: 8 }, occurredAt: "2026-08-26T00:05:00Z" },
+      observedCanonicalHead: "b".repeat(40),
+    })).rejects.toThrow(/claim/i);
+    const version = await storeB.reconcileExternalAction("campaign-1", {
+      claimId: "claim-1",
+      disposition: "confirmed_completed",
+      reconciledAt: "2026-08-26T00:05:00Z",
+      event: { id: "reconcile-1", eventType: "external_action_reconciled", payload: { claimedCampaignVersion: 7, resultingCampaignVersion: 8 }, occurredAt: "2026-08-26T00:05:00Z" },
+      observedCanonicalHead: "b".repeat(40),
+    });
+    expect(version).toBe(8);
+    const reconciled = await storeA.get("campaign-1");
+    expect(reconciled?.externalActionClaims[0]).toMatchObject({ status: "reconciled", disposition: "confirmed_completed", observedCanonicalHead: "b".repeat(40) });
+    expect(reconciled?.approvals[0]?.status).toBe("consumed");
+    await expect(storeA.claimExternalAction("campaign-1", { ...externalClaimRecord(), claimId: "claim-reuse", expectedVersion: 8, expectedCurrentCommitSha: "b".repeat(40), attemptedEvent: { ...externalClaimRecord().attemptedEvent, id: "attempt-reuse", payload: { claimedCampaignVersion: 8, resultingCampaignVersion: 8 } } })).rejects.toThrow(/approval|unique|current campaign head/i);
   });
 
   it("upgrades existing external-reference tables to retain commit identity", async () => {

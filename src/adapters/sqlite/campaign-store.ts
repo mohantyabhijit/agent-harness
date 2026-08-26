@@ -6,8 +6,19 @@ import {
   type ChildResultRecord,
   type CampaignSnapshot,
   type CampaignStore,
+  type ExternalActionClaim,
+  type ExternalActionClaimRecord,
+  type ExternalActionCompletionRecord,
+  type ExternalActionOutcomeUnknownRecord,
+  type ExternalActionReconciliationRecord,
   type ExternalReference,
 } from "../../application/ports/campaign-store.js";
+import {
+  canonicalExternalActionJson,
+  externalActionDigest,
+  validateExternalActionPayload,
+  type ExternalActionPayload,
+} from "../../application/external-action.js";
 import {
   consumeApproval as consumeDomainApproval,
   isApprovalActionAllowed,
@@ -70,6 +81,22 @@ interface QodoFindingRow {
 interface ExternalReferenceRow {
   kind: ExternalReference["kind"];
   value: string;
+}
+
+interface ExternalActionClaimRow {
+  id: string;
+  campaign_id: string;
+  approval_id: string;
+  action_digest: string;
+  payload_json: string;
+  current_commit_sha: string | null;
+  claimed_campaign_version: number;
+  claimed_campaign_status: CampaignStatus;
+  status: ExternalActionClaim["status"];
+  attempted_at: string;
+  closed_at: string | null;
+  disposition: NonNullable<ExternalActionClaim["disposition"]> | null;
+  observed_canonical_head: string | null;
 }
 
 export class SqliteCampaignStore implements CampaignStore {
@@ -158,6 +185,7 @@ export class SqliteCampaignStore implements CampaignStore {
       if (!existing || existing.version !== expectedVersion) {
         throw new CampaignVersionConflict(campaign.id, expectedVersion);
       }
+      this.#assertNoBlockingExternalAction(campaign.id);
       if (
         existing.repository !== campaign.repository ||
         existing.issue_number !== campaign.issueNumber ||
@@ -278,6 +306,7 @@ export class SqliteCampaignStore implements CampaignStore {
       ) {
         throw new Error("Campaign state does not allow this approval action");
       }
+      this.#assertNoBlockingExternalAction(row.campaign_id);
 
       const consumed = consumeDomainApproval(mapApproval(row), actionDigest, canonicalConsumedAt);
       const result = this.#database.prepare(`
@@ -339,6 +368,126 @@ export class SqliteCampaignStore implements CampaignStore {
     }
   }
 
+  async claimExternalAction(campaignId: string, record: ExternalActionClaimRecord): Promise<ExternalActionClaim> {
+    validateExternalActionPayload(record.payload);
+    const consumedAt = normalizeTimestamp(record.consumedAt, "approval consumedAt");
+    const occurredAt = normalizeTimestamp(record.attemptedEvent.occurredAt, "event occurredAt");
+    if (externalActionDigest(record.payload) !== record.actionDigest) throw new Error("External action payload digest does not match claim");
+    if (record.attemptedEvent.eventType !== "external_action_attempted") throw new Error("Invalid external action attempted event");
+    assertExternalActionEventVersion(record.attemptedEvent.payload, record.expectedVersion, record.expectedVersion);
+    const claim = this.#database.transaction(() => {
+      this.#assertClaim(campaignId, record.expectedVersion, record.expectedStatus);
+      this.#assertNoBlockingExternalAction(campaignId);
+      const currentCommitSha = this.#currentCommit(campaignId);
+      if (currentCommitSha !== record.expectedCurrentCommitSha) throw new CampaignVersionConflict(campaignId, record.expectedVersion);
+      if (record.payload.action === "create_pr" && record.payload.commitSha !== currentCommitSha) throw new Error("External action commit does not match current campaign head");
+
+      const approvalRow = this.#database.prepare("SELECT * FROM approvals WHERE id = ?").get(record.approvalId) as ApprovalRow | undefined;
+      if (approvalRow === undefined || approvalRow.campaign_id !== campaignId || approvalRow.action !== record.payload.action || approvalRow.action_digest !== record.actionDigest) throw new Error("Approval does not match this external action");
+      if (!isApprovalActionAllowed(approvalRow.action, record.expectedStatus)) throw new Error("Campaign state does not allow this approval action");
+      consumeDomainApproval(mapApproval(approvalRow), record.actionDigest, consumedAt);
+      const consumed = this.#database.prepare(`
+        UPDATE approvals SET status = 'consumed', consumed_at = ?
+        WHERE id = ? AND campaign_id = ? AND action_digest = ? AND status = 'approved'
+          AND consumed_at IS NULL AND (expires_at IS NULL OR expires_at > ?)
+      `).run(consumedAt, record.approvalId, campaignId, record.actionDigest, consumedAt);
+      if (consumed.changes !== 1) throw new Error("Approval is not available");
+
+      this.#database.prepare(`
+        INSERT INTO external_action_claims (
+          id, campaign_id, approval_id, action_digest, payload_json, current_commit_sha,
+          claimed_campaign_version, claimed_campaign_status, status, attempted_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)
+      `).run(
+        record.claimId, campaignId, record.approvalId, record.actionDigest,
+        canonicalExternalActionJson(record.payload), currentCommitSha ?? null,
+        record.expectedVersion, record.expectedStatus, consumedAt,
+      );
+      this.#database.prepare("INSERT INTO campaign_events (id, campaign_id, event_type, payload_json, occurred_at) VALUES (?, ?, ?, ?, ?)").run(
+        record.attemptedEvent.id, campaignId, record.attemptedEvent.eventType,
+        JSON.stringify(record.attemptedEvent.payload), occurredAt,
+      );
+      return this.#requiredExternalActionClaim(campaignId, record.claimId, "active");
+    });
+    return claim.immediate();
+  }
+
+  async completeExternalAction(campaignId: string, record: ExternalActionCompletionRecord): Promise<number> {
+    const completedAt = normalizeTimestamp(record.completedAt, "external action completion");
+    const occurredAt = normalizeTimestamp(record.completedEvent.occurredAt, "event occurredAt");
+    if (record.newCommitSha !== undefined) assertCommitSha(record.newCommitSha);
+    if (record.completedEvent.eventType !== "external_action_completed") throw new Error("Invalid external action completed event");
+    const complete = this.#database.transaction(() => {
+      const claim = this.#requiredExternalActionClaim(campaignId, record.claimId, "active");
+      this.#assertClaim(campaignId, claim.claimedCampaignVersion, claim.claimedCampaignStatus);
+      if (this.#currentCommit(campaignId) !== claim.currentCommitSha) throw new Error("External action current head changed after claim");
+      const payload = claim.payload;
+      if (record.newCommitSha !== undefined && ((payload.action !== "push_branch" && payload.action !== "update_pr") || payload.commitSha !== record.newCommitSha)) throw new Error("External action completion commit does not match claimed payload");
+      const current = this.#currentCommit(campaignId);
+      const changed = record.newCommitSha !== undefined && record.newCommitSha !== current;
+      const resultingVersion = claim.claimedCampaignVersion + (changed ? 1 : 0);
+      assertExternalActionEventVersion(record.completedEvent.payload, claim.claimedCampaignVersion, resultingVersion);
+      if (changed) {
+        this.#replaceCommit(campaignId, record.newCommitSha);
+        const updated = this.#database.prepare("UPDATE campaigns SET version = version + 1, updated_at = ? WHERE id = ? AND version = ? AND status = ?").run(completedAt, campaignId, claim.claimedCampaignVersion, claim.claimedCampaignStatus);
+        if (updated.changes !== 1) throw new CampaignVersionConflict(campaignId, claim.claimedCampaignVersion);
+      }
+      this.#database.prepare("INSERT INTO campaign_events (id, campaign_id, event_type, payload_json, occurred_at) VALUES (?, ?, ?, ?, ?)").run(
+        record.completedEvent.id, campaignId, record.completedEvent.eventType,
+        JSON.stringify(record.completedEvent.payload), occurredAt,
+      );
+      const closed = this.#database.prepare("UPDATE external_action_claims SET status = 'completed', closed_at = ? WHERE id = ? AND campaign_id = ? AND status = 'active'").run(completedAt, record.claimId, campaignId);
+      if (closed.changes !== 1) throw new Error(`External action claim ${record.claimId} is stale`);
+      return resultingVersion;
+    });
+    return complete.immediate();
+  }
+
+  async markExternalActionOutcomeUnknown(campaignId: string, record: ExternalActionOutcomeUnknownRecord): Promise<void> {
+    const occurredAt = normalizeTimestamp(record.event.occurredAt, "event occurredAt");
+    if (record.event.eventType !== "external_action_outcome_unknown") throw new Error("Invalid external action outcome event");
+    const mark = this.#database.transaction(() => {
+      this.#requiredExternalActionClaim(campaignId, record.claimId, "active");
+      this.#database.prepare("INSERT INTO campaign_events (id, campaign_id, event_type, payload_json, occurred_at) VALUES (?, ?, ?, ?, ?)").run(
+        record.event.id, campaignId, record.event.eventType, JSON.stringify(record.event.payload), occurredAt,
+      );
+      const changed = this.#database.prepare("UPDATE external_action_claims SET status = 'outcome_unknown' WHERE id = ? AND campaign_id = ? AND status = 'active'").run(record.claimId, campaignId);
+      if (changed.changes !== 1) throw new Error(`External action claim ${record.claimId} is stale`);
+    });
+    mark.immediate();
+  }
+
+  async reconcileExternalAction(campaignId: string, record: ExternalActionReconciliationRecord): Promise<number> {
+    const reconciledAt = normalizeTimestamp(record.reconciledAt, "external action reconciliation");
+    const occurredAt = normalizeTimestamp(record.event.occurredAt, "event occurredAt");
+    if (record.observedCanonicalHead !== undefined) assertCommitSha(record.observedCanonicalHead);
+    if (record.event.eventType !== "external_action_reconciled") throw new Error("Invalid external action reconciliation event");
+    const reconcile = this.#database.transaction(() => {
+      this.#requiredExternalActionClaim(campaignId, record.claimId, "outcome_unknown");
+      const campaign = this.#database.prepare("SELECT version, status FROM campaigns WHERE id = ?").get(campaignId) as Pick<CampaignRow, "version" | "status"> | undefined;
+      if (campaign === undefined) throw new Error(`Campaign ${campaignId} does not exist`);
+      const current = this.#currentCommit(campaignId);
+      const changed = record.observedCanonicalHead !== undefined && record.observedCanonicalHead !== current;
+      const resultingVersion = campaign.version + (changed ? 1 : 0);
+      assertExternalActionEventVersion(record.event.payload, campaign.version, resultingVersion);
+      if (changed) {
+        this.#replaceCommit(campaignId, record.observedCanonicalHead);
+        const updated = this.#database.prepare("UPDATE campaigns SET version = version + 1, updated_at = ? WHERE id = ? AND version = ?").run(reconciledAt, campaignId, campaign.version);
+        if (updated.changes !== 1) throw new CampaignVersionConflict(campaignId, campaign.version);
+      }
+      this.#database.prepare("INSERT INTO campaign_events (id, campaign_id, event_type, payload_json, occurred_at) VALUES (?, ?, ?, ?, ?)").run(
+        record.event.id, campaignId, record.event.eventType, JSON.stringify(record.event.payload), occurredAt,
+      );
+      const closed = this.#database.prepare(`
+        UPDATE external_action_claims SET status = 'reconciled', closed_at = ?, disposition = ?, observed_canonical_head = ?
+        WHERE id = ? AND campaign_id = ? AND status = 'outcome_unknown'
+      `).run(reconciledAt, record.disposition, record.observedCanonicalHead ?? null, record.claimId, campaignId);
+      if (closed.changes !== 1) throw new Error(`External action claim ${record.claimId} is stale`);
+      return resultingVersion;
+    });
+    return reconcile.immediate();
+  }
+
   async replaceCurrentCommit(
     campaignId: string,
     commitSha: string,
@@ -346,8 +495,10 @@ export class SqliteCampaignStore implements CampaignStore {
     expectedStatus: CampaignStatus,
   ): Promise<number> {
     assertCommitSha(commitSha);
+    if (!statusesAllowingIndependentCommitReplacement.has(expectedStatus)) throw new Error(`Campaign status ${expectedStatus} does not allow independent current commit replacement`);
     const replace = this.#database.transaction(() => {
       this.#assertClaim(campaignId, expectedVersion, expectedStatus);
+      this.#assertNoBlockingExternalAction(campaignId);
       const current = this.#database.prepare("SELECT value FROM external_references WHERE campaign_id = ? AND kind = 'commit'").get(campaignId) as { value: string } | undefined;
       if (current?.value === commitSha) return expectedVersion;
       this.#replaceCommit(campaignId, commitSha);
@@ -364,6 +515,7 @@ export class SqliteCampaignStore implements CampaignStore {
     if (record.newCommitSha !== undefined) assertCommitSha(record.newCommitSha);
     const write = this.#database.transaction(() => {
       this.#assertClaim(campaignId, record.expectedVersion, record.expectedStatus);
+      this.#assertNoBlockingExternalAction(campaignId);
       let resultingVersion = record.expectedVersion;
       if (record.newCommitSha !== undefined) {
         const current = this.#database.prepare("SELECT value FROM external_references WHERE campaign_id = ? AND kind = 'commit'").get(campaignId) as { value: string } | undefined;
@@ -400,6 +552,23 @@ export class SqliteCampaignStore implements CampaignStore {
     if (campaign === undefined || campaign.version !== expectedVersion || campaign.status !== expectedStatus) throw new CampaignVersionConflict(campaignId, expectedVersion);
   }
 
+  #assertNoBlockingExternalAction(campaignId: string): void {
+    const blocking = this.#database.prepare("SELECT id FROM external_action_claims WHERE campaign_id = ? AND status IN ('active', 'outcome_unknown') LIMIT 1").get(campaignId) as { id: string } | undefined;
+    if (blocking !== undefined) throw new Error("Campaign has a blocking external action claim");
+  }
+
+  #currentCommit(campaignId: string): string | undefined {
+    const commits = this.#database.prepare("SELECT value FROM external_references WHERE campaign_id = ? AND kind = 'commit'").all(campaignId) as { value: string }[];
+    if (commits.length > 1) throw new Error("Campaign current commit is ambiguous");
+    return commits[0]?.value;
+  }
+
+  #requiredExternalActionClaim(campaignId: string, claimId: string, status: ExternalActionClaim["status"]): ExternalActionClaim {
+    const row = this.#database.prepare("SELECT * FROM external_action_claims WHERE id = ? AND campaign_id = ? AND status = ?").get(claimId, campaignId, status) as ExternalActionClaimRow | undefined;
+    if (row === undefined) throw new Error(`External action claim ${claimId} is not ${status}`);
+    return mapExternalActionClaim(row);
+  }
+
   #replaceCommit(campaignId: string, commitSha: string): void {
     this.#database.prepare("DELETE FROM external_references WHERE campaign_id = ? AND kind = 'commit'").run(campaignId);
     this.#database.prepare("INSERT INTO external_references (campaign_id, kind, value) VALUES (?, 'commit', ?)").run(campaignId, commitSha);
@@ -427,6 +596,9 @@ export class SqliteCampaignStore implements CampaignStore {
       SELECT kind, value FROM external_references
       WHERE campaign_id = ? ORDER BY kind, value
     `).all(row.id) as ExternalReferenceRow[];
+    const externalActionClaims = this.#database.prepare(`
+      SELECT * FROM external_action_claims WHERE campaign_id = ? ORDER BY attempted_at, id
+    `).all(row.id) as ExternalActionClaimRow[];
 
     return {
       campaign: mapCampaign(row),
@@ -435,6 +607,7 @@ export class SqliteCampaignStore implements CampaignStore {
       approvals: approvals.map(mapApproval),
       qodoFindings: qodoFindings.map(mapQodoFinding),
       externalReferences,
+      externalActionClaims: externalActionClaims.map(mapExternalActionClaim),
     };
   }
 }
@@ -497,6 +670,31 @@ function mapQodoFinding(row: QodoFindingRow): QodoFinding {
   };
 }
 
+function mapExternalActionClaim(row: ExternalActionClaimRow): ExternalActionClaim {
+  let payload: unknown;
+  try {
+    payload = JSON.parse(row.payload_json) as unknown;
+  } catch (error) {
+    throw new Error(`Invalid payload JSON for external action claim ${row.id}`, { cause: error });
+  }
+  validateExternalActionPayload(payload as ExternalActionPayload);
+  return {
+    id: row.id,
+    campaignId: row.campaign_id,
+    approvalId: row.approval_id,
+    actionDigest: row.action_digest,
+    payload: payload as ExternalActionPayload,
+    ...(row.current_commit_sha === null ? {} : { currentCommitSha: row.current_commit_sha }),
+    claimedCampaignVersion: row.claimed_campaign_version,
+    claimedCampaignStatus: row.claimed_campaign_status,
+    status: row.status,
+    attemptedAt: row.attempted_at,
+    ...(row.closed_at === null ? {} : { closedAt: row.closed_at }),
+    ...(row.disposition === null ? {} : { disposition: row.disposition }),
+    ...(row.observed_canonical_head === null ? {} : { observedCanonicalHead: row.observed_canonical_head }),
+  };
+}
+
 function assertCampaignQodoIteration(iteration: number): void {
   if (!Number.isInteger(iteration) || iteration < 0 || iteration > 3) {
     throw new TypeError("Invalid integer campaign Qodo iteration; expected 0 to 3");
@@ -514,6 +712,19 @@ function assertChildEventVersion(payload: unknown, expectedVersion: number, resu
     !("resultingCampaignVersion" in payload) || payload.resultingCampaignVersion !== resultingVersion
   ) throw new Error("Child result event is not bound to the campaign version");
 }
+
+function assertExternalActionEventVersion(payload: unknown, expectedVersion: number, resultingVersion: number): void {
+  if (
+    typeof payload !== "object" || payload === null || Array.isArray(payload) ||
+    !("claimedCampaignVersion" in payload) || payload.claimedCampaignVersion !== expectedVersion ||
+    !("resultingCampaignVersion" in payload) || payload.resultingCampaignVersion !== resultingVersion
+  ) throw new Error("External action event is not bound to the campaign version");
+}
+
+const statusesAllowingIndependentCommitReplacement = new Set<CampaignStatus>([
+  "policy_review", "coordination_pending", "preflight", "quarantined", "baseline", "implementation",
+  "verification", "contribution_approval", "pull_request_open", "qodo_review", "human_escalation",
+]);
 
 function assertQodoFindingIteration(iteration: number): void {
   if (!Number.isInteger(iteration) || iteration < 1 || iteration > 3) {

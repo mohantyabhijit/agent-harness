@@ -270,11 +270,10 @@ describe("RunCampaign", () => {
 
     await expect(
       service.executeApprovedExternalAction("campaign-1", approvalRequest(), action),
-    ).rejects.toEqual(
-      new Error("External action was not attempted; consumed approval reconciliation required"),
-    );
+    ).rejects.toThrow(/event persistence/i);
     expect(action).not.toHaveBeenCalled();
-    expect((await store.get("campaign-1"))?.approvals[0]?.status).toBe("consumed");
+    expect((await store.get("campaign-1"))?.approvals[0]?.status).toBe("approved");
+    expect((await store.get("campaign-1"))?.externalActionClaims).toEqual([]);
   });
 
   it("records outcome unknown when completion evidence fails after callback success", async () => {
@@ -356,6 +355,76 @@ describe("RunCampaign", () => {
 
     expect(results.filter(({ status }) => status === "fulfilled")).toHaveLength(1);
     expect(action).toHaveBeenCalledOnce();
+  });
+
+  it("durably claims the exact payload before execution and blocks every conflicting mutation", async () => {
+    const { service, store } = await approvedFixture();
+    let release!: () => void;
+    let entered!: () => void;
+    const paused = new Promise<void>((resolve) => { entered = resolve; });
+    const resume = new Promise<void>((resolve) => { release = resolve; });
+    const action = vi.fn(async (authorized: unknown) => {
+      entered();
+      const snapshot = await store.get("campaign-1");
+      expect(snapshot?.externalActionClaims).toEqual([
+        expect.objectContaining({ status: "active", payload: externalPayload, currentCommitSha: commitSha }),
+      ]);
+      expect(Object.isFrozen(authorized)).toBe(true);
+      await resume;
+      return "pull-request-7";
+    });
+
+    const executing = service.executeApprovedExternalAction("campaign-1", approvalRequest(), action);
+    await paused;
+    const claimed = await store.get("campaign-1");
+    if (claimed === undefined) throw new Error("missing claimed campaign");
+    await expect(store.update(transitionCampaign(claimed.campaign, "pull_request_open"), claimed.campaign.version)).rejects.toThrow(/external action/i);
+    await expect(store.replaceCurrentCommit("campaign-1", "b".repeat(40), claimed.campaign.version, claimed.campaign.status)).rejects.toThrow(/external action/i);
+    await expect(store.recordChildResult("campaign-1", {
+      expectedVersion: claimed.campaign.version,
+      expectedStatus: claimed.campaign.status,
+      childSessionId: "conflicting-child",
+      event: { id: "conflicting-event", eventType: "campaign_operation_completed", payload: { claimedCampaignVersion: claimed.campaign.version, resultingCampaignVersion: claimed.campaign.version }, occurredAt: "2026-08-26T00:01:00Z" },
+    })).rejects.toThrow(/external action/i);
+    await expect(service.executeApprovedExternalAction("campaign-1", approvalRequest(), async () => undefined)).rejects.toThrow(/external action|available/i);
+    release();
+    await expect(executing).resolves.toBe("pull-request-7");
+    expect((await store.get("campaign-1"))?.externalActionClaims[0]?.status).toBe("completed");
+  });
+
+  it("rotates to the exact approved push commit only when completion is recorded", async () => {
+    const nextCommit = "b".repeat(40);
+    const pushPayload = { action: "push_branch" as const, repository: "owner/repo", issueNumber: 42, branch: "openquest/fix-42", commitSha: nextCommit };
+    const { service, store } = fixture();
+    store.seed(campaign({ status: "contribution_approval", version: 7 }));
+    store.seedExternalReference("campaign-1", { kind: "commit", value: commitSha });
+    await store.recordApproval(issueApproval({ id: "approval-push", campaignId: "campaign-1", action: "push_branch", actionDigest: externalActionDigest(pushPayload), issuedAt: "2026-08-26T00:00:00Z" }));
+
+    await expect(service.executeApprovedExternalAction("campaign-1", { approvalId: "approval-push", payload: pushPayload }, async () => "pushed")).resolves.toBe("pushed");
+    const completed = await store.get("campaign-1");
+    expect(completed?.campaign.version).toBe(8);
+    expect(completed?.externalReferences).toContainEqual({ kind: "commit", value: nextCommit });
+    expect(completed?.externalActionClaims[0]).toMatchObject({ status: "completed", currentCommitSha: commitSha, payload: pushPayload });
+  });
+
+  it("keeps a failed callback fenced until explicit reconciliation without restoring approval", async () => {
+    const { service, store } = await approvedFixture();
+    await expect(service.executeApprovedExternalAction("campaign-1", approvalRequest(), async () => { throw new Error("secret remote failure"); })).rejects.toThrow(/outcome is unknown/i);
+    const unknown = await store.get("campaign-1");
+    if (unknown === undefined) throw new Error("missing unknown campaign");
+    const claim = unknown.externalActionClaims[0];
+    if (claim === undefined) throw new Error("missing external action claim");
+    expect(claim.status).toBe("outcome_unknown");
+    await expect(store.replaceCurrentCommit("campaign-1", "b".repeat(40), unknown.campaign.version, unknown.campaign.status)).rejects.toThrow(/external action/i);
+    await expect(service.reconcileExternalAction("campaign-1", { claimId: "stale-claim", disposition: "confirmed_not_completed" })).rejects.toThrow(/claim/i);
+    await expect(service.reconcileExternalAction("campaign-1", { claimId: claim.id, disposition: "confirmed_completed", observedCanonicalHead: "b".repeat(40) })).resolves.toMatchObject({ version: 8 });
+
+    const reconciled = await store.get("campaign-1");
+    if (reconciled === undefined) throw new Error("missing reconciled campaign");
+    expect(reconciled.externalActionClaims[0]).toMatchObject({ status: "reconciled", disposition: "confirmed_completed", observedCanonicalHead: "b".repeat(40) });
+    expect(reconciled.externalReferences).toContainEqual({ kind: "commit", value: "b".repeat(40) });
+    expect(reconciled.approvals[0]?.status).toBe("consumed");
+    await expect(service.executeApprovedExternalAction("campaign-1", approvalRequest(), async () => undefined)).rejects.toThrow(/available|current campaign head/i);
   });
 });
 

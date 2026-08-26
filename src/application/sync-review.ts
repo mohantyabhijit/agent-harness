@@ -88,7 +88,9 @@ export class SyncReview {
         this.repairPacket(snapshot, claimed.campaign, batch, combinedFindings),
         "repair",
       );
-      await this.store.recordChildResult(campaignId, {
+      const nextCommitSha = repairCommit(result.output);
+      const resultingVersion = claimed.campaign.version + (nextCommitSha !== undefined && nextCommitSha !== batch.commitSha ? 1 : 0);
+      const recordedVersion = await this.store.recordChildResult(campaignId, {
         expectedVersion: claimed.campaign.version,
         expectedStatus: "repair",
         childSessionId: result.sessionId,
@@ -100,10 +102,11 @@ export class SyncReview {
           artifacts: result.artifacts,
           summary: result.summary,
           output: result.output,
-          resultingCampaignVersion: claimed.campaign.version,
+          resultingCampaignVersion: resultingVersion,
         }),
+        ...(nextCommitSha === undefined ? {} : { newCommitSha: nextCommitSha }),
       });
-      return claimed.campaign;
+      return { ...claimed.campaign, version: recordedVersion };
     } catch {
       try {
         const escalated = transitionCampaign(claimed.campaign, "human_escalation");
@@ -331,4 +334,10 @@ function parseFinding(finding: unknown): QodoFinding {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function repairCommit(output: unknown): string | undefined {
+  if (!isRecord(output) || output.commitSha === undefined) return undefined;
+  if (typeof output.commitSha !== "string" || !/^[0-9a-f]{40}$/u.test(output.commitSha)) throw new Error("Invalid repair commit");
+  return output.commitSha;
 }

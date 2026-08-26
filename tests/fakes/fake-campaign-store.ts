@@ -5,8 +5,14 @@ import {
   type ChildResultRecord,
   type CampaignSnapshot,
   type CampaignStore,
+  type ExternalActionClaim,
+  type ExternalActionClaimRecord,
+  type ExternalActionCompletionRecord,
+  type ExternalActionOutcomeUnknownRecord,
+  type ExternalActionReconciliationRecord,
   type ExternalReference,
 } from "../../src/application/ports/campaign-store.js";
+import { externalActionDigest, validateExternalActionPayload } from "../../src/application/external-action.js";
 import {
   consumeApproval as consumeDomainApproval,
   isApprovalActionAllowed,
@@ -23,6 +29,7 @@ interface MutableSnapshot {
   approvals: Approval[];
   qodoFindings: QodoFinding[];
   externalReferences: ExternalReference[];
+  externalActionClaims: ExternalActionClaim[];
 }
 
 export class FakeCampaignStore implements CampaignStore {
@@ -89,6 +96,7 @@ export class FakeCampaignStore implements CampaignStore {
       throw new CampaignVersionConflict(campaign.id, expectedVersion);
     }
     const snapshot = this.#snapshots.get(campaign.id);
+    if (snapshot !== undefined) this.#assertNoBlockingExternalAction(snapshot);
     if (
       snapshot === undefined ||
       snapshot.campaign.version !== expectedVersion ||
@@ -156,6 +164,7 @@ export class FakeCampaignStore implements CampaignStore {
         if (snapshot.campaign.version !== expectedCampaignVersion) {
           throw new CampaignVersionConflict(snapshot.campaign.id, expectedCampaignVersion);
         }
+        this.#assertNoBlockingExternalAction(snapshot);
         if (
           snapshot.campaign.status !== expectedCampaignStatus ||
           !isApprovalActionAllowed(approval.action, snapshot.campaign.status)
@@ -193,6 +202,114 @@ export class FakeCampaignStore implements CampaignStore {
     this.#findingIterations.set(key, iteration);
   }
 
+  async claimExternalAction(campaignId: string, record: ExternalActionClaimRecord): Promise<ExternalActionClaim> {
+    const beforeConsume = this.beforeConsumeApproval;
+    delete this.beforeConsumeApproval;
+    await beforeConsume?.();
+    validateExternalActionPayload(record.payload);
+    const snapshot = this.#required(campaignId);
+    this.#assertClaim(snapshot, campaignId, record.expectedVersion, record.expectedStatus);
+    this.#assertNoBlockingExternalAction(snapshot);
+    this.#assertEventAvailable(record.attemptedEvent.id);
+    if (record.attemptedEvent.eventType !== "external_action_attempted") throw new Error("Invalid external action attempted event");
+    assertExternalActionEventVersion(record.attemptedEvent.payload, record.expectedVersion, record.expectedVersion);
+    if (this.failNextEvent) {
+      this.failNextEvent = false;
+      throw new Error("Campaign event persistence failed");
+    }
+    if ([...this.#snapshots.values()].some((candidate) => candidate.externalActionClaims.some(({ id }) => id === record.claimId))) throw new Error(`External action claim ${record.claimId} already exists`);
+    if ([...this.#snapshots.values()].some((candidate) => candidate.externalActionClaims.some(({ approvalId }) => approvalId === record.approvalId))) throw new Error("Approval already has an external action claim");
+    const currentCommitSha = singletonCommit(snapshot);
+    if (currentCommitSha !== record.expectedCurrentCommitSha) throw new CampaignVersionConflict(campaignId, record.expectedVersion);
+    if (record.payload.action === "create_pr" && record.payload.commitSha !== currentCommitSha) throw new Error("External action commit does not match current campaign head");
+    if (externalActionDigest(record.payload) !== record.actionDigest) throw new Error("External action payload digest does not match claim");
+    const approvalIndex = snapshot.approvals.findIndex(({ id }) => id === record.approvalId);
+    const approval = snapshot.approvals[approvalIndex];
+    if (approval === undefined || approval.campaignId !== campaignId || approval.action !== record.payload.action || approval.actionDigest !== record.actionDigest) throw new Error("Approval does not match this external action");
+    if (!isApprovalActionAllowed(approval.action, snapshot.campaign.status)) throw new Error("Campaign state does not allow this approval action");
+    const consumed = consumeDomainApproval(approval, record.actionDigest, record.consumedAt);
+    const claim: ExternalActionClaim = {
+      id: record.claimId,
+      campaignId,
+      approvalId: record.approvalId,
+      actionDigest: record.actionDigest,
+      payload: structuredClone(record.payload),
+      ...(currentCommitSha === undefined ? {} : { currentCommitSha }),
+      claimedCampaignVersion: record.expectedVersion,
+      claimedCampaignStatus: record.expectedStatus,
+      status: "active",
+      attemptedAt: record.consumedAt,
+    };
+    snapshot.approvals[approvalIndex] = consumed;
+    snapshot.externalActionClaims.push(claim);
+    snapshot.events.push(structuredClone(record.attemptedEvent));
+    this.#eventIds.add(record.attemptedEvent.id);
+    return structuredClone(claim);
+  }
+
+  async completeExternalAction(campaignId: string, record: ExternalActionCompletionRecord): Promise<number> {
+    const snapshot = this.#required(campaignId);
+    const claim = this.#requiredExternalActionClaim(snapshot, record.claimId, "active");
+    this.#assertClaim(snapshot, campaignId, claim.claimedCampaignVersion, claim.claimedCampaignStatus);
+    if (singletonCommit(snapshot) !== claim.currentCommitSha) throw new Error("External action current head changed after claim");
+    this.#assertEventAvailable(record.completedEvent.id);
+    if (record.completedEvent.eventType !== "external_action_completed") throw new Error("Invalid external action completed event");
+    if (this.failNextEvent) {
+      this.failNextEvent = false;
+      throw new Error("Campaign event persistence failed");
+    }
+    const resultingVersion = this.#validatedExternalActionHeadVersion(claim, snapshot, record.newCommitSha);
+    assertExternalActionEventVersion(record.completedEvent.payload, claim.claimedCampaignVersion, resultingVersion);
+    if (record.newCommitSha !== undefined && singletonCommit(snapshot) !== record.newCommitSha) {
+      snapshot.externalReferences = snapshot.externalReferences.filter(({ kind }) => kind !== "commit");
+      snapshot.externalReferences.push({ kind: "commit", value: record.newCommitSha });
+      snapshot.campaign = { ...snapshot.campaign, version: resultingVersion };
+    }
+    snapshot.events.push(structuredClone(record.completedEvent));
+    this.#eventIds.add(record.completedEvent.id);
+    Object.assign(claim, { status: "completed", closedAt: record.completedAt });
+    return resultingVersion;
+  }
+
+  async markExternalActionOutcomeUnknown(campaignId: string, record: ExternalActionOutcomeUnknownRecord): Promise<void> {
+    const snapshot = this.#required(campaignId);
+    const claim = this.#requiredExternalActionClaim(snapshot, record.claimId, "active");
+    this.#assertEventAvailable(record.event.id);
+    if (record.event.eventType !== "external_action_outcome_unknown") throw new Error("Invalid external action outcome event");
+    if (this.failNextEvent) {
+      this.failNextEvent = false;
+      throw new Error("Campaign event persistence failed");
+    }
+    snapshot.events.push(structuredClone(record.event));
+    this.#eventIds.add(record.event.id);
+    Object.assign(claim, { status: "outcome_unknown" });
+  }
+
+  async reconcileExternalAction(campaignId: string, record: ExternalActionReconciliationRecord): Promise<number> {
+    const snapshot = this.#required(campaignId);
+    const claim = this.#requiredExternalActionClaim(snapshot, record.claimId, "outcome_unknown");
+    this.#assertEventAvailable(record.event.id);
+    if (record.event.eventType !== "external_action_reconciled") throw new Error("Invalid external action reconciliation event");
+    if (record.observedCanonicalHead !== undefined) assertCommitSha(record.observedCanonicalHead);
+    const current = singletonCommit(snapshot);
+    const resultingVersion = snapshot.campaign.version + (record.observedCanonicalHead !== undefined && record.observedCanonicalHead !== current ? 1 : 0);
+    assertExternalActionEventVersion(record.event.payload, snapshot.campaign.version, resultingVersion);
+    if (record.observedCanonicalHead !== undefined && record.observedCanonicalHead !== current) {
+      snapshot.externalReferences = snapshot.externalReferences.filter(({ kind }) => kind !== "commit");
+      snapshot.externalReferences.push({ kind: "commit", value: record.observedCanonicalHead });
+      snapshot.campaign = { ...snapshot.campaign, version: resultingVersion };
+    }
+    snapshot.events.push(structuredClone(record.event));
+    this.#eventIds.add(record.event.id);
+    Object.assign(claim, {
+      status: "reconciled",
+      closedAt: record.reconciledAt,
+      disposition: record.disposition,
+      ...(record.observedCanonicalHead === undefined ? {} : { observedCanonicalHead: record.observedCanonicalHead }),
+    });
+    return resultingVersion;
+  }
+
   async setExternalReference(campaignId: string, reference: ExternalReference): Promise<void> {
     if (this.failNextExternalReference) {
       this.failNextExternalReference = false;
@@ -217,6 +334,8 @@ export class FakeCampaignStore implements CampaignStore {
   ): Promise<number> {
     assertCommitSha(commitSha);
     const snapshot = this.#required(campaignId);
+    if (!statusesAllowingIndependentCommitReplacement.has(expectedStatus)) throw new Error(`Campaign status ${expectedStatus} does not allow independent current commit replacement`);
+    this.#assertNoBlockingExternalAction(snapshot);
     this.#assertClaim(snapshot, campaignId, expectedVersion, expectedStatus);
     if (this.failNextExternalReference) {
       this.failNextExternalReference = false;
@@ -234,6 +353,7 @@ export class FakeCampaignStore implements CampaignStore {
     if (record.childSessionId.trim().length === 0) throw new Error("Invalid child session identifier");
     if (record.newCommitSha !== undefined) assertCommitSha(record.newCommitSha);
     const snapshot = this.#required(campaignId);
+    this.#assertNoBlockingExternalAction(snapshot);
     this.#assertClaim(snapshot, campaignId, record.expectedVersion, record.expectedStatus);
     this.#assertEventAvailable(record.event.id);
     if (this.failNextExternalReference) {
@@ -262,6 +382,23 @@ export class FakeCampaignStore implements CampaignStore {
 
   #assertClaim(snapshot: MutableSnapshot, campaignId: string, expectedVersion: number, expectedStatus: CampaignStatus): void {
     if (snapshot.campaign.version !== expectedVersion || snapshot.campaign.status !== expectedStatus) throw new CampaignVersionConflict(campaignId, expectedVersion);
+  }
+
+  #assertNoBlockingExternalAction(snapshot: MutableSnapshot): void {
+    if (snapshot.externalActionClaims.some(({ status }) => status === "active" || status === "outcome_unknown")) throw new Error("Campaign has a blocking external action claim");
+  }
+
+  #requiredExternalActionClaim(snapshot: MutableSnapshot, claimId: string, status: ExternalActionClaim["status"]): ExternalActionClaim {
+    const claim = snapshot.externalActionClaims.find(({ id }) => id === claimId);
+    if (claim === undefined || claim.status !== status) throw new Error(`External action claim ${claimId} is not ${status}`);
+    return claim;
+  }
+
+  #validatedExternalActionHeadVersion(claim: ExternalActionClaim, snapshot: MutableSnapshot, newCommitSha?: string): number {
+    if (newCommitSha === undefined) return snapshot.campaign.version;
+    assertCommitSha(newCommitSha);
+    if ((claim.payload.action !== "push_branch" && claim.payload.action !== "update_pr") || claim.payload.commitSha !== newCommitSha) throw new Error("External action completion commit does not match claimed payload");
+    return snapshot.campaign.version + (singletonCommit(snapshot) === newCommitSha ? 0 : 1);
   }
 
   #insert(campaign: Campaign): void {
@@ -294,6 +431,7 @@ export class FakeCampaignStore implements CampaignStore {
       approvals: [],
       qodoFindings: [],
       externalReferences: [],
+      externalActionClaims: [],
     });
   }
 
@@ -327,3 +465,18 @@ function assertChildEventVersion(payload: unknown, expectedVersion: number, resu
     !("resultingCampaignVersion" in payload) || payload.resultingCampaignVersion !== resultingVersion
   ) throw new Error("Child result event is not bound to the campaign version");
 }
+
+function singletonCommit(snapshot: MutableSnapshot): string | undefined {
+  const commits = snapshot.externalReferences.filter(({ kind }) => kind === "commit");
+  if (commits.length > 1) throw new Error("Campaign current commit is ambiguous");
+  return commits[0]?.value;
+}
+
+function assertExternalActionEventVersion(payload: unknown, expectedVersion: number, resultingVersion: number): void {
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload) || !("claimedCampaignVersion" in payload) || payload.claimedCampaignVersion !== expectedVersion || !("resultingCampaignVersion" in payload) || payload.resultingCampaignVersion !== resultingVersion) throw new Error("External action event is not bound to the campaign version");
+}
+
+const statusesAllowingIndependentCommitReplacement = new Set<CampaignStatus>([
+  "policy_review", "coordination_pending", "preflight", "quarantined", "baseline", "implementation",
+  "verification", "contribution_approval", "pull_request_open", "qodo_review", "human_escalation",
+]);

@@ -2,6 +2,7 @@ import type { Approval } from "../../domain/approval.js";
 import type { Campaign, CampaignStatus } from "../../domain/campaign.js";
 import type { Evidence } from "../../domain/evidence.js";
 import type { QodoFinding } from "../../domain/quality-gate.js";
+import type { ExternalActionPayload } from "../external-action.js";
 
 export interface CampaignEvent {
   readonly id: string;
@@ -29,6 +30,58 @@ export interface CampaignSnapshot {
   readonly approvals: readonly Approval[];
   readonly qodoFindings: readonly QodoFinding[];
   readonly externalReferences: readonly ExternalReference[];
+  readonly externalActionClaims: readonly ExternalActionClaim[];
+}
+
+export type ExternalActionClaimStatus = "active" | "outcome_unknown" | "completed" | "reconciled";
+export type ExternalActionDisposition = "confirmed_completed" | "confirmed_not_completed";
+
+export interface ExternalActionClaim {
+  readonly id: string;
+  readonly campaignId: string;
+  readonly approvalId: string;
+  readonly actionDigest: string;
+  readonly payload: ExternalActionPayload;
+  readonly currentCommitSha?: string;
+  readonly claimedCampaignVersion: number;
+  readonly claimedCampaignStatus: CampaignStatus;
+  readonly status: ExternalActionClaimStatus;
+  readonly attemptedAt: string;
+  readonly closedAt?: string;
+  readonly disposition?: ExternalActionDisposition;
+  readonly observedCanonicalHead?: string;
+}
+
+export interface ExternalActionClaimRecord {
+  readonly claimId: string;
+  readonly approvalId: string;
+  readonly actionDigest: string;
+  readonly payload: ExternalActionPayload;
+  readonly expectedCurrentCommitSha?: string;
+  readonly expectedVersion: number;
+  readonly expectedStatus: CampaignStatus;
+  readonly consumedAt: string;
+  readonly attemptedEvent: CampaignEvent;
+}
+
+export interface ExternalActionCompletionRecord {
+  readonly claimId: string;
+  readonly completedAt: string;
+  readonly completedEvent: CampaignEvent;
+  readonly newCommitSha?: string;
+}
+
+export interface ExternalActionOutcomeUnknownRecord {
+  readonly claimId: string;
+  readonly event: CampaignEvent;
+}
+
+export interface ExternalActionReconciliationRecord {
+  readonly claimId: string;
+  readonly disposition: ExternalActionDisposition;
+  readonly observedCanonicalHead?: string;
+  readonly reconciledAt: string;
+  readonly event: CampaignEvent;
 }
 
 export interface ChildResultRecord {
@@ -56,6 +109,10 @@ export interface CampaignStore {
     expectedCampaignStatus: CampaignStatus,
   ): Promise<Approval>;
   recordQodoFinding(campaignId: string, iteration: number, finding: QodoFinding): Promise<void>;
+  claimExternalAction(campaignId: string, record: ExternalActionClaimRecord): Promise<ExternalActionClaim>;
+  completeExternalAction(campaignId: string, record: ExternalActionCompletionRecord): Promise<number>;
+  markExternalActionOutcomeUnknown(campaignId: string, record: ExternalActionOutcomeUnknownRecord): Promise<void>;
+  reconcileExternalAction(campaignId: string, record: ExternalActionReconciliationRecord): Promise<number>;
   replaceCurrentCommit(
     campaignId: string,
     commitSha: string,
