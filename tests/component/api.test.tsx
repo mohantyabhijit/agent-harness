@@ -32,6 +32,12 @@ describe("OpenQuest browser API", () => {
 
     await expect(api.createCampaign({ repository: "owner/repo", issueNumber: 1, issueUrl: "https://github.com/owner/repo/issues/1", lane: "easy_win" })).resolves.toEqual({ id: ":review.1" });
   });
+
+  it("rejects campaign responses with unexpected fields", async () => {
+    const api = createOpenQuestApi({ fetch: async () => new Response(JSON.stringify({ id: "campaign-1", operatorToken: "not-for-client" }), { status: 201 }), operatorCapability: () => "runtime-only" });
+
+    await expect(api.createCampaign({ repository: "owner/repo", issueNumber: 1, issueUrl: "https://github.com/owner/repo/issues/1", lane: "easy_win" })).rejects.toThrow(/campaign/i);
+  });
 });
 
 describe("operator connection", () => {

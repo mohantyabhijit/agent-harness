@@ -5,8 +5,8 @@ interface RepositoryCardProps {
 }
 
 export function RepositoryCard({ repository: discovered }: RepositoryCardProps) {
-  const { repository, score, explanation } = discovered;
-  const retrievedAt = explanation.retrievedAt[0] ?? repository.evidence[0]?.retrievedAt;
+  const { repository, score } = discovered;
+  const retrievedAt = repository.evidence[0]?.retrievedAt;
 
   return (
     <article className="repository-card" aria-labelledby={`repository-${repository.fullName}`}>
@@ -31,7 +31,7 @@ export function RepositoryCard({ repository: discovered }: RepositoryCardProps) 
         <summary>Evidence and score explanation</summary>
         <p>Readiness balances popularity with documentation, activity, CI, maintainer response, and external pull-request acceptance.</p>
         <ul>
-          {explanation.evidence.map((item) => (
+          {repository.evidence.map((item) => (
             <li key={item.id}>
               <a href={item.sourceUrl} rel="noreferrer" target="_blank">{item.observation}</a>
               <span> Retrieved {formatDate(item.retrievedAt)}.</span>

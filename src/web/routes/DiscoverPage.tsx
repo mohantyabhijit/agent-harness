@@ -112,6 +112,7 @@ export function DiscoverPage({ api, spaces, navigate }: DiscoverPageProps) {
   };
 
   const issues = issueLoads.flatMap(({ issues: found }) => found);
+  const issuesAreLoading = issueLoads.some(({ status: issueStatus }) => issueStatus === "loading");
   const easyWins = issues.filter((issue) => classifyIssue(issue) === "easy_win");
   const longTermChallenges = issues.filter((issue) => classifyIssue(issue) === "long_term");
 
@@ -133,14 +134,15 @@ export function DiscoverPage({ api, spaces, navigate }: DiscoverPageProps) {
             <div className="repository-list">{repositories.map((repository) => <RepositoryCard key={repository.repository.fullName} repository={repository} />)}</div>
           </section>
           {issueLoads.filter(({ status: issueStatus }) => issueStatus === "error").map(({ repository }) => <p className="partial-warning" key={repository} role="status">Issues for {repository} could not be loaded. Repository evidence remains available. <button onClick={() => { loadIssuesForRepository(repository, discoveryGeneration.current); }} type="button">Retry issues</button></p>)}
+          {issueLoads.filter(({ status: issueStatus }) => issueStatus === "loading").map(({ repository }) => <p key={repository} role="status">Loading contribution issues for {repository}…</p>)}
           {campaignError !== undefined ? <p className="campaign-error" role="alert">{campaignError}</p> : null}
           <section className="lane" aria-labelledby="easy-wins-title">
             <div className="section-heading"><p className="eyebrow">Start here</p><h2 id="easy-wins-title">Easy Wins</h2><p>Clear scope, contained changes, and focused verification.</p></div>
-            {easyWins.length === 0 ? <p>No easy wins are available from the current evidence.</p> : <div className="issue-grid">{easyWins.map((issue) => <IssueCard issue={issue} key={`${issue.repository}-${String(issue.number)}`} lane="easy_win" onSelect={(selectedIssue, selectedLane) => { void startCampaign(selectedIssue, selectedLane); }} starting={startingIssue !== undefined} />)}</div>}
+            {issuesAreLoading ? <p role="status">Loading Easy Wins…</p> : easyWins.length === 0 ? <p>No easy wins are available from the current evidence.</p> : <div className="issue-grid">{easyWins.map((issue) => <IssueCard issue={issue} key={`${issue.repository}-${String(issue.number)}`} lane="easy_win" onSelect={(selectedIssue, selectedLane) => { void startCampaign(selectedIssue, selectedLane); }} starting={startingIssue !== undefined} />)}</div>}
           </section>
           <section className="lane" aria-labelledby="long-term-title">
             <div className="section-heading"><p className="eyebrow">Go deeper</p><h2 id="long-term-title">Long-Term Challenges</h2><p>Multi-area work that benefits from milestones and durable context.</p></div>
-            {longTermChallenges.length === 0 ? <p>No long-term challenges are available from the current evidence.</p> : <div className="issue-grid">{longTermChallenges.map((issue) => <IssueCard issue={issue} key={`${issue.repository}-${String(issue.number)}`} lane="long_term" onSelect={(selectedIssue, selectedLane) => { void startCampaign(selectedIssue, selectedLane); }} starting={startingIssue !== undefined} />)}</div>}
+            {issuesAreLoading ? <p role="status">Loading Long-Term Challenges…</p> : longTermChallenges.length === 0 ? <p>No long-term challenges are available from the current evidence.</p> : <div className="issue-grid">{longTermChallenges.map((issue) => <IssueCard issue={issue} key={`${issue.repository}-${String(issue.number)}`} lane="long_term" onSelect={(selectedIssue, selectedLane) => { void startCampaign(selectedIssue, selectedLane); }} starting={startingIssue !== undefined} />)}</div>}
           </section>
         </>
       ) : null}
