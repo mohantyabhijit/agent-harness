@@ -190,6 +190,7 @@ function harnessReturning(output: unknown): {
   return {
     harness: {
       createParentSession: vi.fn(),
+      deleteSession: vi.fn(),
       streamSession: vi.fn(),
       getSessionEvents: vi.fn(),
       runChildSession,

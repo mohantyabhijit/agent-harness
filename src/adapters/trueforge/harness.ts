@@ -176,6 +176,17 @@ export class TrueForgeHarness implements HarnessPort {
     }
   }
 
+  async deleteSession(sessionId: string): Promise<void> {
+    if (sessionId.trim().length === 0) {
+      throw new HarnessExecutionFailed();
+    }
+    try {
+      await this.client.sessions.delete(sessionId);
+    } catch (error) {
+      throw normalizeSdkError(error);
+    }
+  }
+
   async runChildSession(
     packet: CampaignPacket,
     operation: HarnessOperation,

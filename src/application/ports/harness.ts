@@ -25,6 +25,7 @@ export interface HarnessSessionResult {
 
 export interface HarnessPort {
   createParentSession(title: string): Promise<string>;
+  deleteSession(sessionId: string): Promise<void>;
   runChildSession(packet: CampaignPacket, operation: HarnessOperation): Promise<HarnessSessionResult>;
   streamSession(
     sessionId: string,

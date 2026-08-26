@@ -34,6 +34,24 @@ describe("TrueForgeHarness", () => {
     expect(client.sessions.create).toHaveBeenCalledWith({ agent: { name: "openquest" } });
   });
 
+  it("deletes an unused parent session for campaign-creation compensation", async () => {
+    const client = { sessions: { delete: vi.fn().mockResolvedValue(undefined) } };
+    const harness = new TrueForgeHarness(client as never);
+
+    await expect(harness.deleteSession("session-1")).resolves.toBeUndefined();
+    expect(client.sessions.delete).toHaveBeenCalledWith("session-1");
+  });
+
+  it("normalizes session-deletion failures without exposing the SDK payload", async () => {
+    const sdkError = Object.assign(new Error("token=top-secret"), { statusCode: 401 });
+    const client = { sessions: { delete: vi.fn().mockRejectedValue(sdkError) } };
+    const harness = new TrueForgeHarness(client as never);
+
+    const result = harness.deleteSession("session-1");
+    await expect(result).rejects.toBeInstanceOf(HarnessAuthRequired);
+    await expect(result).rejects.not.toThrow(/top-secret/u);
+  });
+
   it("runs a milestone in a fresh named session and returns only its final envelope", async () => {
     const events = await loadSessionEvents();
     let consumed = 0;
