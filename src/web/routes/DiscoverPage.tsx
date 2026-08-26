@@ -138,11 +138,13 @@ export function DiscoverPage({ api, spaces, navigate }: DiscoverPageProps) {
           {campaignError !== undefined ? <p className="campaign-error" role="alert">{campaignError}</p> : null}
           <section className="lane" aria-labelledby="easy-wins-title">
             <div className="section-heading"><p className="eyebrow">Start here</p><h2 id="easy-wins-title">Easy Wins</h2><p>Clear scope, contained changes, and focused verification.</p></div>
-            {issuesAreLoading ? <p role="status">Loading Easy Wins…</p> : easyWins.length === 0 ? <p>No easy wins are available from the current evidence.</p> : <div className="issue-grid">{easyWins.map((issue) => <IssueCard issue={issue} key={`${issue.repository}-${String(issue.number)}`} lane="easy_win" onSelect={(selectedIssue, selectedLane) => { void startCampaign(selectedIssue, selectedLane); }} starting={startingIssue !== undefined} />)}</div>}
+            {easyWins.length > 0 ? <div className="issue-grid">{easyWins.map((issue) => <IssueCard issue={issue} key={`${issue.repository}-${String(issue.number)}`} lane="easy_win" onSelect={(selectedIssue, selectedLane) => { void startCampaign(selectedIssue, selectedLane); }} starting={startingIssue !== undefined} />)}</div> : null}
+            {issuesAreLoading ? <p role="status">Loading Easy Wins…</p> : easyWins.length === 0 ? <p>No easy wins are available from the current evidence.</p> : null}
           </section>
           <section className="lane" aria-labelledby="long-term-title">
             <div className="section-heading"><p className="eyebrow">Go deeper</p><h2 id="long-term-title">Long-Term Challenges</h2><p>Multi-area work that benefits from milestones and durable context.</p></div>
-            {issuesAreLoading ? <p role="status">Loading Long-Term Challenges…</p> : longTermChallenges.length === 0 ? <p>No long-term challenges are available from the current evidence.</p> : <div className="issue-grid">{longTermChallenges.map((issue) => <IssueCard issue={issue} key={`${issue.repository}-${String(issue.number)}`} lane="long_term" onSelect={(selectedIssue, selectedLane) => { void startCampaign(selectedIssue, selectedLane); }} starting={startingIssue !== undefined} />)}</div>}
+            {longTermChallenges.length > 0 ? <div className="issue-grid">{longTermChallenges.map((issue) => <IssueCard issue={issue} key={`${issue.repository}-${String(issue.number)}`} lane="long_term" onSelect={(selectedIssue, selectedLane) => { void startCampaign(selectedIssue, selectedLane); }} starting={startingIssue !== undefined} />)}</div> : null}
+            {issuesAreLoading ? <p role="status">Loading Long-Term Challenges…</p> : longTermChallenges.length === 0 ? <p>No long-term challenges are available from the current evidence.</p> : null}
           </section>
         </>
       ) : null}

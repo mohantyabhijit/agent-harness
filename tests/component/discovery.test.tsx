@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { RepositoryCard } from "../../src/web/components/RepositoryCard.js";
@@ -75,6 +75,39 @@ const longTermIssue = {
   estimatedHours: 20,
 };
 
+const secondEvidence = {
+  id: "guide",
+  sourceUrl: "https://github.com/friendly/second-project/blob/main/CONTRIBUTING.md",
+  retrievedAt: "2026-08-26T00:00:00Z",
+  observation: "Contribution guide is present.",
+  kind: "direct" as const,
+};
+
+const secondRepository = {
+  ...healthyRepository,
+  repository: {
+    ...healthyRepository.repository,
+    fullName: "friendly/second-project",
+    url: "https://github.com/friendly/second-project",
+    evidence: [secondEvidence],
+  },
+  explanation: {
+    ...healthyRepository.explanation,
+    evidence: [secondEvidence],
+    sourceUrls: ["https://github.com/friendly/second-project/blob/main/CONTRIBUTING.md"],
+  },
+};
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, reject, resolve };
+}
+
 describe("RepositoryCard", () => {
   it("explains contribution readiness instead of showing stars alone", () => {
     render(<RepositoryCard repository={healthyRepository} />);
@@ -116,6 +149,92 @@ describe("DiscoverPage", () => {
     await waitFor(() => {
       expect(destinations).toEqual(["/campaigns/%3Areview.1"]);
     });
+  });
+
+  it("starts only one campaign when the same issue is selected twice", async () => {
+    const campaign = deferred<{ id: string }>();
+    let createAttempts = 0;
+    const destinations: string[] = [];
+    const api = {
+      discoverRepositories: async () => [healthyRepository],
+      getIssues: async () => [easyIssue],
+      createCampaign: async () => {
+        createAttempts += 1;
+        return campaign.promise;
+      },
+    };
+    render(<DiscoverPage api={api} spaces={["developer_tools"]} navigate={(destination) => destinations.push(destination)} />);
+
+    const start = await screen.findByRole("button", { name: /start.*clarify an error message/i });
+    fireEvent.click(start);
+    fireEvent.click(start);
+    expect(createAttempts).toBe(1);
+
+    await act(async () => {
+      campaign.resolve({ id: "campaign-1" });
+    });
+    expect(destinations).toEqual(["/campaigns/campaign-1"]);
+  });
+
+  it("keeps partial issue cards visible while other issue requests are loading", async () => {
+    const firstIssues = deferred<readonly [typeof easyIssue]>();
+    const secondIssues = deferred<readonly []>();
+    const api = {
+      discoverRepositories: async () => [healthyRepository, secondRepository],
+      getIssues: async (repository: string) => repository === healthyRepository.repository.fullName ? firstIssues.promise : secondIssues.promise,
+      createCampaign: async () => ({ id: "campaign-1" }),
+    };
+    render(<DiscoverPage api={api} spaces={["developer_tools"]} navigate={() => undefined} />);
+
+    expect(await screen.findByText(/loading contribution issues for friendly\/second-project/i)).toBeVisible();
+    await act(async () => {
+      firstIssues.resolve([easyIssue]);
+    });
+
+    expect(await screen.findByRole("button", { name: /start.*clarify an error message/i })).toBeVisible();
+    expect(screen.getByText(/loading easy wins/i)).toBeVisible();
+    expect(screen.queryByText(/no long-term challenges/i)).not.toBeInTheDocument();
+
+    await act(async () => {
+      secondIssues.resolve([]);
+    });
+    expect(await screen.findByText(/no long-term challenges/i)).toBeVisible();
+    expect(screen.queryByText(/loading easy wins/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/no easy wins/i)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /start.*clarify an error message/i })).toBeVisible();
+  });
+
+  it("ignores a stale issue response and permits repeated issue retries", async () => {
+    const staleIssues = deferred<readonly [typeof easyIssue]>();
+    const freshIssues = deferred<readonly [typeof longTermIssue]>();
+    let issueAttempt = 0;
+    const api = {
+      discoverRepositories: async () => [healthyRepository],
+      getIssues: async () => {
+        issueAttempt += 1;
+        if (issueAttempt === 1) return staleIssues.promise;
+        if (issueAttempt < 4) throw new Error("offline");
+        return freshIssues.promise;
+      },
+      createCampaign: async () => ({ id: "campaign-1" }),
+    };
+    const { rerender } = render(<DiscoverPage api={api} spaces={["developer_tools"]} navigate={() => undefined} />);
+    await screen.findByText(/loading contribution issues/i);
+
+    rerender(<DiscoverPage api={api} spaces={["web"]} navigate={() => undefined} />);
+    fireEvent.click(await screen.findByRole("button", { name: /retry issues/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /retry issues/i }));
+    expect(issueAttempt).toBe(4);
+
+    await act(async () => {
+      staleIssues.resolve([easyIssue]);
+    });
+    expect(screen.queryByText(easyIssue.title)).not.toBeInTheDocument();
+    await act(async () => {
+      freshIssues.resolve([longTermIssue]);
+    });
+    expect(await screen.findByText(longTermIssue.title)).toBeVisible();
+    expect(screen.queryByText(easyIssue.title)).not.toBeInTheDocument();
   });
 
   it("offers retry after a failed discovery request", async () => {

@@ -14,11 +14,32 @@ const metadata: Readonly<Record<Space, Omit<SpaceOption, "id">>> = {
   ai_ml: { name: "AI & machine learning", description: "Learn from, build, and maintain intelligent systems." }, developer_tools: { name: "Developer tools", description: "Build the tools developers rely on." }, web: { name: "Web", description: "Shape the open web." }, mobile: { name: "Mobile", description: "Make thoughtful experiences travel." }, data: { name: "Data", description: "Turn data into useful public infrastructure." }, infrastructure: { name: "Infrastructure", description: "Keep essential systems dependable." }, security: { name: "Security", description: "Help open software stay safer." }, science: { name: "Science", description: "Support research that everyone can inspect." }, social_impact: { name: "Social impact", description: "Build technology that broadens access." },
 };
 const finite = z.number(); const rate = finite.min(0).max(1); const text = z.string().trim().min(1).max(2_000); const repositoryName = z.string().regex(/^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/u); const githubUrl = z.url().refine(github, "github HTTPS URL");
+const campaignId = z.string().trim().min(1).max(128).regex(/^[A-Za-z0-9._:-]+$/u);
+const campaignStatus = z.enum([
+  "policy_review", "coordination_pending", "preflight", "quarantined", "baseline", "implementation",
+  "verification", "contribution_approval", "pull_request_open", "qodo_review", "repair", "human_escalation",
+  "merged", "closed", "withdrawn",
+]);
 const evidence = z.object({ id: z.string().trim().min(1).max(200), sourceUrl: githubUrl, retrievedAt: z.iso.datetime({ offset: true }), observation: text, kind: z.enum(["direct", "inference"]) }).strict();
 const signals = z.object({ stars: finite.int().nonnegative().max(2_000_000_000), recentActivity: rate, contributionGuide: z.boolean(), ciHealthy: z.boolean(), externalPrAcceptance: rate, topicMatch: rate, maintainerResponse: rate }).strict();
 const repository = z.object({ fullName: repositoryName, url: githubUrl, description: z.string().max(2_000), spaces: z.array(z.enum(spaces)).min(1).max(spaces.length), license: z.string().trim().min(1).max(100).nullable(), isPublic: z.literal(true), signals, evidence: z.array(evidence).min(1).max(100) }).strict().superRefine((item, ctx) => { if (!repoUrl(item.url, item.fullName) || item.evidence.some((entry) => !repoEvidence(entry.sourceUrl, item.fullName))) ctx.addIssue({ code: "custom", message: "Repository identity mismatch" }); });
 const discovered = z.object({ repository, score: rate, explanation: z.object({ inputSignals: signals, weightedContributions: z.array(z.object({ signal: z.string().max(100), weight: rate, value: rate, contribution: rate }).strict()).max(20), evidence: z.array(evidence).min(1).max(100), sourceUrls: z.array(githubUrl).min(1).max(100), retrievedAt: z.array(z.iso.datetime({ offset: true })).min(1).max(100) }).strict() }).strict().superRefine((item, ctx) => { for (const entry of item.explanation.evidence) { const canonical = item.repository.evidence.find((source) => source.id === entry.id); if (canonical === undefined || canonical.sourceUrl !== entry.sourceUrl || canonical.observation !== entry.observation || canonical.retrievedAt !== entry.retrievedAt || canonical.kind !== entry.kind) ctx.addIssue({ code: "custom", message: "Explanation evidence does not match repository evidence" }); } });
 const issue = z.object({ repository: repositoryName, number: finite.int().positive().max(2_000_000_000), title: text, url: githubUrl, clarity: rate, affectedAreas: finite.int().nonnegative().max(10_000), testComplexity: rate, dependencyRisk: rate, estimatedHours: finite.nonnegative().max(100_000), maintainerSignals: z.array(text).max(50) }).strict().superRefine((item, ctx) => { if (!issueUrl(item.url, item.repository, item.number)) ctx.addIssue({ code: "custom", message: "Issue identity mismatch" }); });
+const campaignResponse = z.object({
+  id: campaignId,
+  repository: repositoryName,
+  issueNumber: finite.int().positive().max(Number.MAX_SAFE_INTEGER),
+  issueUrl: githubUrl,
+  parentSessionId: z.string().trim().min(1),
+  lane: z.enum(["easy_win", "long_term"]),
+  status: campaignStatus,
+  qodoIteration: finite.int().nonnegative(),
+  version: finite.int().positive(),
+}).strict().superRefine((value, context) => {
+  if (!issueUrl(value.issueUrl, value.repository, value.issueNumber)) {
+    context.addIssue({ code: "custom", message: "Campaign issue identity mismatch" });
+  }
+});
 
 export function createOpenQuestApi(options: OpenQuestApiOptions): OpenQuestApi {
   const baseUrl = options.baseUrl ?? "";
@@ -26,7 +47,7 @@ export function createOpenQuestApi(options: OpenQuestApiOptions): OpenQuestApi {
     async getSpaces(signal) { const body = await request(options.fetch, `${baseUrl}/api/spaces`, withSignal({}, signal)); const ids = parsed(z.object({ spaces: z.array(z.enum(spaces)).min(1).max(spaces.length) }).strict(), body, "Spaces could not be loaded").spaces; if (new Set(ids).size !== ids.length) throw new OpenQuestApiError("Spaces could not be loaded"); return ids.map((id) => ({ id, ...metadata[id] })); },
     async discoverRepositories(selected, signal) { const body = await request(options.fetch, `${baseUrl}/api/discovery/repositories`, withSignal({ method: "POST", headers: headers(options.operatorCapability), body: JSON.stringify({ spaces: [...new Set(selected)] }) }, signal)); return parsed(z.object({ repositories: z.array(discovered).max(100) }).strict(), body, "Recommendations could not be loaded").repositories as readonly DiscoveredRepository[]; },
     async getIssues(name, signal) { const [owner, repo, extra] = name.split("/"); if (owner === undefined || repo === undefined || extra !== undefined || !repositoryName.safeParse(name).success) throw new OpenQuestApiError("Issues could not be loaded"); const body = await request(options.fetch, `${baseUrl}/api/discovery/repositories/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues`, withSignal({}, signal)); const values = parsed(z.object({ issues: z.array(issue).max(200) }).strict(), body, "Issues could not be loaded").issues; if (values.some((value) => value.repository !== name)) throw new OpenQuestApiError("Issues could not be loaded"); return values; },
-    async createCampaign(input, signal) { const body = await request(options.fetch, `${baseUrl}/api/campaigns`, withSignal({ method: "POST", headers: headers(options.operatorCapability), body: JSON.stringify(input) }, signal)); const response = parsed(z.object({ id: z.string().trim().min(1).max(128).regex(/^[A-Za-z0-9._:-]+$/u) }).strict(), body, "Campaign could not be started"); return { id: response.id }; },
+    async createCampaign(input, signal) { const body = await request(options.fetch, `${baseUrl}/api/campaigns`, withSignal({ method: "POST", headers: headers(options.operatorCapability), body: JSON.stringify(input) }, signal)); const response = parsed(campaignResponse, body, "Campaign could not be started"); return { id: response.id }; },
   };
 }
 async function request(fetcher: FetchLike, url: string, init: RequestInit): Promise<unknown> { let response: Response; try { response = await fetcher(url, init); } catch (error) { if (error instanceof DOMException && error.name === "AbortError") throw error; throw new OpenQuestApiError("OpenQuest is unavailable. Please try again."); } if (!response.ok) throw new OpenQuestApiError(response.status === 409 ? "This issue may already have a campaign." : "OpenQuest could not complete that request. Please try again.", response.status); try { return await response.json() as unknown; } catch { throw new OpenQuestApiError("OpenQuest returned an invalid response. Please try again."); } }
