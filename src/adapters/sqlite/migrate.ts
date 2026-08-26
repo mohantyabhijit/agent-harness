@@ -35,7 +35,8 @@ const schema = `
     status TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'rejected', 'consumed')),
     issued_at TEXT NOT NULL,
     expires_at TEXT,
-    consumed_at TEXT
+    consumed_at TEXT,
+    active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1))
   );
 
   CREATE TABLE IF NOT EXISTS approval_issuance_keys (
@@ -143,15 +144,20 @@ export function migrateCampaignStore(database: Database.Database): void {
         UPDATE external_action_claims SET lease_started_at = attempted_at WHERE lease_started_at IS NULL;
       `);
     }
+    const approvalColumns = database.prepare("PRAGMA table_info(approvals)").all() as { name: string }[];
+    if (!approvalColumns.some(({ name }) => name === "active")) {
+      database.exec("ALTER TABLE approvals ADD COLUMN active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)); UPDATE approvals SET active = 0 WHERE status <> 'approved';");
+    }
     const duplicateLiveApproval = database.prepare(`
-      SELECT 1 FROM approvals WHERE status = 'approved'
+      SELECT 1 FROM approvals WHERE status = 'approved' AND active = 1
       GROUP BY campaign_id, action_digest HAVING COUNT(*) > 1 LIMIT 1
     `).get();
     if (duplicateLiveApproval !== undefined) throw new CampaignMigrationConflict();
     database.exec(`
-      CREATE UNIQUE INDEX IF NOT EXISTS approvals_one_approved_digest_idx
+      DROP INDEX IF EXISTS approvals_one_approved_digest_idx;
+      CREATE UNIQUE INDEX approvals_one_approved_digest_idx
       ON approvals(campaign_id, action_digest)
-      WHERE status = 'approved'
+      WHERE status = 'approved' AND active = 1
     `);
   })();
 }

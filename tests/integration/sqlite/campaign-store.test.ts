@@ -61,6 +61,17 @@ const externalPayload = {
   body: "Verified remediation",
 };
 
+async function appendApprovalProposal(store: CampaignStore, id: string): Promise<void> {
+  await store.appendEvent("campaign-1", {
+    id, eventType: "external_action_proposed", occurredAt: "2026-08-26T00:00:00Z",
+    payload: {
+      proposalId: id, payload: externalPayload, actionDigest: externalActionDigest(externalPayload), expectedCampaignVersion: 7,
+      expectedCampaignStatus: "contribution_approval", expectedCurrentCommitSha: externalPayload.commitSha,
+      brief: { policy: "Policy", approach: "Approach", files: ["src/a.ts"], risks: ["Risk"], tests: ["npm test"], safetyResult: "Passed", qodoStatus: "Clear", aiDisclosure: "AI-assisted" },
+    },
+  });
+}
+
 async function seedExternalActionCampaign(store: SqliteCampaignStore, database: Database.Database): Promise<void> {
   await store.create(campaign({ status: "contribution_approval", version: 7 }));
   database.prepare("INSERT INTO external_references (campaign_id, kind, value) VALUES (?, 'commit', ?)").run("campaign-1", "a".repeat(40));
@@ -155,6 +166,25 @@ describe("SqliteCampaignStore", () => {
     expect(results.filter(({ status }) => status === "fulfilled")).toHaveLength(1);
     expect(results.filter(({ status }) => status === "rejected")).toHaveLength(1);
     expect((await storeA.get("campaign-1"))?.approvals.filter(({ status }) => status === "approved")).toHaveLength(1);
+  });
+
+  it("atomically issues only the newest server-owned proposal and rejects digest substitution", async () => {
+    const { storeA, storeB, databaseA } = openTwoConnectionStore("openquest-proposal-approval-");
+    await storeA.create(campaign({ status: "contribution_approval", version: 7 }));
+    databaseA.prepare("INSERT INTO external_references (campaign_id, kind, value) VALUES (?, 'commit', ?)").run("campaign-1", externalPayload.commitSha);
+    await appendApprovalProposal(storeA, "proposal-1");
+    const base = { campaignId: "campaign-1", proposalId: "proposal-1", actionDigest: externalActionDigest(externalPayload), expectedVersion: 7, issuedAt: "2026-08-26T00:00:00Z", expiresAt: "2026-08-26T00:10:00Z" };
+    await expect(storeA.issueApprovalForProposal({ ...base, approvalId: "substituted", actionDigest: `sha256:${"0".repeat(64)}`, idempotencyKey: "proposal-bad" })).rejects.toThrow(/conflict/i);
+    expect((await storeA.get("campaign-1"))?.approvals).toEqual([]);
+    const results = await Promise.allSettled([
+      storeA.issueApprovalForProposal({ ...base, approvalId: "approval-a", idempotencyKey: "proposal-key-a" }),
+      storeB.issueApprovalForProposal({ ...base, approvalId: "approval-b", idempotencyKey: "proposal-key-b" }),
+    ]);
+    expect(results.filter(({ status }) => status === "fulfilled")).toHaveLength(1);
+    expect(results.filter(({ status }) => status === "rejected")).toHaveLength(1);
+    expect((await storeA.get("campaign-1"))?.approvals).toEqual([expect.objectContaining({ action: "create_pr", actionDigest: externalActionDigest(externalPayload), expiresAt: "2026-08-26T00:10:00.000Z" })]);
+    await expect(storeA.issueApprovalForProposal({ ...base, approvalId: "approval-after-expiry", issuedAt: "2026-08-26T00:11:00Z", expiresAt: "2026-08-26T00:21:00Z", idempotencyKey: "proposal-fresh" })).resolves.toMatchObject({ id: "approval-after-expiry", status: "approved" });
+    expect((await storeA.get("campaign-1"))?.approvals.map(({ status }) => status)).toEqual(["approved", "approved"]);
   });
   it("creates the campaign and initial event in one transaction", async () => {
     const { store } = openMemoryStore();

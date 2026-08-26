@@ -1,35 +1,13 @@
 import { z } from "zod";
 
-import { externalActionDigest, validateExternalActionPayload, type ExternalActionPayload } from "../../application/external-action.js";
+import { currentApprovalProposal, proposalActionSummary } from "../../application/approval-proposal.js";
 import type { CampaignSnapshot } from "../../application/ports/campaign-store.js";
-import { isApprovalActionAllowed } from "../../domain/approval.js";
 
 export const campaignIdSchema = z.string().trim().min(1).max(128).regex(/^[A-Za-z0-9._:-]+$/u);
 export const repositoryPartSchema = z.string().min(1).max(100).regex(/^[A-Za-z0-9_.-]+$/u);
 export const repositorySchema = z.string().min(3).max(201).regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u);
 export const issueNumberSchema = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
 export const boundedUrlSchema = z.url().max(2_048);
-const proposalTextSchema = z.string().trim().min(1).max(20_000);
-const proposalEventSchema = z.object({
-  payload: z.custom<ExternalActionPayload>((value) => {
-    try {
-      validateExternalActionPayload(value as ExternalActionPayload);
-      return true;
-    } catch {
-      return false;
-    }
-  }),
-  brief: z.object({
-    policy: proposalTextSchema,
-    approach: proposalTextSchema,
-    files: z.array(proposalTextSchema).min(1).max(200),
-    risks: z.array(proposalTextSchema).min(1).max(200),
-    tests: z.array(proposalTextSchema).min(1).max(200),
-    safetyResult: proposalTextSchema,
-    qodoStatus: proposalTextSchema,
-    aiDisclosure: proposalTextSchema,
-  }).strict(),
-}).strict();
 
 export class ApiProblem extends Error {
   constructor(
@@ -50,7 +28,7 @@ export function publicCampaignSnapshot(snapshot: CampaignSnapshot): Readonly<Rec
   return {
     ...snapshot.campaign,
     evidence: snapshot.evidence,
-    events: snapshot.events.map(({ id, eventType, occurredAt }) => ({ id, eventType, occurredAt })),
+    events: snapshot.events.map(({ id, eventType, occurredAt, payload }) => ({ id, eventType, occurredAt, facts: safeEventFacts(payload) })),
     approvals: snapshot.approvals.map(({ id, action, actionDigest, status, issuedAt, expiresAt, consumedAt }) => ({
       id,
       action,
@@ -79,32 +57,30 @@ export function publicCampaignSnapshot(snapshot: CampaignSnapshot): Readonly<Rec
   };
 }
 
-function publicApprovalProposal(snapshot: CampaignSnapshot): Readonly<Record<string, unknown>> | null {
-  if (snapshot.externalActionClaims.some(({ status }) => status === "active" || status === "outcome_unknown")) return null;
-  for (const event of snapshot.events.toReversed()) {
-    if (event.eventType !== "external_action_proposed") continue;
-    const parsed = proposalEventSchema.safeParse(event.payload);
-    if (!parsed.success) continue;
-    const { payload, brief } = parsed.data;
-    if (
-      payload.repository !== snapshot.campaign.repository ||
-      payload.issueNumber !== snapshot.campaign.issueNumber ||
-      !isApprovalActionAllowed(payload.action, snapshot.campaign.status) ||
-      !proposalReferencesCurrentCampaign(payload, snapshot)
-    ) return null;
-    return { payload, actionDigest: externalActionDigest(payload), brief };
+function safeEventFacts(payload: unknown): Readonly<Record<string, string | number | boolean>> {
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return {};
+  const source = payload as Record<string, unknown>;
+  const allowed = ["operation", "action", "status", "outcome", "reason", "targetStatus", "claimedCampaignVersion", "resultingCampaignVersion", "reviewIteration", "iteration", "testsPassed", "complete", "reviewId", "childSessionId", "sandboxSessionId", "sandboxId", "currentCommitSha", "commitSha", "pullRequest"] as const;
+  const facts = Object.fromEntries(allowed.flatMap((key) => {
+    const value = source[key];
+    return typeof value === "string" && value.length <= 2_048 || typeof value === "number" && Number.isFinite(value) || typeof value === "boolean" ? [[key, value]] : [];
+  }));
+  const output = source.output;
+  if (typeof output !== "object" || output === null || Array.isArray(output)) return facts;
+  for (const key of ["verdict", "status", "currentCommitSha", "commitSha", "testsPassed"] as const) {
+    const value = (output as Record<string, unknown>)[key];
+    if (typeof value === "string" && value.length <= 2_048 || typeof value === "boolean") facts[`output.${key}`] = value;
   }
-  return null;
+  return facts;
 }
 
-function proposalReferencesCurrentCampaign(payload: ExternalActionPayload, snapshot: CampaignSnapshot): boolean {
-  if (payload.action === "push_branch" || payload.action === "create_pr" || payload.action === "update_pr") {
-    const commits = snapshot.externalReferences.filter(({ kind }) => kind === "commit");
-    if (commits.length !== 1 || commits[0]?.value !== payload.commitSha) return false;
-  }
-  if (payload.action === "update_pr") {
-    const pullRequests = snapshot.externalReferences.filter(({ kind }) => kind === "pull_request");
-    return pullRequests.length === 1 && pullRequests[0]?.value === payload.pullRequest;
-  }
-  return true;
+function publicApprovalProposal(snapshot: CampaignSnapshot): Readonly<Record<string, unknown>> | null {
+  const proposal = currentApprovalProposal(snapshot);
+  return proposal === null ? null : {
+    proposalId: proposal.proposalId,
+    actionDigest: proposal.actionDigest,
+    expectedCampaignVersion: proposal.expectedCampaignVersion,
+    action: proposalActionSummary(proposal.payload),
+    brief: proposal.brief,
+  };
 }

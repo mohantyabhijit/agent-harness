@@ -17,7 +17,7 @@ const agentManifestSchema = z
       z
         .object({
           name: z.literal("github"),
-          enable_tools: z.tuple([z.literal("@all")]),
+          enable_tools: z.tuple([z.literal("@read-only")]),
           disable_tools: z.tuple([]),
           preload_tools: z.tuple([]),
           require_approval_for_tools: z.tuple([

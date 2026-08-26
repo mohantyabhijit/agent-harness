@@ -1,24 +1,29 @@
 import { z } from "zod";
 
 import type { DiscoveredRepository } from "../application/discover.js";
-import type { ExternalActionPayload } from "../application/external-action.js";
+import type { ApprovalAction } from "../domain/approval.js";
 import type { Campaign } from "../domain/campaign.js";
 import { spaces, type IssueCandidate, type Space } from "../domain/discovery.js";
-
-export type { ExternalActionPayload } from "../application/external-action.js";
 
 export interface SpaceOption { readonly id: Space; readonly name: string; readonly description: string; }
 export interface CreateCampaignRequest { readonly repository: string; readonly issueNumber: number; readonly issueUrl: string; readonly lane: "easy_win" | "long_term"; }
 export interface ApprovalBrief { readonly policy: string; readonly approach: string; readonly files: readonly string[]; readonly risks: readonly string[]; readonly tests: readonly string[]; readonly safetyResult: string; readonly qodoStatus: string; readonly aiDisclosure: string; }
-export interface ApprovalProposal { readonly payload: ExternalActionPayload; readonly actionDigest: string; readonly brief: ApprovalBrief; }
-export interface PublicApproval { readonly id: string; readonly action: ExternalActionPayload["action"]; readonly actionDigest: string; readonly status: "pending" | "approved" | "rejected" | "consumed"; readonly issuedAt: string; readonly expiresAt?: string; readonly consumedAt?: string; }
+export type ApprovalActionSummary =
+  | Readonly<{ action: "post_issue_comment"; repository: string; issueNumber: number; body: string }>
+  | Readonly<{ action: "request_assignment"; repository: string; issueNumber: number; assignee: string }>
+  | Readonly<{ action: "push_branch"; repository: string; issueNumber: number; branch: string; targetCommitSha: string }>
+  | Readonly<{ action: "create_pr"; repository: string; issueNumber: number; branch: string; baseBranch: string; commitSha: string; title: string; body: string }>
+  | Readonly<{ action: "update_pr"; repository: string; issueNumber: number; pullRequest: string; branch: string; commitSha: string; body: string }>;
+export interface ApprovalProposal { readonly proposalId: string; readonly actionDigest: string; readonly expectedCampaignVersion: number; readonly action: ApprovalActionSummary; readonly brief: ApprovalBrief; }
+export interface ApprovalConfirmation { readonly proposalId: string; readonly actionDigest: string; readonly expectedCampaignVersion: number; }
+export interface PublicApproval { readonly id: string; readonly action: ApprovalAction; readonly actionDigest: string; readonly status: "pending" | "approved" | "rejected" | "consumed"; readonly issuedAt: string; readonly expiresAt?: string; readonly consumedAt?: string; }
 export interface CampaignSnapshot extends Campaign {
   readonly evidence: readonly { readonly id: string; readonly sourceUrl: string; readonly retrievedAt: string; readonly observation: string; readonly kind: "direct" | "inference" }[];
-  readonly events: readonly { readonly id: string; readonly eventType: string; readonly occurredAt: string }[];
+  readonly events: readonly { readonly id: string; readonly eventType: string; readonly occurredAt: string; readonly facts: Readonly<Record<string, string | number | boolean>> }[];
   readonly approvals: readonly PublicApproval[];
   readonly qodoFindings: readonly { readonly id: string; readonly severity: "high" | "medium" | "low" | "suggestion"; readonly status: "open" | "fixed" | "dismissed"; readonly summary: string; readonly sourceUrl?: string; readonly disposition?: string }[];
   readonly externalReferences: readonly { readonly kind: "issue" | "branch" | "pull_request" | "commit" | "sandbox" | "child_session" | "ci_run"; readonly value: string }[];
-  readonly externalActionClaims: readonly { readonly id: string; readonly approvalId: string; readonly action: ExternalActionPayload["action"]; readonly actionDigest: string; readonly claimedCampaignVersion: number; readonly claimedCampaignStatus: Campaign["status"]; readonly status: "active" | "outcome_unknown" | "completed" | "reconciled"; readonly attemptedAt: string; readonly leaseStartedAt: string; readonly closedAt?: string; readonly disposition?: "confirmed_completed" | "confirmed_not_completed" }[];
+  readonly externalActionClaims: readonly { readonly id: string; readonly approvalId: string; readonly action: ApprovalAction; readonly actionDigest: string; readonly claimedCampaignVersion: number; readonly claimedCampaignStatus: Campaign["status"]; readonly status: "active" | "outcome_unknown" | "completed" | "reconciled"; readonly attemptedAt: string; readonly leaseStartedAt: string; readonly closedAt?: string; readonly disposition?: "confirmed_completed" | "confirmed_not_completed" }[];
   readonly approvalProposal: ApprovalProposal | null;
 }
 export interface OpenQuestApi {
@@ -27,7 +32,7 @@ export interface OpenQuestApi {
   getIssues(repository: string, signal?: AbortSignal): Promise<readonly IssueCandidate[]>;
   createCampaign(input: CreateCampaignRequest, signal?: AbortSignal): Promise<Pick<Campaign, "id">>;
   getCampaign(id: string, signal?: AbortSignal): Promise<CampaignSnapshot>;
-  issueApproval(campaignId: string, payload: ExternalActionPayload, idempotencyKey: string, signal?: AbortSignal): Promise<PublicApproval>;
+  issueApproval(campaignId: string, confirmation: ApprovalConfirmation, idempotencyKey: string, signal?: AbortSignal): Promise<PublicApproval>;
 }
 export type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 export interface OpenQuestApiOptions { readonly fetch: FetchLike; readonly baseUrl?: string; readonly operatorCapability?: () => string | undefined; }
@@ -56,26 +61,25 @@ const issue = z.object({ repository: repositoryName, number: finite.int().positi
 const branch = z.string().min(1).max(255).regex(/^(?![./])(?!.*(?:\.\.|\/\/|@\{|\\))[A-Za-z0-9._/-]+(?<![./])$/u);
 const commitSha = z.string().regex(/^[0-9a-f]{40}$/u);
 const baseAction = { repository: repositoryName, issueNumber: finite.int().positive().max(Number.MAX_SAFE_INTEGER) };
-const externalActionPayload = z.discriminatedUnion("action", [
-  z.object({ action: z.literal("post_issue_comment"), ...baseAction, body: longText }).strict(), z.object({ action: z.literal("request_assignment"), ...baseAction, assignee: z.string().min(1).max(39).regex(/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/u) }).strict(), z.object({ action: z.literal("push_branch"), ...baseAction, branch, commitSha }).strict(), z.object({ action: z.literal("create_pr"), ...baseAction, branch, baseBranch: branch, commitSha, title: z.string().trim().min(1).max(256), body: longText }).strict(), z.object({ action: z.literal("update_pr"), ...baseAction, pullRequest: githubUrl, branch, commitSha, body: longText }).strict(),
+const approvalActionSummary = z.discriminatedUnion("action", [
+  z.object({ action: z.literal("post_issue_comment"), ...baseAction, body: longText }).strict(), z.object({ action: z.literal("request_assignment"), ...baseAction, assignee: z.string().min(1).max(39).regex(/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/u) }).strict(), z.object({ action: z.literal("push_branch"), ...baseAction, branch, targetCommitSha: commitSha }).strict(), z.object({ action: z.literal("create_pr"), ...baseAction, branch, baseBranch: branch, commitSha, title: z.string().trim().min(1).max(256), body: longText }).strict(), z.object({ action: z.literal("update_pr"), ...baseAction, pullRequest: githubUrl, branch, commitSha, body: longText }).strict(),
 ]);
 const campaignCore = z.object({ id: campaignId, repository: repositoryName, issueNumber: finite.int().positive().max(Number.MAX_SAFE_INTEGER), issueUrl: githubUrl, parentSessionId: z.string().trim().min(1).max(512), lane: z.enum(["easy_win", "long_term"]), status: campaignStatus, qodoIteration: finite.int().nonnegative().max(3), version: finite.int().positive() }).strict();
 type CampaignIdentity = { issueUrl: string; repository: string; issueNumber: number };
 function validateCampaignIdentity(value: CampaignIdentity, context: z.core.$RefinementCtx): void { if (!issueUrl(value.issueUrl, value.repository, value.issueNumber)) context.addIssue({ code: "custom", message: "Campaign issue identity mismatch" }); }
 const campaignResponse = campaignCore.superRefine(validateCampaignIdentity);
 const approvalBrief = z.object({ policy: longText, approach: longText, files: z.array(text).min(1).max(200), risks: z.array(text).min(1).max(200), tests: z.array(text).min(1).max(200), safetyResult: longText, qodoStatus: longText, aiDisclosure: longText }).strict();
-const approvalProposal = z.object({ payload: externalActionPayload, actionDigest: digest, brief: approvalBrief }).strict();
+const approvalProposal = z.object({ proposalId: identifier, actionDigest: digest, expectedCampaignVersion: finite.int().positive(), action: approvalActionSummary, brief: approvalBrief }).strict();
 const publicApproval = z.object({ id: identifier, action: approvalAction, actionDigest: digest, status: z.enum(["pending", "approved", "rejected", "consumed"]), issuedAt: timestamp, expiresAt: timestamp.optional(), consumedAt: timestamp.optional() }).strict();
-const qodoFinding = z.object({ id: identifier, severity: z.enum(["high", "medium", "low", "suggestion"]), status: z.enum(["open", "fixed", "dismissed"]), summary: text, sourceUrl: githubUrl.optional(), disposition: text.optional() }).strict();
+const qodoFinding = z.object({ id: identifier, severity: z.enum(["high", "medium", "low", "suggestion"]), status: z.enum(["open", "fixed", "dismissed"]), summary: text, sourceUrl: z.url().max(2_048).refine(githubReviewUrl, "GitHub review URL").optional(), disposition: text.optional() }).strict();
 const externalReference = z.object({ kind: z.enum(["issue", "branch", "pull_request", "commit", "sandbox", "child_session", "ci_run"]), value: z.string().trim().min(1).max(2_048) }).strict();
 const externalActionClaim = z.object({ id: identifier, approvalId: identifier, action: approvalAction, actionDigest: digest, claimedCampaignVersion: finite.int().positive(), claimedCampaignStatus: campaignStatus, status: z.enum(["active", "outcome_unknown", "completed", "reconciled"]), attemptedAt: timestamp, leaseStartedAt: timestamp, closedAt: timestamp.optional(), disposition: z.enum(["confirmed_completed", "confirmed_not_completed"]).optional() }).strict();
-const campaignSnapshotResponse = campaignCore.extend({ evidence: z.array(evidence).max(10_000), events: z.array(z.object({ id: identifier, eventType: identifier, occurredAt: timestamp }).strict()).max(10_000), approvals: z.array(publicApproval).max(1_000), qodoFindings: z.array(qodoFinding).max(10_000), externalReferences: z.array(externalReference).max(10_000), externalActionClaims: z.array(externalActionClaim).max(1_000), approvalProposal: approvalProposal.nullable() }).strict().superRefine((value, context) => {
+const campaignSnapshotResponse = campaignCore.extend({ evidence: z.array(evidence).max(10_000), events: z.array(z.object({ id: identifier, eventType: identifier, occurredAt: timestamp, facts: z.record(identifier, z.union([z.string().max(2_048), z.number(), z.boolean()])) }).strict()).max(10_000), approvals: z.array(publicApproval).max(1_000), qodoFindings: z.array(qodoFinding).max(10_000), externalReferences: z.array(externalReference).max(10_000), externalActionClaims: z.array(externalActionClaim).max(1_000), approvalProposal: approvalProposal.nullable() }).strict().superRefine((value, context) => {
   validateCampaignIdentity(value, context);
   const proposal = value.approvalProposal;
-  if (proposal !== null && (proposal.payload.repository !== value.repository || proposal.payload.issueNumber !== value.issueNumber)) context.addIssue({ code: "custom", message: "Approval proposal identity mismatch" });
-  if (proposal !== null && "commitSha" in proposal.payload) { const commits = value.externalReferences.filter(({ kind }) => kind === "commit"); if (commits.length !== 1 || commits[0]?.value !== proposal.payload.commitSha) context.addIssue({ code: "custom", message: "Approval proposal head mismatch" }); }
+  if (proposal !== null && (proposal.action.repository !== value.repository || proposal.action.issueNumber !== value.issueNumber || proposal.expectedCampaignVersion !== value.version)) context.addIssue({ code: "custom", message: "Approval proposal identity mismatch" });
 });
-const approvalResponse = z.object({ approval: publicApproval, brief: z.record(z.string(), z.unknown()) }).strict();
+const approvalResponse = z.object({ approval: publicApproval }).strict();
 const idempotencyKey = z.string().min(8).max(128).regex(/^[\x21-\x7E]+$/u);
 
 export function createOpenQuestApi(options: OpenQuestApiOptions): OpenQuestApi {
@@ -86,7 +90,7 @@ export function createOpenQuestApi(options: OpenQuestApiOptions): OpenQuestApi {
     async getIssues(name, signal) { const [owner, repo, extra] = name.split("/"); if (owner === undefined || repo === undefined || extra !== undefined || !repositoryName.safeParse(name).success) throw new OpenQuestApiError("Issues could not be loaded"); const body = await request(options.fetch, `${baseUrl}/api/discovery/repositories/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues`, withSignal({}, signal)); const values = parsed(z.object({ issues: z.array(issue).max(200) }).strict(), body, "Issues could not be loaded").issues; if (values.some((value) => value.repository !== name)) throw new OpenQuestApiError("Issues could not be loaded"); return values; },
     async createCampaign(input, signal) { const body = await request(options.fetch, `${baseUrl}/api/campaigns`, withSignal({ method: "POST", headers: authenticatedHeaders(options.operatorCapability), body: JSON.stringify(input) }, signal)); const response = parsed(campaignResponse, body, "Campaign could not be started"); return { id: response.id }; },
     async getCampaign(id, signal) { const validId = parsed(campaignId, id, "Campaign could not be loaded"); const body = await request(options.fetch, `${baseUrl}/api/campaigns/${encodeURIComponent(validId)}`, withSignal({}, signal)); return parsed(campaignSnapshotResponse, body, "Campaign could not be loaded") as CampaignSnapshot; },
-    async issueApproval(campaign, payload, key, signal) { const validCampaign = parsed(campaignId, campaign, "Approval could not be issued"); const validPayload = parsed(externalActionPayload, payload, "Approval could not be issued") as ExternalActionPayload; const validKey = parsed(idempotencyKey, key, "Approval could not be issued"); const body = await request(options.fetch, `${baseUrl}/api/campaigns/${encodeURIComponent(validCampaign)}/approvals`, withSignal({ method: "POST", headers: { ...authenticatedHeaders(options.operatorCapability), "idempotency-key": validKey }, body: JSON.stringify({ payload: validPayload }) }, signal)); return parsed(approvalResponse, body, "Approval could not be issued").approval as PublicApproval; },
+    async issueApproval(campaign, confirmation, key, signal) { const validCampaign = parsed(campaignId, campaign, "Approval could not be issued"); const validConfirmation = parsed(z.object({ proposalId: identifier, actionDigest: digest, expectedCampaignVersion: finite.int().positive() }).strict(), confirmation, "Approval could not be issued"); const validKey = parsed(idempotencyKey, key, "Approval could not be issued"); const body = await request(options.fetch, `${baseUrl}/api/campaigns/${encodeURIComponent(validCampaign)}/approvals`, withSignal({ method: "POST", headers: { ...authenticatedHeaders(options.operatorCapability), "idempotency-key": validKey }, body: JSON.stringify(validConfirmation) }, signal)); return parsed(approvalResponse, body, "Approval could not be issued").approval as PublicApproval; },
   };
 }
 
@@ -95,6 +99,7 @@ function authenticatedHeaders(provider: OpenQuestApiOptions["operatorCapability"
 function withSignal(init: RequestInit, signal: AbortSignal | undefined): RequestInit { return signal === undefined ? init : { ...init, signal }; }
 function parsed<T>(schema: z.ZodType<T>, body: unknown, message: string): T { const result = schema.safeParse(body); if (!result.success) throw new OpenQuestApiError(message); return result.data; }
 function github(value: string): boolean { try { const url = new URL(value); return url.protocol === "https:" && url.hostname === "github.com" && url.username === "" && url.password === "" && url.port === "" && url.search === "" && url.hash === ""; } catch { return false; } }
+function githubReviewUrl(value: string): boolean { try { const url = new URL(value); return url.protocol === "https:" && url.hostname === "github.com" && url.username === "" && url.password === "" && url.port === "" && url.search === "" && /^\/[^/]+\/[^/]+\/pull\/[1-9][0-9]*(?:\/files)?$/u.test(url.pathname) && (url.hash === "" || /^#(?:discussion_r|r)[1-9][0-9]*$/u.test(url.hash)); } catch { return false; } }
 function repoUrl(value: string, name: string): boolean { try { return new URL(value).pathname === `/${name}`; } catch { return false; } }
 function repoEvidence(value: string, name: string): boolean { try { return new URL(value).pathname.split("/").slice(1, 3).join("/") === name; } catch { return false; } }
 function issueUrl(value: string, name: string, number: number): boolean { try { return new URL(value).pathname === `/${name}/issues/${String(number)}`; } catch { return false; } }

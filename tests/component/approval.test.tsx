@@ -1,15 +1,15 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@truefoundry/trueforge-ui", () => ({ TrueForgeUI: () => <div /> }));
 
-import type { ApprovalProposal, CampaignSnapshot, ExternalActionPayload, OpenQuestApi } from "../../src/web/api.js";
+import type { ApprovalActionSummary, ApprovalProposal, CampaignSnapshot, OpenQuestApi } from "../../src/web/api.js";
 import { ChangeBrief } from "../../src/web/components/ChangeBrief.js";
 import { CampaignPage } from "../../src/web/routes/CampaignPage.js";
 
-const payload: ExternalActionPayload = {
+const payload: ApprovalActionSummary = {
   action: "create_pr",
   repository: "owner/repo",
   issueNumber: 42,
@@ -20,8 +20,10 @@ const payload: ExternalActionPayload = {
   body: "Resolves #42.\n\nAI-assisted contribution: OpenQuest prepared this change and the operator reviewed the exact payload.",
 };
 const proposal: ApprovalProposal = {
-  payload,
+  proposalId: "proposal-1",
+  action: payload,
   actionDigest: `sha256:${"b".repeat(64)}`,
+  expectedCampaignVersion: 7,
   brief: {
     policy: "Focused pull requests with tests are welcome.",
     approach: "Guard the empty result before reading its first item.",
@@ -64,7 +66,7 @@ describe("ChangeBrief", () => {
     fireEvent.click(button);
 
     expect(approve).toHaveBeenCalledOnce();
-    expect(approve).toHaveBeenCalledWith(payload);
+    expect(approve).toHaveBeenCalledWith({ proposalId: "proposal-1", actionDigest: proposal.actionDigest, expectedCampaignVersion: 7 });
   });
 });
 
@@ -78,7 +80,8 @@ describe("Campaign approval", () => {
       await pending;
       return { id: "approval-1", action: "create_pr", actionDigest: proposal.actionDigest, status: "approved", issuedAt: "2026-08-26T00:10:00Z" };
     });
-    const api = { getCampaign: async () => snapshot, issueApproval };
+    const getCampaign = vi.fn(async () => snapshot);
+    const api = { getCampaign, issueApproval };
     render(<CampaignPage api={api} campaignId="campaign-1" createIdempotencyKey={() => "approval-click-0001"} />);
     await screen.findByText(payload.title);
     fireEvent.click(screen.getByRole("checkbox", { name: /reviewed every field/i }));
@@ -88,10 +91,11 @@ describe("Campaign approval", () => {
     fireEvent.click(button);
 
     expect(issueApproval).toHaveBeenCalledOnce();
-    expect(issueApproval).toHaveBeenCalledWith("campaign-1", payload, "approval-click-0001", expect.any(AbortSignal));
+    expect(issueApproval).toHaveBeenCalledWith("campaign-1", { proposalId: "proposal-1", actionDigest: proposal.actionDigest, expectedCampaignVersion: 7 }, "approval-click-0001", expect.any(AbortSignal));
     const key = issueApproval.mock.calls[0]?.[2] ?? "";
     expect(key).toMatch(/^[\x21-\x7e]{8,128}$/u);
     release();
+    await waitFor(() => { expect(getCampaign).toHaveBeenCalledTimes(2); });
   });
 
   it("aborts an in-flight approval when the campaign page unmounts", async () => {

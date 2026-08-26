@@ -22,7 +22,7 @@ const realCampaignResponse = {
 const realCampaignSnapshot: CampaignSnapshot = {
   ...realCampaignResponse,
   evidence: [],
-  events: [{ id: "created", eventType: "campaign_created", occurredAt: "2026-08-26T00:00:00Z" }],
+  events: [{ id: "created", eventType: "campaign_created", occurredAt: "2026-08-26T00:00:00Z", facts: {} }],
   approvals: [],
   qodoFindings: [],
   externalReferences: [],
@@ -110,17 +110,23 @@ describe("OpenQuest browser API", () => {
     await expect(api.getCampaign(":review.1")).rejects.toThrow(/campaign/i);
   });
 
-  it("issues approval for the exact payload with the supplied human-confirmation key", async () => {
-    const payload = { action: "create_pr" as const, repository: "owner/repo", issueNumber: 1, branch: "openquest/fix-1", baseBranch: "main", commitSha: "a".repeat(40), title: "Fix issue 1", body: "AI-assisted contribution reviewed by a human." };
+  it("round-trips a bounded Qodo discussion URL with its fragment", async () => {
+    const sourceUrl = "https://github.com/owner/repo/pull/7#discussion_r123";
+    const api = createOpenQuestApi({ fetch: async () => new Response(JSON.stringify({ ...realCampaignSnapshot, qodoFindings: [{ id: "qodo-1", severity: "medium", status: "open", summary: "Fix boundary", sourceUrl }] }), { status: 200 }) });
+    await expect(api.getCampaign(":review.1")).resolves.toMatchObject({ qodoFindings: [{ sourceUrl }] });
+  });
+
+  it("issues approval for the server-owned proposal identity with the supplied human-confirmation key", async () => {
+    const confirmation = { proposalId: "proposal-1", actionDigest: `sha256:${"b".repeat(64)}`, expectedCampaignVersion: 7 };
     const approval = { id: "approval-1", action: "create_pr", actionDigest: `sha256:${"b".repeat(64)}`, status: "approved", issuedAt: "2026-08-26T00:00:00Z" } as const;
-    const fetcher = vi.fn<FetchLike>(async () => new Response(JSON.stringify({ approval, brief: { action: "Create pull request", repository: "owner/repo", issueNumber: 1, target: "main", branch: "openquest/fix-1", commitSha: "a".repeat(40), title: "Fix issue 1", body: "AI-assisted contribution reviewed by a human." } }), { status: 201 }));
+    const fetcher = vi.fn<FetchLike>(async () => new Response(JSON.stringify({ approval }), { status: 201 }));
     const api = createOpenQuestApi({ fetch: fetcher, operatorCapability: () => "runtime-only" });
 
-    await expect(api.issueApproval(":review.1", payload, "approval-click-0001")).resolves.toEqual(approval);
+    await expect(api.issueApproval(":review.1", confirmation, "approval-click-0001")).resolves.toEqual(approval);
     expect(fetcher).toHaveBeenCalledWith("/api/campaigns/%3Areview.1/approvals", expect.objectContaining({
       method: "POST",
       headers: { "content-type": "application/json", authorization: "Bearer runtime-only", "idempotency-key": "approval-click-0001" },
-      body: JSON.stringify({ payload }),
+      body: JSON.stringify(confirmation),
     }));
   });
 

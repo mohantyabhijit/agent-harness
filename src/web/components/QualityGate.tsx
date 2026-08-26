@@ -6,11 +6,11 @@ const severities = ["high", "medium", "low", "suggestion"] as const;
 
 export function QualityGate({ findings, iteration, status }: QualityGateProps) {
   const open = findings.filter(({ status: findingStatus }) => findingStatus === "open");
-  const escalated = status === "human_escalation" || (iteration >= 3 && open.some(({ severity }) => severity === "high" || severity === "medium"));
+  const qodoExhausted = iteration >= 3 && open.some(({ severity }) => severity === "high" || severity === "medium");
   return <section aria-labelledby="quality-heading" className="campaign-panel">
     <div className="panel-heading"><div><p className="eyebrow">Review loop</p><h2 id="quality-heading">Quality gate</h2></div><span className="status-pill">Iteration {iteration} of 3</span></div>
     <dl className="quality-counts">{severities.map((severity) => <div key={severity}><dt>{severity}</dt><dd>{open.filter((finding) => finding.severity === severity).length} open</dd></div>)}</dl>
-    {escalated ? <p className="quality-escalation" role="alert"><strong>Human escalation required.</strong> The automated repair limit was reached with actionable findings remaining.</p> : null}
+    {status === "human_escalation" ? <p className="quality-escalation" role="alert"><strong>Human escalation required.</strong> {qodoExhausted ? "The automated Qodo repair limit was reached with actionable findings remaining." : "The campaign requires a human decision; no Qodo-exhaustion claim is recorded."}</p> : null}
     {findings.length === 0 ? <p>No Qodo findings are recorded for this campaign.</p> : <ul className="finding-list">{findings.map((finding) => <li key={finding.id}>
       <div><span className={`severity severity--${finding.severity}`}>{finding.severity}</span><span>{finding.status}</span></div>
       <strong>{finding.summary}</strong>

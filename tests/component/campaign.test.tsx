@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@truefoundry/trueforge-ui", () => ({
@@ -22,8 +22,8 @@ const snapshot: CampaignSnapshot = {
   version: 8,
   evidence: [{ id: "policy", sourceUrl: "https://github.com/owner/repo/blob/main/CONTRIBUTING.md", retrievedAt: "2026-08-26T00:00:00Z", observation: "Maintainers require focused pull requests.", kind: "direct" }],
   events: [
-    { id: "created", eventType: "campaign_created", occurredAt: "2026-08-26T00:00:00Z" },
-    { id: "verified", eventType: "campaign_operation_completed", occurredAt: "2026-08-26T00:05:00Z" },
+    { id: "created", eventType: "campaign_created", occurredAt: "2026-08-26T00:00:00Z", facts: {} },
+    { id: "verified", eventType: "campaign_operation_completed", occurredAt: "2026-08-26T00:05:00Z", facts: { operation: "verify", testsPassed: true } },
   ],
   approvals: [{ id: "approval-1", action: "create_pr", actionDigest: `sha256:${"b".repeat(64)}`, status: "consumed", issuedAt: "2026-08-26T00:06:00Z", consumedAt: "2026-08-26T00:07:00Z" }],
   qodoFindings: [{ id: "finding-1", severity: "medium", status: "open", summary: "Handle the empty response.", sourceUrl: "https://github.com/owner/repo/pull/7#discussion_r1", disposition: "Repair queued" }],
@@ -47,8 +47,11 @@ describe("CampaignPage", () => {
     render(<CampaignPage api={campaignApi(async () => snapshot)} campaignId="campaign-1" />);
 
     expect(await screen.findByTestId("agent-thread")).toHaveAttribute("data-session-id", "session-42");
+    await waitFor(() => { expect(screen.getByRole("heading", { level: 1, name: /owner\/repo/i })).toHaveFocus(); });
     expect(screen.getByText("Maintainers require focused pull requests.")).toBeVisible();
     expect(screen.getByText("Campaign created")).toBeVisible();
+    expect(screen.getByText("verify")).toBeVisible();
+    expect(screen.getByText("true")).toBeVisible();
     expect(screen.getByText("Pull request approval consumed")).toBeVisible();
     expect(screen.getByText("Iteration 2 of 3")).toBeVisible();
     expect(screen.getByText("Handle the empty response.")).toBeVisible();

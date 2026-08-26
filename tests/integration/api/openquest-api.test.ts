@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { HarnessUnavailable } from "../../../src/application/ports/harness.js";
-import { externalActionDigest } from "../../../src/application/external-action.js";
+import { externalActionDigest, type ExternalActionPayload } from "../../../src/application/external-action.js";
+import type { CampaignStatus } from "../../../src/domain/campaign.js";
 import type { GithubCatalogPort } from "../../../src/application/ports/github-catalog.js";
 import type { QodoReviewBatch } from "../../../src/application/sync-review.js";
 import { SyncReview } from "../../../src/application/sync-review.js";
@@ -73,7 +74,8 @@ describe("OpenQuest API", () => {
     store.seed(campaign({ status: "contribution_approval", version: 7 }));
     store.seedExternalReference("campaign-1", { kind: "commit", value: head });
     const payload = { action: "create_pr" as const, repository: "owner/repo", issueNumber: 42, branch: "openquest/fix-42", baseBranch: "main", commitSha: head, title: "Fix", body: "Body" };
-    const request = { method: "POST" as const, url: "/api/campaigns/campaign-1/approvals", headers: { "idempotency-key": "human-confirmation-001" }, payload: { payload } };
+    await appendProposal(store, payload, { id: "proposal-replay", version: 7, status: "contribution_approval", currentHead: head });
+    const request = { method: "POST" as const, url: "/api/campaigns/campaign-1/approvals", headers: { "idempotency-key": "human-confirmation-001" }, payload: { proposalId: "proposal-replay", actionDigest: externalActionDigest(payload), expectedCampaignVersion: 7 } };
     const first = await app.inject(request);
     const replay = await app.inject(request);
     expect(replay.statusCode).toBe(201);
@@ -204,25 +206,19 @@ describe("OpenQuest API", () => {
       title: "Fix issue 42",
       body: "Verified remediation",
     };
+    await appendProposal(store, payload, { id: "proposal-create", version: 7, status: "contribution_approval", currentHead: head });
 
     const response = await app.inject({
       method: "POST",
       url: "/api/campaigns/campaign-1/approvals",
       headers: { "idempotency-key": "confirmation-key-1" },
-      payload: { payload },
+      payload: { proposalId: "proposal-create", actionDigest: externalActionDigest(payload), expectedCampaignVersion: 7 },
     });
     expect(response.statusCode).toBe(201);
     expect(response.json()).toMatchObject({
       approval: { action: "create_pr", actionDigest: externalActionDigest(payload), status: "approved" },
-      brief: {
-        action: "Create pull request",
-        repository: "owner/repo",
-        issueNumber: 42,
-        target: "main",
-        title: "Fix issue 42",
-        body: "Verified remediation",
-      },
     });
+    expect(response.json().approval.expiresAt).toBe("2026-08-26T00:10:00.000Z");
     expect(response.json()).not.toHaveProperty("payload");
     expect(response.body).not.toContain("parentSessionId");
     await app.close();
@@ -283,28 +279,11 @@ describe("OpenQuest API", () => {
     const payload = { action: "create_pr" as const, repository: "owner/repo", issueNumber: 42, branch: "openquest/fix-42", baseBranch: "main", commitSha: head, title: "Fix issue 42", body: "AI-assisted contribution reviewed by a human." };
     store.seed(campaign({ status: "contribution_approval", version: 7 }));
     store.seedExternalReference("campaign-1", { kind: "commit", value: head });
-    await store.appendEvent("campaign-1", {
-      id: "proposal-1",
-      eventType: "external_action_proposed",
-      occurredAt: "2026-08-26T00:05:00Z",
-      payload: {
-        payload,
-        brief: {
-          policy: "Focused pull requests with tests are welcome.",
-          approach: "Guard the empty result before reading it.",
-          files: ["src/dependencies.ts"],
-          risks: ["Provider responses may be malformed."],
-          tests: ["npm test"],
-          safetyResult: "Static preflight passed.",
-          qodoStatus: "No open high-severity findings.",
-          aiDisclosure: "AI-assisted contribution prepared by OpenQuest and reviewed by a human.",
-        },
-      },
-    });
+    await appendProposal(store, payload, { id: "proposal-1", version: 7, status: "contribution_approval", currentHead: head });
 
     const response = await app.inject({ method: "GET", url: "/api/campaigns/campaign-1" });
 
-    expect(response.json().approvalProposal).toEqual({ payload, actionDigest: externalActionDigest(payload), brief: expect.objectContaining({ safetyResult: "Static preflight passed." }) });
+    expect(response.json().approvalProposal).toEqual({ proposalId: "proposal-1", actionDigest: externalActionDigest(payload), expectedCampaignVersion: 7, action: payload, brief: expect.objectContaining({ safetyResult: "Static preflight passed." }) });
     await app.close();
   });
 
@@ -322,6 +301,18 @@ describe("OpenQuest API", () => {
       },
     });
 
+    expect((await app.inject({ method: "GET", url: "/api/campaigns/campaign-1" })).json().approvalProposal).toBeNull();
+    await app.close();
+  });
+
+  it("does not resurrect an older valid proposal when the newest proposal is malformed", async () => {
+    const { app, store } = buildTestApp();
+    const head = "a".repeat(40);
+    const payload = { action: "create_pr" as const, repository: "owner/repo", issueNumber: 42, branch: "openquest/fix-42", baseBranch: "main", commitSha: head, title: "Safe", body: "Safe body" };
+    store.seed(campaign({ status: "contribution_approval", version: 7 }));
+    store.seedExternalReference("campaign-1", { kind: "commit", value: head });
+    await appendProposal(store, payload, { id: "proposal-valid", version: 7, status: "contribution_approval", currentHead: head });
+    await store.appendEvent("campaign-1", { id: "proposal-malformed", eventType: "external_action_proposed", occurredAt: "2026-08-26T00:06:00Z", payload: { payload } });
     expect((await app.inject({ method: "GET", url: "/api/campaigns/campaign-1" })).json().approvalProposal).toBeNull();
     await app.close();
   });
@@ -535,4 +526,25 @@ function reviewBatch(overrides: Partial<QodoReviewBatch> = {}): QodoReviewBatch 
     findings: [],
     ...overrides,
   };
+}
+
+async function appendProposal(store: FakeCampaignStore, payload: ExternalActionPayload, binding: { id: string; version: number; status: CampaignStatus; currentHead?: string }): Promise<void> {
+  await store.appendEvent("campaign-1", {
+    id: binding.id,
+    eventType: "external_action_proposed",
+    occurredAt: "2026-08-26T00:05:00Z",
+    payload: {
+      proposalId: binding.id,
+      payload,
+      actionDigest: externalActionDigest(payload),
+      expectedCampaignVersion: binding.version,
+      expectedCampaignStatus: binding.status,
+      ...(binding.currentHead === undefined ? {} : { expectedCurrentCommitSha: binding.currentHead }),
+      brief: {
+        policy: "Focused pull requests with tests are welcome.", approach: "Guard the empty result before reading it.", files: ["src/dependencies.ts"],
+        risks: ["Provider responses may be malformed."], tests: ["npm test"], safetyResult: "Static preflight passed.",
+        qodoStatus: "No open high-severity findings.", aiDisclosure: "AI-assisted contribution prepared by OpenQuest and reviewed by a human.",
+      },
+    },
+  });
 }

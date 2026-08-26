@@ -115,6 +115,17 @@ export interface ApprovalIssuanceRecord {
   readonly idempotencyKey: string;
 }
 
+export interface ProposalApprovalIssuanceRecord {
+  readonly campaignId: string;
+  readonly proposalId: string;
+  readonly actionDigest: string;
+  readonly expectedVersion: number;
+  readonly approvalId: string;
+  readonly issuedAt: string;
+  readonly expiresAt: string;
+  readonly idempotencyKey: string;
+}
+
 export interface CampaignStore {
   create(campaign: Campaign, initialEvent?: CampaignEvent): Promise<void>;
   get(id: string): Promise<CampaignSnapshot | undefined>;
@@ -125,6 +136,7 @@ export interface CampaignStore {
   appendEvent(campaignId: string, event: CampaignEvent): Promise<void>;
   recordApproval(approval: Approval): Promise<void>;
   issueApproval(record: ApprovalIssuanceRecord): Promise<Approval>;
+  issueApprovalForProposal(record: ProposalApprovalIssuanceRecord): Promise<Approval>;
   /** @deprecated Production orchestration must use claimExternalAction so approval consumption and the durable claim are atomic. */
   consumeApproval(
     approvalId: string,

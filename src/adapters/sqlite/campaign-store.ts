@@ -5,6 +5,7 @@ import {
   ApprovalIssuanceConflict,
   reservedCampaignEventTypes,
   type ApprovalIssuanceRecord,
+  type ProposalApprovalIssuanceRecord,
   type CampaignEvent,
   type ChildResultRecord,
   type CampaignSnapshot,
@@ -17,6 +18,7 @@ import {
   type ExternalActionStaleRecoveryRecord,
   type ExternalReference,
 } from "../../application/ports/campaign-store.js";
+import { currentApprovalProposal } from "../../application/approval-proposal.js";
 import {
   canonicalExternalActionJson,
   externalActionDigest,
@@ -26,6 +28,7 @@ import {
 } from "../../application/external-action.js";
 import {
   consumeApproval as consumeDomainApproval,
+  issueApproval as issueDomainApproval,
   isApprovalActionAllowed,
   type Approval,
 } from "../../domain/approval.js";
@@ -266,6 +269,7 @@ export class SqliteCampaignStore implements CampaignStore {
     const key = record.idempotencyKey;
     if (key.length < 8 || key.length > 128) throw new ApprovalIssuanceConflict();
     const issue = this.#database.transaction(() => {
+      this.#database.prepare("UPDATE approvals SET active = 0 WHERE campaign_id = ? AND status = 'approved' AND active = 1 AND expires_at IS NOT NULL AND expires_at <= ?").run(record.approval.campaignId, record.approval.issuedAt);
       const replay = this.#database.prepare(`
         SELECT approvals.* FROM approval_issuance_keys
         JOIN approvals ON approvals.id = approval_issuance_keys.approval_id
@@ -275,11 +279,42 @@ export class SqliteCampaignStore implements CampaignStore {
         if (replay.action_digest !== record.approval.actionDigest || replay.action !== record.approval.action) throw new ApprovalIssuanceConflict();
         return mapApproval(replay);
       }
-      const existing = this.#database.prepare("SELECT id FROM approvals WHERE campaign_id = ? AND action_digest = ? AND status = 'approved'").get(record.approval.campaignId, record.approval.actionDigest) as { id: string } | undefined;
+      const existing = this.#database.prepare("SELECT id FROM approvals WHERE campaign_id = ? AND action_digest = ? AND status = 'approved' AND active = 1").get(record.approval.campaignId, record.approval.actionDigest) as { id: string } | undefined;
       if (existing !== undefined) throw new ApprovalIssuanceConflict();
       this.#insertApproval(record.approval);
       this.#database.prepare("INSERT INTO approval_issuance_keys (campaign_id, idempotency_key, approval_id) VALUES (?, ?, ?)").run(record.approval.campaignId, key, record.approval.id);
       return record.approval;
+    });
+    try { return issue.immediate(); } catch (error) {
+      if (error instanceof ApprovalIssuanceConflict) throw error;
+      if (typeof error === "object" && error !== null && "code" in error && String(error.code).startsWith("SQLITE_CONSTRAINT")) throw new ApprovalIssuanceConflict();
+      throw error;
+    }
+  }
+
+  async issueApprovalForProposal(record: ProposalApprovalIssuanceRecord): Promise<Approval> {
+    if (record.idempotencyKey.length < 8 || record.idempotencyKey.length > 128) throw new ApprovalIssuanceConflict();
+    const issue = this.#database.transaction(() => {
+      const row = this.#database.prepare("SELECT * FROM campaigns WHERE id = ?").get(record.campaignId) as CampaignRow | undefined;
+      if (row === undefined) throw new ApprovalIssuanceConflict();
+      const proposal = currentApprovalProposal(this.#snapshot(row));
+      if (proposal === null || proposal.proposalId !== record.proposalId || proposal.actionDigest !== record.actionDigest || proposal.expectedCampaignVersion !== record.expectedVersion) throw new ApprovalIssuanceConflict();
+      const approval = issueDomainApproval({ id: record.approvalId, campaignId: record.campaignId, action: proposal.payload.action, actionDigest: proposal.actionDigest, issuedAt: record.issuedAt, expiresAt: record.expiresAt });
+      this.#database.prepare("UPDATE approvals SET active = 0 WHERE campaign_id = ? AND status = 'approved' AND active = 1 AND expires_at IS NOT NULL AND expires_at <= ?").run(record.campaignId, record.issuedAt);
+      const replay = this.#database.prepare(`
+        SELECT approvals.* FROM approval_issuance_keys
+        JOIN approvals ON approvals.id = approval_issuance_keys.approval_id
+        WHERE approval_issuance_keys.campaign_id = ? AND approval_issuance_keys.idempotency_key = ?
+      `).get(record.campaignId, record.idempotencyKey) as ApprovalRow | undefined;
+      if (replay !== undefined) {
+        if (replay.action_digest !== approval.actionDigest || replay.action !== approval.action) throw new ApprovalIssuanceConflict();
+        return mapApproval(replay);
+      }
+      const existing = this.#database.prepare("SELECT id FROM approvals WHERE campaign_id = ? AND action_digest = ? AND status = 'approved' AND active = 1").get(record.campaignId, approval.actionDigest) as { id: string } | undefined;
+      if (existing !== undefined) throw new ApprovalIssuanceConflict();
+      this.#insertApproval(approval);
+      this.#database.prepare("INSERT INTO approval_issuance_keys (campaign_id, idempotency_key, approval_id) VALUES (?, ?, ?)").run(record.campaignId, record.idempotencyKey, approval.id);
+      return approval;
     });
     try { return issue.immediate(); } catch (error) {
       if (error instanceof ApprovalIssuanceConflict) throw error;
@@ -325,7 +360,7 @@ export class SqliteCampaignStore implements CampaignStore {
       const consumed = consumeDomainApproval(mapApproval(row), actionDigest, canonicalConsumedAt);
       const result = this.#database.prepare(`
         UPDATE approvals
-        SET status = 'consumed', consumed_at = ?
+        SET status = 'consumed', consumed_at = ?, active = 0
         WHERE id = ?
           AND action_digest = ?
           AND status = 'approved'
@@ -404,7 +439,7 @@ export class SqliteCampaignStore implements CampaignStore {
       if (!isApprovalActionAllowed(approvalRow.action, record.expectedStatus)) throw new Error("Campaign state does not allow this approval action");
       consumeDomainApproval(mapApproval(approvalRow), record.actionDigest, consumedAt);
       const consumed = this.#database.prepare(`
-        UPDATE approvals SET status = 'consumed', consumed_at = ?
+        UPDATE approvals SET status = 'consumed', consumed_at = ?, active = 0
         WHERE id = ? AND campaign_id = ? AND action_digest = ? AND status = 'approved'
           AND consumed_at IS NULL AND (expires_at IS NULL OR expires_at > ?)
       `).run(consumedAt, record.approvalId, campaignId, record.actionDigest, consumedAt);
@@ -678,8 +713,8 @@ export class SqliteCampaignStore implements CampaignStore {
     const issuedAt = normalizeTimestamp(approval.issuedAt, "approval issuedAt");
     const expiresAt = approval.expiresAt === undefined ? null : normalizeTimestamp(approval.expiresAt, "approval expiry");
     const consumedAt = approval.consumedAt === undefined ? null : normalizeTimestamp(approval.consumedAt, "approval consumedAt");
-    this.#database.prepare(`INSERT INTO approvals (id, campaign_id, action, action_digest, status, issued_at, expires_at, consumed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(approval.id, approval.campaignId, approval.action, approval.actionDigest, approval.status, issuedAt, expiresAt, consumedAt);
+    this.#database.prepare(`INSERT INTO approvals (id, campaign_id, action, action_digest, status, issued_at, expires_at, consumed_at, active) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(approval.id, approval.campaignId, approval.action, approval.actionDigest, approval.status, issuedAt, expiresAt, consumedAt, approval.status === "approved" ? 1 : 0);
   }
 
   #requiredExternalActionClaim(campaignId: string, claimId: string, status: ExternalActionClaim["status"]): ExternalActionClaim {

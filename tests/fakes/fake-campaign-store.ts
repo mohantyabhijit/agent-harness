@@ -17,6 +17,8 @@ import {
   type ExternalActionStaleRecoveryRecord,
   type ExternalReference,
 } from "../../src/application/ports/campaign-store.js";
+import { currentApprovalProposal } from "../../src/application/approval-proposal.js";
+import { issueApproval as issueDomainApproval } from "../../src/domain/approval.js";
 import { externalActionDigest, isPullRequest, validateExternalActionPayload } from "../../src/application/external-action.js";
 import {
   consumeApproval as consumeDomainApproval,
@@ -163,10 +165,18 @@ export class FakeCampaignStore implements CampaignStore {
       if (replay === undefined || replay.action !== record.approval.action || replay.actionDigest !== record.approval.actionDigest) throw new ApprovalIssuanceConflict();
       return structuredClone(replay);
     }
-    if (snapshot.approvals.some(({ actionDigest, status }) => actionDigest === record.approval.actionDigest && status === "approved")) throw new ApprovalIssuanceConflict();
+    if (snapshot.approvals.some(({ actionDigest, status, expiresAt }) => actionDigest === record.approval.actionDigest && status === "approved" && (expiresAt === undefined || Date.parse(expiresAt) > Date.parse(record.approval.issuedAt)))) throw new ApprovalIssuanceConflict();
     await this.recordApproval(record.approval);
     this.#approvalKeys.set(mapKey, record.approval.id);
     return structuredClone(record.approval);
+  }
+
+  async issueApprovalForProposal(record: import("../../src/application/ports/campaign-store.js").ProposalApprovalIssuanceRecord): Promise<Approval> {
+    const snapshot = this.#required(record.campaignId);
+    const proposal = currentApprovalProposal(cloneSnapshot(snapshot));
+    if (proposal === null || proposal.proposalId !== record.proposalId || proposal.actionDigest !== record.actionDigest || proposal.expectedCampaignVersion !== record.expectedVersion) throw new ApprovalIssuanceConflict();
+    const approval = issueDomainApproval({ id: record.approvalId, campaignId: record.campaignId, action: proposal.payload.action, actionDigest: proposal.actionDigest, issuedAt: record.issuedAt, expiresAt: record.expiresAt });
+    return this.issueApproval({ approval, idempotencyKey: record.idempotencyKey });
   }
 
   /** @deprecated Test compatibility only; orchestration claims through claimExternalAction. */

@@ -3,7 +3,7 @@
   "instructions": "You are OpenQuest. Follow the openquest skill for every contribution campaign.",
   "mcp_servers": [{
     "name": "github",
-    "enable_tools": ["@all"],
+    "enable_tools": ["@read-only"],
     "disable_tools": [],
     "preload_tools": [],
     "require_approval_for_tools": ["@write", "@destructive"],
