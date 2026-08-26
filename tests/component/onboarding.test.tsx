@@ -40,6 +40,7 @@ describe("OnboardingPage", () => {
 
     const space = await screen.findByRole("checkbox", { name: /developer tools/i });
     fireEvent.keyDown(space, { key: " " });
+    expect(window.location.search).toBe("?spaces=developer_tools");
     fireEvent.keyDown(space, { key: " " });
     fireEvent.keyDown(space, { key: " " });
     fireEvent.click(screen.getByRole("button", { name: /continue/i }));

@@ -1,112 +1,39 @@
+import { z } from "zod";
 import type { Campaign } from "../domain/campaign.js";
 import type { DiscoveredRepository } from "../application/discover.js";
-import type { IssueCandidate, Space } from "../domain/discovery.js";
+import { spaces, type IssueCandidate, type Space } from "../domain/discovery.js";
 
-export interface SpaceOption {
-  readonly id: Space;
-  readonly name: string;
-  readonly description: string;
-}
-
-export interface CreateCampaignRequest {
-  readonly repository: string;
-  readonly issueNumber: number;
-  readonly issueUrl: string;
-  readonly lane: "easy_win" | "long_term";
-}
-
-export interface OpenQuestApi {
-  getSpaces(): Promise<readonly SpaceOption[]>;
-  discoverRepositories(spaces: readonly Space[]): Promise<readonly DiscoveredRepository[]>;
-  getIssues(repository: string): Promise<readonly IssueCandidate[]>;
-  createCampaign(input: CreateCampaignRequest): Promise<Pick<Campaign, "id">>;
-}
-
+export interface SpaceOption { readonly id: Space; readonly name: string; readonly description: string; }
+export interface CreateCampaignRequest { readonly repository: string; readonly issueNumber: number; readonly issueUrl: string; readonly lane: "easy_win" | "long_term"; }
+export interface OpenQuestApi { getSpaces(signal?: AbortSignal): Promise<readonly SpaceOption[]>; discoverRepositories(spaces: readonly Space[], signal?: AbortSignal): Promise<readonly DiscoveredRepository[]>; getIssues(repository: string, signal?: AbortSignal): Promise<readonly IssueCandidate[]>; createCampaign(input: CreateCampaignRequest, signal?: AbortSignal): Promise<Pick<Campaign, "id">>; }
 export type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+export interface OpenQuestApiOptions { readonly fetch: FetchLike; readonly baseUrl?: string; readonly operatorCapability?: () => string | undefined; }
+export class OpenQuestApiError extends Error { constructor(message: string, readonly status?: number) { super(message); this.name = "OpenQuestApiError"; } }
 
-export interface OpenQuestApiOptions {
-  readonly fetch: FetchLike;
-  readonly baseUrl?: string;
-  readonly operatorCapability?: () => string | undefined;
-}
-
-export class OpenQuestApiError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "OpenQuestApiError";
-  }
-}
+const metadata: Readonly<Record<Space, Omit<SpaceOption, "id">>> = {
+  ai_ml: { name: "AI & machine learning", description: "Learn from, build, and maintain intelligent systems." }, developer_tools: { name: "Developer tools", description: "Build the tools developers rely on." }, web: { name: "Web", description: "Shape the open web." }, mobile: { name: "Mobile", description: "Make thoughtful experiences travel." }, data: { name: "Data", description: "Turn data into useful public infrastructure." }, infrastructure: { name: "Infrastructure", description: "Keep essential systems dependable." }, security: { name: "Security", description: "Help open software stay safer." }, science: { name: "Science", description: "Support research that everyone can inspect." }, social_impact: { name: "Social impact", description: "Build technology that broadens access." },
+};
+const finite = z.number(); const rate = finite.min(0).max(1); const text = z.string().trim().min(1).max(2_000); const repositoryName = z.string().regex(/^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/u); const githubUrl = z.url().refine(github, "github HTTPS URL");
+const evidence = z.object({ id: z.string().trim().min(1).max(200), sourceUrl: githubUrl, retrievedAt: z.iso.datetime({ offset: true }), observation: text, kind: z.enum(["direct", "inference"]) }).strict();
+const signals = z.object({ stars: finite.int().nonnegative().max(2_000_000_000), recentActivity: rate, contributionGuide: z.boolean(), ciHealthy: z.boolean(), externalPrAcceptance: rate, topicMatch: rate, maintainerResponse: rate }).strict();
+const repository = z.object({ fullName: repositoryName, url: githubUrl, description: z.string().max(2_000), spaces: z.array(z.enum(spaces)).min(1).max(spaces.length), license: z.string().trim().min(1).max(100).nullable(), isPublic: z.literal(true), signals, evidence: z.array(evidence).min(1).max(100) }).strict().superRefine((item, ctx) => { if (!repoUrl(item.url, item.fullName) || item.evidence.some((entry) => !repoEvidence(entry.sourceUrl, item.fullName))) ctx.addIssue({ code: "custom", message: "Repository identity mismatch" }); });
+const discovered = z.object({ repository, score: rate, explanation: z.object({ inputSignals: signals, weightedContributions: z.array(z.object({ signal: z.string().max(100), weight: rate, value: rate, contribution: rate }).strict()).max(20), evidence: z.array(evidence).min(1).max(100), sourceUrls: z.array(githubUrl).min(1).max(100), retrievedAt: z.array(z.iso.datetime({ offset: true })).min(1).max(100) }).strict() }).strict();
+const issue = z.object({ repository: repositoryName, number: finite.int().positive().max(2_000_000_000), title: text, url: githubUrl, clarity: rate, affectedAreas: finite.int().nonnegative().max(10_000), testComplexity: rate, dependencyRisk: rate, estimatedHours: finite.nonnegative().max(100_000), maintainerSignals: z.array(text).max(50) }).strict().superRefine((item, ctx) => { if (!issueUrl(item.url, item.repository, item.number)) ctx.addIssue({ code: "custom", message: "Issue identity mismatch" }); });
 
 export function createOpenQuestApi(options: OpenQuestApiOptions): OpenQuestApi {
   const baseUrl = options.baseUrl ?? "";
-
   return {
-    async getSpaces() {
-      const body = await request(options.fetch, `${baseUrl}/api/spaces`);
-      return readArrayProperty(body, "spaces", "Spaces could not be loaded") as readonly SpaceOption[];
-    },
-    async discoverRepositories(selectedSpaces) {
-      const uniqueSpaces = [...new Set(selectedSpaces)];
-      const body = await request(options.fetch, `${baseUrl}/api/discovery/repositories`, {
-        method: "POST",
-        headers: writeHeaders(options.operatorCapability),
-        body: JSON.stringify({ spaces: uniqueSpaces }),
-      });
-      return readArrayProperty(body, "repositories", "Recommendations could not be loaded") as readonly DiscoveredRepository[];
-    },
-    async getIssues(repository) {
-      const [owner, repo] = repository.split("/");
-      if (owner === undefined || repo === undefined || repository.split("/").length !== 2) {
-        throw new OpenQuestApiError("Issues could not be loaded");
-      }
-      const body = await request(
-        options.fetch,
-        `${baseUrl}/api/discovery/repositories/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues`,
-      );
-      return readArrayProperty(body, "issues", "Issues could not be loaded") as readonly IssueCandidate[];
-    },
-    async createCampaign(input) {
-      const body = await request(options.fetch, `${baseUrl}/api/campaigns`, {
-        method: "POST",
-        headers: writeHeaders(options.operatorCapability),
-        body: JSON.stringify(input),
-      });
-      if (!isRecord(body) || typeof body.id !== "string" || body.id.trim() === "") {
-        throw new OpenQuestApiError("Campaign could not be started");
-      }
-      return { id: body.id };
-    },
+    async getSpaces(signal) { const body = await request(options.fetch, `${baseUrl}/api/spaces`, withSignal({}, signal)); const ids = parsed(z.object({ spaces: z.array(z.enum(spaces)).min(1).max(spaces.length) }).strict(), body, "Spaces could not be loaded").spaces; if (new Set(ids).size !== ids.length) throw new OpenQuestApiError("Spaces could not be loaded"); return ids.map((id) => ({ id, ...metadata[id] })); },
+    async discoverRepositories(selected, signal) { const body = await request(options.fetch, `${baseUrl}/api/discovery/repositories`, withSignal({ method: "POST", headers: headers(options.operatorCapability), body: JSON.stringify({ spaces: [...new Set(selected)] }) }, signal)); return parsed(z.object({ repositories: z.array(discovered).max(100) }).strict(), body, "Recommendations could not be loaded").repositories as readonly DiscoveredRepository[]; },
+    async getIssues(name, signal) { const [owner, repo, extra] = name.split("/"); if (owner === undefined || repo === undefined || extra !== undefined || !repositoryName.safeParse(name).success) throw new OpenQuestApiError("Issues could not be loaded"); const body = await request(options.fetch, `${baseUrl}/api/discovery/repositories/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues`, withSignal({}, signal)); const values = parsed(z.object({ issues: z.array(issue).max(200) }).strict(), body, "Issues could not be loaded").issues; if (values.some((value) => value.repository !== name)) throw new OpenQuestApiError("Issues could not be loaded"); return values; },
+    async createCampaign(input, signal) { const body = await request(options.fetch, `${baseUrl}/api/campaigns`, withSignal({ method: "POST", headers: headers(options.operatorCapability), body: JSON.stringify(input) }, signal)); return parsed(z.looseObject({ id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u) }), body, "Campaign could not be started"); },
   };
 }
-
-async function request(fetcher: FetchLike, url: string, init?: RequestInit): Promise<unknown> {
-  let response: Response;
-  try {
-    response = await fetcher(url, init);
-  } catch {
-    throw new OpenQuestApiError("OpenQuest is unavailable. Please try again.");
-  }
-  if (!response.ok) throw new OpenQuestApiError("OpenQuest could not complete that request. Please try again.");
-  try {
-    return await response.json() as unknown;
-  } catch {
-    throw new OpenQuestApiError("OpenQuest returned an invalid response. Please try again.");
-  }
-}
-
-function writeHeaders(capabilityProvider: OpenQuestApiOptions["operatorCapability"]): HeadersInit {
-  const capability = capabilityProvider?.();
-  if (capability === undefined || capability.trim() === "") {
-    throw new OpenQuestApiError("An operator capability is required to start a campaign.");
-  }
-  return { "content-type": "application/json", authorization: `Bearer ${capability}` };
-}
-
-function readArrayProperty(value: unknown, key: string, message: string): readonly unknown[] {
-  if (!isRecord(value) || !Array.isArray(value[key])) throw new OpenQuestApiError(message);
-  return value[key];
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
+async function request(fetcher: FetchLike, url: string, init: RequestInit): Promise<unknown> { let response: Response; try { response = await fetcher(url, init); } catch (error) { if (error instanceof DOMException && error.name === "AbortError") throw error; throw new OpenQuestApiError("OpenQuest is unavailable. Please try again."); } if (!response.ok) throw new OpenQuestApiError(response.status === 409 ? "This issue may already have a campaign." : "OpenQuest could not complete that request. Please try again.", response.status); try { return await response.json() as unknown; } catch { throw new OpenQuestApiError("OpenQuest returned an invalid response. Please try again."); } }
+function headers(provider: OpenQuestApiOptions["operatorCapability"]): HeadersInit { const value = provider?.(); if (value === undefined || value.trim() === "") throw new OpenQuestApiError("Connect an operator capability before starting discovery."); return { "content-type": "application/json", authorization: `Bearer ${value}` }; }
+function withSignal(init: RequestInit, signal: AbortSignal | undefined): RequestInit { return signal === undefined ? init : { ...init, signal }; }
+function parsed<T>(schema: z.ZodType<T>, body: unknown, message: string): T { const result = schema.safeParse(body); if (!result.success) throw new OpenQuestApiError(message); return result.data; }
+function github(value: string): boolean { try { const url = new URL(value); return url.protocol === "https:" && url.hostname === "github.com" && url.username === "" && url.password === "" && url.port === "" && url.search === "" && url.hash === ""; } catch { return false; } }
+function repoUrl(value: string, name: string): boolean { try { return new URL(value).pathname === `/${name}`; } catch { return false; } }
+function repoEvidence(value: string, name: string): boolean { try { return new URL(value).pathname.split("/").slice(1, 3).join("/") === name; } catch { return false; } }
+function issueUrl(value: string, name: string, number: number): boolean { try { return new URL(value).pathname === `/${name}/issues/${String(number)}`; } catch { return false; } }

@@ -39,6 +39,9 @@ export function OnboardingPage({ api, navigate }: OnboardingPageProps) {
       const next = new Set(selected);
       if (next.has(space)) next.delete(space);
       else next.add(space);
+      const ordered = availableSpaces.map(({ id }) => id).filter((id) => next.has(id));
+      const query = ordered.length === 0 ? "" : `?${new URLSearchParams({ spaces: ordered.join(",") }).toString()}`;
+      window.history.replaceState({}, "", `/${query}`);
       return next;
     });
   };
@@ -46,7 +49,6 @@ export function OnboardingPage({ api, navigate }: OnboardingPageProps) {
     const selected = availableSpaces.map(({ id }) => id).filter((id) => selectedSpaces.has(id));
     const query = new URLSearchParams({ spaces: selected.join(",") });
     const destination = `/discover?${query.toString()}`;
-    window.history.replaceState({}, "", destination);
     navigate(destination);
   };
 
@@ -55,7 +57,7 @@ export function OnboardingPage({ api, navigate }: OnboardingPageProps) {
       <section className="onboarding-hero" aria-labelledby="onboarding-title">
         <p className="wordmark">OPENQUEST</p>
         <p className="eyebrow">Your contribution mixtape</p>
-        <h1 id="onboarding-title">What kind of open source pulls you in?</h1>
+        <h1 id="onboarding-title" tabIndex={-1}>What kind of open source pulls you in?</h1>
         <p>Choose as many spaces as you like. We will match recognition with the evidence that a project welcomes new contributors.</p>
       </section>
       {status === "loading" ? <p aria-live="polite">Loading open-source spaces…</p> : null}

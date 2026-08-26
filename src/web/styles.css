@@ -20,6 +20,7 @@ p { color: #d2cee2; line-height: 1.55; }
 .space-grid legend { grid-column: 1 / -1; margin-bottom: .75rem; color: #fff; font-weight: 700; }
 .space-card { position: relative; display: flex; min-height: 10.5rem; gap: .8rem; overflow: hidden; padding: 1.1rem; border: 1px solid #40365b; border-radius: 1.2rem; background: linear-gradient(145deg, #24203a, #171326); cursor: pointer; transition: border-color .18s ease, transform .18s ease, background .18s ease; }
 .space-card:hover { border-color: #a770de; transform: translateY(-.15rem); }
+.space-card:has(.space-card__input:focus-visible) { outline: .2rem solid #9ff29c; outline-offset: .22rem; }
 .space-card.is-selected { border-color: #9ff29c; background: linear-gradient(145deg, #284241, #192a30); }
 .space-card__input { position: absolute; opacity: 0; inset: 0; cursor: pointer; }
 .space-card__check { display: grid; flex: 0 0 1.7rem; width: 1.7rem; height: 1.7rem; place-items: center; border: 1px solid #82799e; border-radius: 50%; color: #10101a; background: #f8f7ff; font-weight: 800; }
@@ -49,7 +50,9 @@ dd { margin: .2rem 0 0; color: #fff; font-weight: 650; }
 .evidence-details li { margin: .55rem 0; line-height: 1.45; }
 .freshness { margin: .9rem 0 0; color: #b9b1ca; font-size: .82rem; }
 .lane { margin-top: 2.5rem; padding-top: .2rem; border-top: 1px solid #3e3555; }
-.issue-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(19rem, 1fr)); gap: 1rem; }
+.issue-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 19rem), 1fr)); gap: 1rem; }
+.repository-card, .issue-card, .space-card, .evidence-details li { overflow-wrap: anywhere; }
+.disconnect { position: fixed; top: 1rem; right: 1rem; z-index: 2; border: 1px solid #82799e; border-radius: 999px; padding: .45rem .75rem; color: #fff; background: #201a31; }
 .partial-warning, .campaign-error { padding: .8rem 1rem; border-left: .25rem solid #f2b0ff; background: #2c203c; }
 @media (max-width: 44rem) { .space-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 31rem) { .space-grid, .signal-grid, .issue-signals { grid-template-columns: 1fr; } .space-card { min-height: 8rem; } .onboarding-shell, .discover-shell { padding-top: 1.5rem; } }
