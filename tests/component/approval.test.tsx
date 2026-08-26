@@ -269,6 +269,49 @@ describe("Campaign approval", () => {
     expect(screen.getByRole("button", { name: /approve scoped pull request/i })).toBeEnabled();
   });
 
+  it("expires POST optimism and bounds abort-ignoring authoritative refreshes", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date("2026-08-26T00:00:00Z"));
+    const postApproval = { id: "approval-post-timeout", action: "create_pr" as const, actionDigest: proposal.actionDigest, status: "approved" as const, issuedAt: "2026-08-26T00:00:00Z", expiresAt: "2026-08-26T00:00:01Z", proposalId: proposal.proposalId, expectedCampaignVersion: 7, isActive: true };
+    const lateApproval = { ...postApproval, expiresAt: "2026-08-26T00:10:00Z" };
+    let resolveLateRefresh!: (value: CampaignSnapshot) => void;
+    let firstRefreshSignal: AbortSignal | undefined;
+    let retrySignal: AbortSignal | undefined;
+    let reads = 0;
+    const getCampaign = vi.fn<OpenQuestApi["getCampaign"]>(async (_campaignId, signal) => {
+      reads += 1;
+      if (reads === 1) return snapshot;
+      if (reads === 2) return new Promise<CampaignSnapshot>((resolve) => { firstRefreshSignal = signal; resolveLateRefresh = resolve; });
+      return new Promise<CampaignSnapshot>(() => { retrySignal = signal; });
+    });
+    render(<CampaignPage api={{ getCampaign, issueApproval: async () => postApproval }} campaignId="campaign-1" createIdempotencyKey={() => "approval-refresh-timeout"} />);
+    await screen.findByText(payload.title);
+    fireEvent.click(screen.getByRole("checkbox", { name: /reviewed every field/i }));
+    fireEvent.click(screen.getByRole("button", { name: /approve scoped pull request/i }));
+
+    expect(await screen.findByRole("button", { name: /scoped proposal approved/i })).toBeDisabled();
+    await waitFor(() => { expect(getCampaign).toHaveBeenCalledTimes(2); });
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(firstRefreshSignal?.aborted).toBe(true);
+    const retry = await screen.findByRole("button", { name: /retry campaign refresh/i });
+    expect(retry).toBeEnabled();
+    expect(screen.queryByRole("button", { name: /scoped proposal approved/i })).not.toBeInTheDocument();
+
+    resolveLateRefresh({ ...snapshot, approvals: [lateApproval] });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(screen.getByRole("button", { name: /retry campaign refresh/i })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: /scoped proposal approved/i })).not.toBeInTheDocument();
+
+    fireEvent.click(retry);
+    await waitFor(() => { expect(getCampaign).toHaveBeenCalledTimes(3); });
+    expect(retrySignal).not.toBe(firstRefreshSignal);
+    expect(retrySignal?.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(retrySignal?.aborted).toBe(true);
+    expect(await screen.findByRole("button", { name: /retry campaign refresh/i })).toBeEnabled();
+  });
+
   it.each([
     ["inactive", { approvals: [{ id: "approval-inactive", action: "create_pr" as const, actionDigest: proposal.actionDigest, status: "approved" as const, issuedAt: "2026-08-26T00:10:00Z", proposalId: proposal.proposalId, expectedCampaignVersion: 7, isActive: false }] }],
     ["expired", { approvals: [{ id: "approval-expired", action: "create_pr" as const, actionDigest: proposal.actionDigest, status: "approved" as const, issuedAt: "2026-08-26T00:00:00Z", expiresAt: "2026-08-26T00:10:00Z", proposalId: proposal.proposalId, expectedCampaignVersion: 7, isActive: false }] }],

@@ -16,6 +16,9 @@ interface CampaignPageProps {
 
 type RefreshReason = Readonly<{ kind: "initial" }> | Readonly<{ kind: "post" }> | Readonly<{ kind: "expiry"; key: string }>;
 type RefreshState = Readonly<{ routeIdentity: object; status: "pending" | "failure"; reason: Exclude<RefreshReason, { kind: "initial" }> }>;
+type ApprovedProposal = Readonly<{ routeIdentity: object; proposalId: string; digest: string; expectedVersion: number; expiresAt: string | undefined }>;
+
+const REFRESH_DEADLINE_MS = 10_000;
 
 export function CampaignPage({ api, campaignId, createIdempotencyKey = defaultIdempotencyKey, trueForgeBaseUrl }: CampaignPageProps) {
   const routeIdentity = useMemo(() => ({ campaignId }), [campaignId]);
@@ -24,8 +27,9 @@ export function CampaignPage({ api, campaignId, createIdempotencyKey = defaultId
   const [approvalError, setApprovalError] = useState<{ readonly routeIdentity: object; readonly message: string }>();
   const [refreshState, setRefreshState] = useState<RefreshState>();
   const [submittingRoute, setSubmittingRoute] = useState<object>();
-  const [approvedProposal, setApprovedProposal] = useState<{ readonly routeIdentity: object; readonly proposalId: string; readonly digest: string; readonly expectedVersion: number }>();
+  const [approvedProposal, setApprovedProposal] = useState<ApprovedProposal>();
   const campaignController = useRef<AbortController | undefined>(undefined);
+  const campaignDeadline = useRef<{ readonly controller: AbortController; readonly timer: ReturnType<typeof globalThis.setTimeout> } | undefined>(undefined);
   const approvalController = useRef<AbortController | undefined>(undefined);
   const approvalLocked = useRef(false);
   const routeEpoch = useRef(0);
@@ -34,13 +38,44 @@ export function CampaignPage({ api, campaignId, createIdempotencyKey = defaultId
   const refreshedExpiries = useRef(new Set<string>());
   const heading = useRef<HTMLHeadingElement>(null);
 
-  const loadCampaign = useCallback((reason: RefreshReason = { kind: "initial" }) => {
+  const clearCampaignDeadline = useCallback((controller?: AbortController) => {
+    const deadline = campaignDeadline.current;
+    if (deadline === undefined || (controller !== undefined && deadline.controller !== controller)) return;
+    globalThis.clearTimeout(deadline.timer);
+    campaignDeadline.current = undefined;
+  }, []);
+
+  const cancelCampaignRead = useCallback(() => {
+    clearCampaignDeadline();
     campaignController.current?.abort();
+    campaignController.current = undefined;
+  }, [clearCampaignDeadline]);
+
+  const loadCampaign = useCallback((reason: RefreshReason = { kind: "initial" }, authorityExpiresAt?: string) => {
+    cancelCampaignRead();
     const controller = new AbortController();
     campaignController.current = controller;
     const epoch = routeEpoch.current;
     const sequence = ++readSequence.current;
+    const finish = () => {
+      clearCampaignDeadline(controller);
+      if (campaignController.current === controller) campaignController.current = undefined;
+    };
+    if (reason.kind !== "initial") {
+      const expiry = authorityExpiresAt === undefined ? Number.NaN : Date.parse(authorityExpiresAt);
+      const untilExpiry = Number.isFinite(expiry) ? Math.max(0, expiry - Date.now()) : REFRESH_DEADLINE_MS;
+      const timer = globalThis.setTimeout(() => {
+        if (campaignController.current !== controller || routeEpoch.current !== epoch || readSequence.current !== sequence) return;
+        clearCampaignDeadline(controller);
+        campaignController.current = undefined;
+        controller.abort();
+        setApprovedProposal(undefined);
+        setRefreshState({ routeIdentity, status: "failure", reason });
+      }, Math.min(REFRESH_DEADLINE_MS, untilExpiry));
+      campaignDeadline.current = { controller, timer };
+    }
     void api.getCampaign(campaignId, controller.signal).then((loaded) => {
+      finish();
       if (!controller.signal.aborted && routeEpoch.current === epoch && readSequence.current === sequence) {
         if (reason.kind === "expiry") refreshedExpiries.current.add(reason.key);
         setApprovalError((current) => current?.routeIdentity === routeIdentity ? undefined : current);
@@ -50,17 +85,18 @@ export function CampaignPage({ api, campaignId, createIdempotencyKey = defaultId
         setCampaign(loaded);
       }
     }).catch((error: unknown) => {
-      if (!isAbort(error) && routeEpoch.current === epoch && readSequence.current === sequence) {
+      finish();
+      if (!controller.signal.aborted && !isAbort(error) && routeEpoch.current === epoch && readSequence.current === sequence) {
         setApprovedProposal(undefined);
         if (reason.kind === "initial") setError({ campaignId, message: "Campaign facts could not be loaded. Please try again." });
         else setRefreshState({ routeIdentity, status: "failure", reason });
       }
     });
-  }, [api, campaignId, routeIdentity]);
+  }, [api, campaignId, cancelCampaignRead, clearCampaignDeadline, routeIdentity]);
 
-  const refreshCampaign = useCallback((reason: RefreshState["reason"]) => {
+  const refreshCampaign = useCallback((reason: RefreshState["reason"], authorityExpiresAt?: string) => {
     setRefreshState({ routeIdentity, status: "pending", reason });
-    loadCampaign(reason);
+    loadCampaign(reason, authorityExpiresAt);
   }, [loadCampaign, routeIdentity]);
 
   useEffect(() => {
@@ -75,13 +111,12 @@ export function CampaignPage({ api, campaignId, createIdempotencyKey = defaultId
     return () => {
       routeEpoch.current += 1;
       readSequence.current += 1;
-      campaignController.current?.abort();
-      campaignController.current = undefined;
+      cancelCampaignRead();
       approvalController.current?.abort();
       approvalController.current = undefined;
       approvalLocked.current = false;
     };
-  }, [loadCampaign]);
+  }, [cancelCampaignRead, loadCampaign]);
 
   useEffect(() => { if (campaign?.id === campaignId) heading.current?.focus(); }, [campaign?.id, campaignId]);
 
@@ -110,11 +145,11 @@ export function CampaignPage({ api, campaignId, createIdempotencyKey = defaultId
     try { key = createIdempotencyKey(); } catch { setApprovalError({ routeIdentity, message: "A unique approval confirmation could not be created. Please try again." }); setSubmittingRoute(undefined); approvalLocked.current = false; return; }
     void api.issueApproval(campaign.id, confirmation, key, controller.signal).then((approval) => {
       if (!controller.signal.aborted && routeEpoch.current === epoch) {
-        setApprovedProposal(approval.isActive ? { routeIdentity, proposalId: confirmation.proposalId, digest: approval.actionDigest, expectedVersion: confirmation.expectedCampaignVersion } : undefined);
+        setApprovedProposal(isCurrentlyActive(approval) ? { routeIdentity, proposalId: confirmation.proposalId, digest: approval.actionDigest, expectedVersion: confirmation.expectedCampaignVersion, expiresAt: approval.expiresAt } : undefined);
         setSubmittingRoute(undefined);
         const pending = pendingRefresh.current;
         pendingRefresh.current = undefined;
-        refreshCampaign(pending ?? { kind: "post" });
+        refreshCampaign(pending ?? { kind: "post" }, approval.expiresAt);
       }
     }).catch((reason: unknown) => {
       if (!isAbort(reason) && routeEpoch.current === epoch) setApprovalError({ routeIdentity, message: "Scoped approval could not be issued. Campaign state may have changed; reload before retrying." });
@@ -133,7 +168,7 @@ export function CampaignPage({ api, campaignId, createIdempotencyKey = defaultId
   const proposal = campaign.approvalProposal;
   const currentRefresh = refreshState?.routeIdentity === routeIdentity ? refreshState : undefined;
   const alreadyApproved = proposal !== null && (
-    approvedProposal?.routeIdentity === routeIdentity && approvedProposal.proposalId === proposal.proposalId && approvedProposal.digest === proposal.actionDigest && approvedProposal.expectedVersion === proposal.expectedCampaignVersion ||
+    isOptimisticallyActive(approvedProposal) && approvedProposal.routeIdentity === routeIdentity && approvedProposal.proposalId === proposal.proposalId && approvedProposal.digest === proposal.actionDigest && approvedProposal.expectedVersion === proposal.expectedCampaignVersion ||
     campaign.approvals.some((approval) => isCurrentlyActive(approval) && approval.proposalId === proposal.proposalId && approval.actionDigest === proposal.actionDigest && approval.expectedCampaignVersion === proposal.expectedCampaignVersion)
   );
   return <main className="campaign-shell">
@@ -145,3 +180,4 @@ export function CampaignPage({ api, campaignId, createIdempotencyKey = defaultId
 function defaultIdempotencyKey(): string { return `approval-${globalThis.crypto.randomUUID()}`; }
 function isAbort(reason: unknown): boolean { return reason instanceof DOMException && reason.name === "AbortError"; }
 function isCurrentlyActive(approval: CampaignSnapshot["approvals"][number]): boolean { return approval.isActive && (approval.expiresAt === undefined || Date.parse(approval.expiresAt) > Date.now()); }
+function isOptimisticallyActive(approval: ApprovedProposal | undefined): approval is ApprovedProposal { return approval !== undefined && (approval.expiresAt === undefined || Date.parse(approval.expiresAt) > Date.now()); }
