@@ -4,7 +4,7 @@ import type { HarnessPort } from "../../application/ports/harness.js";
 import type { QodoReviewPort } from "../../application/ports/qodo-review.js";
 import type { QodoReviewBatch, SyncReview } from "../../application/sync-review.js";
 import { isPullRequest } from "../../application/external-action.js";
-import { parseQodoReviewBatch } from "../../application/qodo-review-batch.js";
+import { HarnessUnavailable } from "../../application/ports/harness.js";
 
 /** Compatibility seam for injected legacy sources; production uses QodoReviewPort. */
 export interface QodoReviewSource {
@@ -20,6 +20,12 @@ export interface QodoReviewJob {
   start(): void;
   stop(): Promise<void>;
   tick(): Promise<void>;
+  health(): QodoReviewJobHealth;
+}
+
+export interface QodoReviewJobHealth {
+  readonly status: "ready" | "running" | "degraded";
+  readonly code?: "store_unavailable" | "campaign_retry_pending" | "unexpected_failure";
 }
 
 export interface QodoReviewJobDependencies {
@@ -46,8 +52,16 @@ export function createQodoReviewJob(dependencies: QodoReviewJobDependencies): Qo
   let started = false;
   let activeTick: Promise<void> | undefined;
   let activeController: AbortController | undefined;
+  let health: QodoReviewJobHealth = { status: "ready" };
   const runTick = async (signal: AbortSignal): Promise<void> => {
-    const snapshots = await dependencies.store.listByStatus("qodo_review");
+    let snapshots: readonly CampaignSnapshot[];
+    try {
+      snapshots = await dependencies.store.listByStatus("qodo_review");
+    } catch {
+      health = { status: "degraded", code: "store_unavailable" };
+      return;
+    }
+    let retryPending = false;
     for (const snapshot of snapshots) {
       if (signal.aborted) return;
       try {
@@ -61,15 +75,18 @@ export function createQodoReviewJob(dependencies: QodoReviewJobDependencies): Qo
         if (isAborted(signal)) return;
         if (batch !== undefined) await dependencies.syncReview.execute(snapshot.campaign.id, batch, { signal, timeoutMs: dependencies.shutdownTimeoutMs });
       } catch {
+        retryPending = true;
         // A later tick retries from durable campaign state. The job never
         // logs provider output because it may contain credential material.
       }
     }
+    health = retryPending ? { status: "degraded", code: "campaign_retry_pending" } : { status: "ready" };
   };
   const tick = async (): Promise<void> => {
     if (activeTick !== undefined) return activeTick;
     activeController = new AbortController();
-    activeTick = runTick(activeController.signal);
+    health = { status: "running" };
+    activeTick = runTick(activeController.signal).catch(() => { health = { status: "degraded", code: "unexpected_failure" }; });
     try {
       await activeTick;
     } finally {
@@ -81,7 +98,7 @@ export function createQodoReviewJob(dependencies: QodoReviewJobDependencies): Qo
     start() {
       if (started) return;
       started = true;
-      timer = dependencies.scheduler.setInterval(() => { void tick(); }, dependencies.intervalMs);
+      timer = dependencies.scheduler.setInterval(() => { void tick().catch(() => { health = { status: "degraded", code: "unexpected_failure" }; }); }, dependencies.intervalMs);
     },
     async stop() {
       if (started) {
@@ -100,6 +117,7 @@ export function createQodoReviewJob(dependencies: QodoReviewJobDependencies): Qo
       }
     },
     tick,
+    health: () => ({ ...health }),
   };
 }
 
@@ -109,10 +127,10 @@ export class HarnessQodoReviewSource implements QodoReviewSource {
   constructor(private readonly harness: HarnessPort) {}
 
   async fetch(snapshot: CampaignSnapshot, options: { signal: AbortSignal; timeoutMs: number }): Promise<QodoReviewBatch | undefined> {
-    const pullRequest = singletonReference(snapshot, "pull_request");
-    const commitSha = singletonReference(snapshot, "commit");
-    const result = await this.harness.runChildSession(reviewPacket(snapshot, pullRequest, commitSha), "sync_qodo", options);
-    return parseQodoReviewBatch(result.output);
+    void snapshot;
+    void options;
+    void this.harness;
+    throw new HarnessUnavailable();
   }
 }
 
@@ -158,8 +176,12 @@ async function reviewBatchFromPort(
   );
   return {
     campaignId: snapshot.campaign.id,
+    syncSessionId: review.syncSessionId,
     pullRequest,
     reviewId: review.reviewId,
+    reviewUrl: review.reviewUrl,
+    sourceIdentity: review.sourceIdentity,
+    sourceReceipt: review.sourceReceipt,
     commitSha: review.commitSha,
     testsPassed: review.testsPassed,
     complete: review.complete,

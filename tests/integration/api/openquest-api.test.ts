@@ -193,6 +193,10 @@ describe("OpenQuest API", () => {
     expect((await app.inject({ method: "GET", url: "/api/healthz" })).json()).toEqual({ status: "ok" });
     expect((await app.inject({ method: "GET", url: "/api/spaces" })).json()).toEqual({ spaces });
     await app.close();
+
+    const degraded = buildTestApp({ reviewHealth: () => ({ status: "degraded", code: "store_unavailable" }) }).app;
+    expect((await degraded.inject({ method: "GET", url: "/api/healthz" })).json()).toEqual({ status: "degraded", review: { code: "store_unavailable" } });
+    await degraded.close();
   });
 
   it("strictly validates bounded inputs and maps duplicates and missing campaigns", async () => {
@@ -448,7 +452,7 @@ describe("Qodo review job", () => {
     harness.beforeResult = async () => repairBlocked;
     let closed = false;
     const callsAfterClose: string[] = [];
-    const mutating = new Set(["update", "appendEvent", "recordQodoFinding", "recordChildResult"]);
+    const mutating = new Set(["update", "appendEvent", "recordQodoFinding", "applyQodoReview", "recordChildResult"]);
     const store = new Proxy(innerStore, {
       get(target, property) {
         const value = Reflect.get(target, property, target) as unknown;
@@ -460,7 +464,7 @@ describe("Qodo review job", () => {
       },
     });
     const syncReview = new SyncReview(store, harness, { now: () => "2026-08-26T00:00:00Z" }, { next: (() => { let id = 0; return () => `cancel-${String(++id)}`; })() });
-    const source: QodoReviewSource = { fetch: async () => reviewBatch({ findings: [openHighFinding], complete: false }) };
+    const source: QodoReviewSource = { fetch: async () => reviewBatch({ findings: [openHighFinding], complete: true }) };
     const scheduler: ReviewJobScheduler = { setInterval: () => "timer", clearInterval: () => undefined };
     const job = createQodoReviewJob({ store, source, syncReview, scheduler, intervalMs: 10_000, shutdownTimeoutMs: 20 });
 
@@ -494,7 +498,7 @@ describe("Qodo review job", () => {
     expect(snapshot?.events).toEqual([]);
     expect(snapshot?.qodoFindings).toEqual([]);
     expect(snapshot?.campaign.status).toBe("qodo_review");
-    expect(harness.operations).toEqual(["sync_qodo"]);
+    expect(harness.operations).toEqual([]);
   });
   it("aborts a hung source and stops within its bounded deadline without syncing afterward", async () => {
     const store = new FakeCampaignStore();
@@ -564,7 +568,9 @@ describe("Qodo review job", () => {
 describe("server configuration", () => {
   it("applies safe defaults and rejects an unsafe polling interval", () => {
     const environment = { OPERATOR_BEARER_TOKEN: "operator-A7z!capability-token-0001", REVIEW_PROVIDER_BEARER_TOKEN: "review-B8y@capability-token-000002" };
-    expect(parseConfig(environment)).toEqual({
+    expect(() => parseConfig(environment)).toThrow();
+    const configured = { ...environment, QODO_BOT_IDENTITIES: "qodo-merge-pro[bot]" };
+    expect(parseConfig(configured)).toEqual({
       PORT: 8788,
       DATABASE_PATH: "openquest.sqlite",
       TRUEFORGE_BASE_URL: "http://localhost:8790",
@@ -573,7 +579,7 @@ describe("server configuration", () => {
       QODO_SHUTDOWN_TIMEOUT_MS: 5_000,
       ...environment,
     });
-    expect(() => parseConfig({ ...environment, QODO_POLL_INTERVAL_MS: "9999" })).toThrow();
+    expect(() => parseConfig({ ...configured, QODO_POLL_INTERVAL_MS: "9999" })).toThrow();
     expect(parseConfig({ ...environment, QODO_BOT_IDENTITIES: "qodo-merge-pro[bot],qodo-ai[bot]" }).QODO_BOT_IDENTITIES).toEqual(["qodo-merge-pro[bot]", "qodo-ai[bot]"]);
     expect(() => parseConfig({ ...environment, QODO_BOT_IDENTITIES: "qodo-merge-pro[bot],../../attacker" })).toThrow();
   });
@@ -593,6 +599,7 @@ function buildTestApp(overrides: Partial<AppDependencies> = {}) {
     clock: overrides.clock ?? { now: () => "2026-08-26T00:00:00Z" },
     ids: overrides.ids ?? { next: () => `campaign-${String(++id)}` },
     authorization: overrides.authorization ?? { require: () => undefined },
+    ...(overrides.reviewHealth === undefined ? {} : { reviewHealth: overrides.reviewHealth }),
   };
   return { app: buildApp(dependencies), store, harness };
 }
@@ -600,8 +607,12 @@ function buildTestApp(overrides: Partial<AppDependencies> = {}) {
 function reviewBatch(overrides: Partial<QodoReviewBatch> = {}): QodoReviewBatch {
   return {
     campaignId: "campaign-1",
+    syncSessionId: "authenticated-sync-session-1",
     pullRequest: "https://github.com/owner/repo/pull/7",
     reviewId: "review-1",
+    reviewUrl: "https://github.com/owner/repo/pull/7#pullrequestreview-1",
+    sourceIdentity: "qodo-merge-pro[bot]",
+    sourceReceipt: "authenticated-receipt-1",
     commitSha: "a".repeat(40),
     testsPassed: true,
     complete: true,

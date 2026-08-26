@@ -20,21 +20,28 @@ const findingSchema = z.object({
 
 export const qodoReviewBatchSchema = z.object({
   campaignId: z.string().trim().min(1).max(128),
+  syncSessionId: z.string().trim().min(1).max(512),
   pullRequest: z.string().max(2_048).regex(/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/[1-9][0-9]*$/u),
   reviewId: z.string().trim().min(1).max(128),
+  reviewUrl: z.url().max(2_048).refine(isGitHubReviewUrl, "Invalid authenticated Qodo review URL"),
+  sourceIdentity: z.string().regex(/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:\[bot\])?$/u),
+  sourceReceipt: z.string().trim().min(16).max(512),
   commitSha: z.string().regex(/^[0-9a-f]{40}$/u),
   testsPassed: z.boolean(),
   complete: z.boolean(),
   findings: z.array(findingSchema).max(1_000),
 }).strict().superRefine((value, context) => {
-  if (!value.complete && value.findings.length === 0) context.addIssue({ code: "custom", message: "Incomplete review requires findings" });
   if (new Set(value.findings.map(({ id }) => id)).size !== value.findings.length) context.addIssue({ code: "custom", message: "Finding identifiers must be unique" });
 });
 
 export interface QodoReviewBatch {
   readonly campaignId: string;
+  readonly syncSessionId: string;
   readonly pullRequest: string;
   readonly reviewId: string;
+  readonly reviewUrl: string;
+  readonly sourceIdentity: string;
+  readonly sourceReceipt: string;
   readonly commitSha: string;
   readonly testsPassed: boolean;
   readonly complete: boolean;
@@ -86,6 +93,17 @@ function isGitHubReviewSource(value: string): boolean {
     const url = new URL(value);
     return url.protocol === "https:" && url.hostname === "github.com" && url.username === "" && url.password === "" && url.port === "" && url.search === "" &&
       /^\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/[1-9][0-9]*$/u.test(url.pathname) && /^#discussion_r[1-9][0-9]*$/u.test(url.hash);
+  } catch {
+    return false;
+  }
+}
+
+function isGitHubReviewUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && url.hostname === "github.com" && url.username === "" && url.password === "" &&
+      url.port === "" && url.search === "" && /^\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/[1-9][0-9]*$/u.test(url.pathname) &&
+      /^#pullrequestreview-[1-9][0-9]*$/u.test(url.hash);
   } catch {
     return false;
   }

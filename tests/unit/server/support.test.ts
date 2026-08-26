@@ -37,7 +37,7 @@ function snapshot(): CampaignSnapshot {
 }
 
 describe("public campaign support", () => {
-  it("projects only bounded Qodo source evidence fields", () => {
+  it("keeps raw Qodo body and source location out of the public snapshot", () => {
     const source = snapshot();
     const finding = {
       id: "comment-101", severity: "high" as const, status: "open" as const,
@@ -46,7 +46,7 @@ describe("public campaign support", () => {
     };
 
     expect(publicCampaignSnapshot({ ...source, qodoFindings: [finding] }, Date.parse("2026-08-26T00:10:00Z"))).toMatchObject({
-      qodoFindings: [finding],
+      qodoFindings: [{ id: "comment-101", severity: "high", status: "open", summary: "Unsafe retry", sourceUrl: finding.sourceUrl }],
     });
     const invalid = { ...finding, path: "../secret", line: 0, body: "x".repeat(20_001) };
     const invalidProjection = publicCampaignSnapshot({ ...source, qodoFindings: [invalid] }, Date.parse("2026-08-26T00:10:00Z"));

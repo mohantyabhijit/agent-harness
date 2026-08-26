@@ -1,7 +1,11 @@
 {
+  "schemaVersion": "qodo_github_review_v1",
   "repository": "owner/repo",
   "pullRequestNumber": 7,
   "reviewId": "qodo-review-subjective-1",
+  "reviewUrl": "https://github.com/owner/repo/pull/7#pullrequestreview-103",
+  "sourceIdentity": "qodo-merge-pro[bot]",
+  "sourceReceipt": "github-app-receipt-subjective-103",
   "commitSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
   "testsPassed": true,
   "complete": true,

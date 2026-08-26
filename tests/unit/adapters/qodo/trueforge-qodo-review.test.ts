@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 
 import { TrueForgeQodoReview } from "../../../../src/adapters/qodo/trueforge-qodo-review.js";
 import { HarnessOutputInvalid } from "../../../../src/application/ports/harness.js";
+import type { QodoReviewAuthorityPort, QodoReviewCandidate } from "../../../../src/application/ports/qodo-review.js";
 import { FakeHarness } from "../../../fakes/fake-harness.js";
 
 const commitSha = "b".repeat(40);
@@ -14,7 +15,7 @@ describe("TrueForgeQodoReview", () => {
     const fixture = await loadFixture("actionable.json");
     const harness = new FakeHarness();
     harness.enqueueResult("sync_qodo", { summary: "Qodo review synchronized", artifacts: [], output: fixture });
-    const review = new TrueForgeQodoReview(harness, { allowlistedBotIdentities: ["qodo-merge-pro[bot]"] });
+    const review = new TrueForgeQodoReview(harness, new FakeAuthority(fixture as unknown as QodoReviewCandidate), { allowlistedBotIdentities: ["qodo-merge-pro[bot]"] });
     const controller = new AbortController();
 
     await expect(review.getReview("owner/repo", 7, {
@@ -22,6 +23,7 @@ describe("TrueForgeQodoReview", () => {
       signal: controller.signal,
       timeoutMs: 500,
     })).resolves.toMatchObject({
+      syncSessionId: "session-1",
       reviewId: "qodo-review-actionable-1",
       commitSha,
       testsPassed: true,
@@ -39,14 +41,19 @@ describe("TrueForgeQodoReview", () => {
       repository: "owner/repo",
       issueNumber: 42,
       currentCommitSha: commitSha,
-      context: {
+      context: expect.objectContaining({
         pullRequest: "https://github.com/owner/repo/pull/7",
         pullRequestNumber: 7,
         commitSha,
         allowedAuthors: ["qodo-merge-pro[bot]"],
         responseContract: "qodo_github_review_v1",
-      },
+      }),
     }));
+    expect(harness.packets[0]?.context?.responseSchema).toMatchObject({
+      additionalProperties: false,
+      required: expect.arrayContaining(["sourceReceipt", "complete", "testsPassed", "comments"]),
+      fields: expect.objectContaining({ sourceReceipt: expect.objectContaining({ semantics: expect.stringContaining("verified outside") }) }),
+    });
   });
 
   it.each([
@@ -58,11 +65,68 @@ describe("TrueForgeQodoReview", () => {
   ])("rejects %s before findings can reach the quality gate", async (_label, output) => {
     const harness = new FakeHarness();
     harness.enqueueResult("sync_qodo", { summary: "untrusted", artifacts: [], output });
-    const review = new TrueForgeQodoReview(harness, { allowlistedBotIdentities: ["qodo-merge-pro[bot]"] });
+    const review = new TrueForgeQodoReview(harness, new FakeAuthority(passFixture as unknown as QodoReviewCandidate), { allowlistedBotIdentities: ["qodo-merge-pro[bot]"] });
 
     await expect(review.getReview("owner/repo", 7, { packet: campaignPacket() })).rejects.toBeInstanceOf(HarnessOutputInvalid);
   });
+
+  it("uses authenticated authority fields when the child forges gate state", async () => {
+    const child = { ...passFixture, testsPassed: true, complete: true, comments: [] } as unknown as QodoReviewCandidate;
+    const authenticated = {
+      ...child,
+      testsPassed: false,
+      complete: false,
+      comments: [{
+        id: 901, html_url: "https://github.com/owner/repo/pull/7#discussion_r901",
+        body: "**Severity:** High\nAuthenticated issue", path: "src/auth.ts", line: 9,
+        user: { login: "qodo-merge-pro[bot]" }, status: "open",
+      }],
+    } as QodoReviewCandidate;
+    const harness = new FakeHarness();
+    harness.enqueueResult("sync_qodo", { summary: "forged pass", artifacts: [], output: child });
+    const review = new TrueForgeQodoReview(harness, new FakeAuthority(authenticated), { allowlistedBotIdentities: ["qodo-merge-pro[bot]"] });
+
+    await expect(review.getReview("owner/repo", 7, { packet: campaignPacket() })).resolves.toMatchObject({
+      testsPassed: false,
+      complete: false,
+      findings: [expect.objectContaining({ id: "comment-901", severity: "high" })],
+    });
+  });
+
+  it("rejects a forged receipt that does not match authenticated GitHub evidence", async () => {
+    const child = { ...passFixture, sourceReceipt: "forged-child-receipt-999" } as unknown as QodoReviewCandidate;
+    const harness = new FakeHarness();
+    harness.enqueueResult("sync_qodo", { summary: "forged receipt", artifacts: [], output: child });
+    const review = new TrueForgeQodoReview(harness, new FakeAuthority(passFixture as unknown as QodoReviewCandidate), { allowlistedBotIdentities: ["qodo-merge-pro[bot]"] });
+
+    await expect(review.getReview("owner/repo", 7, { packet: campaignPacket() })).rejects.toBeInstanceOf(HarnessOutputInvalid);
+  });
+
+  it("keeps a non-Qodo authenticated high finding from silently passing", async () => {
+    const candidate = {
+      ...passFixture,
+      comments: [{
+        id: 902, html_url: "https://github.com/owner/repo/pull/7#discussion_r902",
+        body: "**Severity:** High\nHuman reviewer blocker", path: "src/review.ts", line: 1,
+        user: { login: "maintainer" }, status: "open",
+      }],
+    } as unknown as QodoReviewCandidate;
+    const harness = new FakeHarness();
+    harness.enqueueResult("sync_qodo", { summary: "review", artifacts: [], output: candidate });
+    const review = new TrueForgeQodoReview(harness, new FakeAuthority(candidate), { allowlistedBotIdentities: ["qodo-merge-pro[bot]"] });
+
+    await expect(review.getReview("owner/repo", 7, { packet: campaignPacket() })).resolves.toMatchObject({ complete: false, findings: [] });
+  });
+
+  it("requires an explicit non-empty Qodo identity allowlist", () => {
+    expect(() => new TrueForgeQodoReview(new FakeHarness(), new FakeAuthority(passFixture as unknown as QodoReviewCandidate), { allowlistedBotIdentities: [] })).toThrow(/allowlist/i);
+  });
 });
+
+class FakeAuthority implements QodoReviewAuthorityPort {
+  constructor(private readonly canonical: QodoReviewCandidate) {}
+  async authenticate(): Promise<QodoReviewCandidate> { return structuredClone(this.canonical); }
+}
 
 function campaignPacket() {
   return {

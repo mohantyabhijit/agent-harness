@@ -2,7 +2,7 @@ import { z } from "zod";
 
 const capabilityTokenSchema = z.string().min(32).max(512).refine((value) => new Set(value).size >= 12, "Capability token lacks entropy");
 const qodoBotIdentitiesSchema = z.preprocess(
-  (value) => (typeof value === "string" ? value : "qodo-merge-pro[bot]").split(",").map((identity) => identity.trim()),
+  (value) => (typeof value === "string" ? value.split(",").map((identity) => identity.trim()) : value),
   z.array(z.string().regex(/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:\[bot\])?$/u)).min(1).max(20)
     .refine((identities) => new Set(identities.map((identity) => identity.toLocaleLowerCase("en-US"))).size === identities.length, "Qodo bot identities must be unique"),
 );

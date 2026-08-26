@@ -12,13 +12,53 @@ import { FakeHarness } from "../../fakes/fake-harness.js";
 const commitSha = "b".repeat(40);
 
 describe("SyncReview", () => {
+  it("treats every incomplete review, including one with findings, as a durable no-op", async () => {
+    const { syncReview, store, harness } = fixture();
+    await seedReview(store, campaign({ status: "qodo_review", qodoIteration: 1 }));
+
+    await expect(syncReview.execute("campaign-1", reviewBatch({
+      complete: false,
+      testsPassed: true,
+      findings: [openHighFinding],
+    }))).resolves.toMatchObject({ status: "qodo_review", qodoIteration: 1, version: 1 });
+
+    const snapshot = await store.get("campaign-1");
+    expect(snapshot?.events).toEqual([]);
+    expect(snapshot?.qodoFindings).toEqual([]);
+    expect(harness.operations).toEqual([]);
+  });
+
+  it("rolls back campaign, findings, and events when atomic Qodo persistence fails", async () => {
+    const { syncReview, store, harness } = fixture();
+    await seedReview(store, campaign({ status: "qodo_review", qodoIteration: 0 }));
+    store.failNextEvent = true;
+
+    await expect(syncReview.execute("campaign-1", reviewBatch({ findings: [openHighFinding] }))).rejects.toThrow(/atomic/i);
+    const snapshot = await store.get("campaign-1");
+    expect(snapshot?.campaign).toMatchObject({ status: "qodo_review", qodoIteration: 0, version: 1 });
+    expect(snapshot?.qodoFindings).toEqual([]);
+    expect(snapshot?.events).toEqual([]);
+    expect(harness.operations).toEqual([]);
+  });
+
+  it("escalates without repair authority when the child omits verification evidence", async () => {
+    const { syncReview, store, harness } = fixture();
+    await seedReview(store, campaign({ status: "qodo_review", qodoIteration: 0 }));
+    harness.enqueueResult("repair", { summary: "unverified", artifacts: [], output: { status: "completed", commitSha: "c".repeat(40) } });
+
+    await expect(syncReview.execute("campaign-1", reviewBatch({ findings: [openHighFinding] }))).resolves.toMatchObject({ status: "human_escalation" });
+    const snapshot = await store.get("campaign-1");
+    expect(snapshot?.externalReferences).toContainEqual({ kind: "commit", value: commitSha });
+    expect(snapshot?.events.some(({ eventType }) => eventType === "campaign_operation_completed")).toBe(false);
+    expect(snapshot?.events.at(-1)).toMatchObject({ eventType: "repair_execution_failed" });
+  });
   it("does not persist a repair result or failure after cancellation wins a late provider completion", async () => {
     const { syncReview, store, harness } = fixture();
     await seedReview(store, campaign({ status: "qodo_review", qodoIteration: 0 }));
     let release!: () => void;
     harness.beforeResult = async () => new Promise<void>((resolve) => { release = resolve; });
     const controller = new AbortController();
-    const executing = syncReview.execute("campaign-1", reviewBatch({ complete: false, findings: [openHighFinding] }), { signal: controller.signal, timeoutMs: 50 });
+    const executing = syncReview.execute("campaign-1", reviewBatch({ complete: true, findings: [openHighFinding] }), { signal: controller.signal, timeoutMs: 50 });
     await vi.waitFor(() => { expect(harness.operations).toContain("repair"); });
     controller.abort();
     release();
@@ -41,10 +81,17 @@ describe("SyncReview", () => {
   it("starts at most three fresh, review-bound repair sessions", async () => {
     const { syncReview, store, harness } = fixture();
     await seedReview(store, campaign({ status: "qodo_review", qodoIteration: 0 }));
+    let currentCommit = commitSha;
+    const repairCommits = ["c".repeat(40), "d".repeat(40), "e".repeat(40)];
 
     for (let iteration = 1; iteration <= 3; iteration += 1) {
+      const nextCommit = repairCommits[iteration - 1];
+      if (nextCommit === undefined) throw new Error("missing repair commit");
+      harness.enqueueResult("repair", { summary: "repair committed", artifacts: [], output: repairOutput(nextCommit) });
       const repairing = await syncReview.execute("campaign-1", reviewBatch({
         reviewId: `review-${String(iteration)}`,
+        reviewUrl: `https://github.com/owner/repo/pull/7#pullrequestreview-${String(iteration)}`,
+        commitSha: currentCommit,
         findings: [{ ...openHighFinding, summary: `Unsafe retry ${String(iteration)}` }],
       }));
       expect(repairing.status).toBe("repair");
@@ -53,17 +100,28 @@ describe("SyncReview", () => {
       expect(packet?.goal).toContain(`iteration ${String(iteration)}`);
       expect(packet?.context).toMatchObject({
         reviewId: `review-${String(iteration)}`,
-        commitSha,
+        commitSha: currentCommit,
         testsPassed: true,
         externalWritesAllowed: false,
         publicationRequiresFreshUpdatePrApproval: true,
       });
-      const reviewPending = transitionCampaign(repairing, "qodo_review");
-      await store.update(reviewPending, repairing.version);
+      const payload = {
+        action: "update_pr" as const, repository: "owner/repo", issueNumber: 42,
+        pullRequest: "https://github.com/owner/repo/pull/7", branch: "openquest/fix-42",
+        commitSha: nextCommit, body: `Publish repair ${String(iteration)}`,
+      };
+      await issueUpdateProposal(store, `approval-loop-${String(iteration)}`, payload, repairing.version);
+      let actionEvent = 0;
+      const runner = new RunCampaign(store, harness, { now: () => "2026-08-26T00:03:00Z" }, { next: () => `loop-${String(iteration)}-${String(++actionEvent)}` });
+      await runner.executeApprovedExternalAction("campaign-1", { approvalId: `approval-loop-${String(iteration)}`, payload }, async () => undefined);
+      expect((await store.get("campaign-1"))?.campaign).toMatchObject({ status: "qodo_review", qodoIteration: iteration });
+      currentCommit = nextCommit;
     }
 
     const escalated = await syncReview.execute("campaign-1", reviewBatch({
       reviewId: "review-4",
+      reviewUrl: "https://github.com/owner/repo/pull/7#pullrequestreview-4",
+      commitSha: currentCommit,
       findings: [openHighFinding],
     }));
     expect(escalated.status).toBe("human_escalation");
@@ -108,7 +166,6 @@ describe("SyncReview", () => {
     ["cross campaign", reviewBatch({ campaignId: "campaign-other" })],
     ["blank review", reviewBatch({ reviewId: " " })],
     ["noncanonical commit", reviewBatch({ commitSha: "abc123" })],
-    ["incomplete empty", reviewBatch({ complete: false, findings: [] })],
     ["malformed finding", reviewBatch({ findings: [{ ...openHighFinding, severity: "critical" as never }] })],
     ["oversized finding body", reviewBatch({ findings: [{ ...openHighFinding, body: "x".repeat(20_001) }] })],
     ["unsafe finding path", reviewBatch({ findings: [{ ...openHighFinding, path: "../secret" }] })],
@@ -221,7 +278,7 @@ describe("SyncReview", () => {
     const { syncReview, store, harness } = fixture();
     await seedReview(store, campaign({ status: "qodo_review", qodoIteration: 0 }));
     const first = reviewBatch({ reviewId: "review-a", findings: [openHighFinding] });
-    harness.enqueueResult("repair", { summary: "repair committed", artifacts: [], output: { status: "completed", commitSha: nextCommit } });
+    harness.enqueueResult("repair", { summary: "repair committed", artifacts: [], output: repairOutput(nextCommit) });
     const repairing = await syncReview.execute("campaign-1", first);
     await expect(store.replaceCurrentCommit("campaign-1", "d".repeat(40), repairing.version, "repair")).rejects.toThrow(/repair/i);
     expect((await store.get("campaign-1"))?.externalReferences).toContainEqual({ kind: "commit", value: nextCommit });
@@ -244,7 +301,7 @@ describe("SyncReview", () => {
     const paused = new Promise<void>((resolve) => { entered = resolve; });
     const resume = new Promise<void>((resolve) => { release = resolve; });
     harness.beforeResult = async (operation) => { if (operation === "repair") { entered(); await resume; } };
-    harness.enqueueResult("repair", { summary: "repair committed", artifacts: [], output: { status: "completed", commitSha: nextCommit } });
+    harness.enqueueResult("repair", { summary: "repair committed", artifacts: [], output: repairOutput(nextCommit) });
 
     const repairing = syncReview.execute("campaign-1", reviewBatch({ reviewId: "review-race", findings: [openHighFinding] }));
     await paused;
@@ -285,7 +342,7 @@ describe("SyncReview", () => {
     const paused = new Promise<void>((resolve) => { entered = resolve; });
     const resume = new Promise<void>((resolve) => { release = resolve; });
     harness.beforeResult = async (operation) => { if (operation === "repair") { entered(); await resume; } };
-    harness.enqueueResult("repair", { summary: "repair committed", artifacts: [], output: { status: "completed", commitSha: nextCommit } });
+    harness.enqueueResult("repair", { summary: "repair committed", artifacts: [], output: repairOutput(nextCommit) });
     const repairing = syncReview.execute("campaign-1", reviewBatch({ reviewId: "review-race", findings: [openHighFinding] }));
     await paused;
 
@@ -314,7 +371,7 @@ describe("SyncReview", () => {
     const nextCommit = "c".repeat(40);
     const { syncReview, store, harness } = fixture();
     await seedReview(store, campaign({ status: "qodo_review", qodoIteration: 0 }));
-    harness.enqueueResult("repair", { summary: "repair committed", artifacts: [], output: { status: "completed", commitSha: nextCommit } });
+    harness.enqueueResult("repair", { summary: "repair committed", artifacts: [], output: repairOutput(nextCommit) });
     const repairing = await syncReview.execute("campaign-1", reviewBatch({ reviewId: "review-a", findings: [openHighFinding] }));
     const payload = {
       action: "update_pr" as const,
@@ -332,9 +389,8 @@ describe("SyncReview", () => {
     const publishedSnapshot = await store.get("campaign-1");
     if (publishedSnapshot === undefined) throw new Error("missing published repair campaign");
     const published = publishedSnapshot.campaign;
-    expect(published).toMatchObject({ status: "repair", version: repairing.version });
+    expect(published).toMatchObject({ status: "qodo_review", version: repairing.version + 1, qodoIteration: 1 });
     expect((await store.get("campaign-1"))?.externalReferences).toContainEqual({ kind: "commit", value: nextCommit });
-    await store.update(transitionCampaign(published, "qodo_review"), published.version);
     const fixed = { ...openHighFinding, status: "fixed" as const, disposition: "Fixed in approved repair commit" };
     await expect(syncReview.execute("campaign-1", reviewBatch({ reviewId: "review-b", commitSha: nextCommit, findings: [fixed] }))).resolves.toMatchObject({ status: "qodo_review", qodoIteration: 1 });
   });
@@ -343,14 +399,30 @@ describe("SyncReview", () => {
 function reviewBatch(overrides: Partial<QodoReviewBatch> = {}): QodoReviewBatch {
   return {
     campaignId: "campaign-1",
+    syncSessionId: "authenticated-sync-session-1",
     pullRequest: "https://github.com/owner/repo/pull/7",
     reviewId: "review-1",
+    reviewUrl: "https://github.com/owner/repo/pull/7#pullrequestreview-1",
+    sourceIdentity: "qodo-merge-pro[bot]",
+    sourceReceipt: "authenticated-receipt-1",
     commitSha,
     testsPassed: true,
     complete: true,
     findings: [],
     ...overrides,
   };
+}
+
+function repairOutput(commitSha: string) {
+  return {
+    status: "completed",
+    commitSha,
+    verification: {
+      testsPassed: true,
+      commands: ["npm test"],
+      evidence: [{ kind: "direct", sourceUrl: "https://github.com/owner/repo/actions/runs/1", observation: "All tests passed" }],
+    },
+  } as const;
 }
 
 async function seedReview(store: FakeCampaignStore, value: ReturnType<typeof campaign>): Promise<void> {

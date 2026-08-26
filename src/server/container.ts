@@ -6,7 +6,7 @@ import Database from "better-sqlite3";
 import { SqliteCampaignStore } from "../adapters/sqlite/campaign-store.js";
 import { TrueForgeGithubCatalog } from "../adapters/trueforge/github-catalog.js";
 import { TrueForgeHarness } from "../adapters/trueforge/harness.js";
-import { TrueForgeQodoReview } from "../adapters/qodo/trueforge-qodo-review.js";
+import { TrueForgeQodoReview, UnavailableQodoReviewAuthority } from "../adapters/qodo/trueforge-qodo-review.js";
 import { SyncReview } from "../application/sync-review.js";
 import type { AppDependencies } from "./app.js";
 import type { ServerConfig } from "./config.js";
@@ -26,6 +26,18 @@ export function createContainer(config: ServerConfig): ServerContainer {
   const harness = new TrueForgeHarness(client);
   const clock = { now: () => new Date().toISOString() };
   const ids = { next: () => randomUUID() };
+  const scheduler: ReviewJobScheduler = {
+    setInterval: (callback, intervalMs) => setInterval(callback, intervalMs),
+    clearInterval: (handle) => { clearInterval(handle as NodeJS.Timeout); },
+  };
+  const reviewJob: QodoReviewJob = createQodoReviewJob({
+    store,
+    review: new TrueForgeQodoReview(harness, new UnavailableQodoReviewAuthority(), { allowlistedBotIdentities: config.QODO_BOT_IDENTITIES }),
+    syncReview: new SyncReview(store, harness, clock, ids),
+    scheduler,
+    intervalMs: config.QODO_POLL_INTERVAL_MS,
+    shutdownTimeoutMs: config.QODO_SHUTDOWN_TIMEOUT_MS,
+  });
   const dependencies: AppDependencies = {
     store,
     harness,
@@ -33,19 +45,8 @@ export function createContainer(config: ServerConfig): ServerContainer {
     clock,
     ids,
     authorization: bearerAuthorizationPolicy({ operator: config.OPERATOR_BEARER_TOKEN, reviewProvider: config.REVIEW_PROVIDER_BEARER_TOKEN }),
+    reviewHealth: () => reviewJob.health(),
   };
-  const scheduler: ReviewJobScheduler = {
-    setInterval: (callback, intervalMs) => setInterval(callback, intervalMs),
-    clearInterval: (handle) => { clearInterval(handle as NodeJS.Timeout); },
-  };
-  const reviewJob = createQodoReviewJob({
-    store,
-    review: new TrueForgeQodoReview(harness, { allowlistedBotIdentities: config.QODO_BOT_IDENTITIES }),
-    syncReview: new SyncReview(store, harness, clock, ids),
-    scheduler,
-    intervalMs: config.QODO_POLL_INTERVAL_MS,
-    shutdownTimeoutMs: config.QODO_SHUTDOWN_TIMEOUT_MS,
-  });
   return {
     dependencies,
     reviewJob,

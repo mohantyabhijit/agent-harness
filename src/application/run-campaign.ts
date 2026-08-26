@@ -176,7 +176,9 @@ export class RunCampaign {
       const newCommitSha = claimed.payload.action === "push_branch" || claimed.payload.action === "update_pr"
         ? claimed.payload.commitSha
         : undefined;
-      const resultingVersion = snapshot.campaign.version + (newCommitSha !== undefined && newCommitSha !== campaignCurrentCommit(snapshot) ? 1 : 0);
+      const resultingVersion = snapshot.campaign.version + (
+        claimed.payload.action === "update_pr" || (newCommitSha !== undefined && newCommitSha !== campaignCurrentCommit(snapshot)) ? 1 : 0
+      );
       await this.store.completeExternalAction(campaignId, {
         claimId,
         completedAt: this.clock.now(),

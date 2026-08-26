@@ -11,6 +11,7 @@ import { isPullRequest } from "./external-action.js";
 import { parseQodoReviewBatch, type QodoReviewBatch } from "./qodo-review-batch.js";
 import { ApplicationError } from "./errors.js";
 import type { HarnessRequestOptions } from "./ports/harness.js";
+import { z } from "zod";
 
 export type { QodoReviewBatch } from "./qodo-review-batch.js";
 
@@ -60,16 +61,16 @@ export class SyncReview {
       throw new ApplicationError("invalid_transition");
     }
     assertReviewIsCurrent(snapshot, batch);
+    if (!batch.complete) return snapshot.campaign;
 
     const combinedFindings = mergeFindings(snapshot.qodoFindings, batch.findings);
     const gate = evaluateQualityGate({
-      testsPassed: batch.testsPassed && batch.complete,
+      testsPassed: batch.testsPassed,
       iteration: snapshot.campaign.qodoIteration,
       findings: combinedFindings,
     });
     const claimed = claimReview(snapshot.campaign, gate);
-    await this.store.update(claimed.campaign, snapshot.campaign.version);
-    await this.appendReviewEvent(claimed.campaign, "qodo_review_claimed", batch, {
+    const claimedEvent = this.reviewEvent(claimed.campaign, "qodo_review_claimed", batch, {
       outcome: gate.outcome,
       reviewIteration: snapshot.campaign.qodoIteration,
       findings: batch.findings,
@@ -79,39 +80,52 @@ export class SyncReview {
     const changedFindings = batch.findings.filter((finding) =>
       !snapshot.qodoFindings.some((persisted) => equalFinding(persisted, finding)),
     );
-    for (const finding of changedFindings) {
-      await this.store.recordQodoFinding(campaignId, findingIteration, finding);
-      await this.appendReviewEvent(claimed.campaign, "qodo_finding_recorded", batch, {
+    const findingRecords = changedFindings.map((finding) => ({
+      iteration: findingIteration,
+      finding,
+      event: this.reviewEvent(claimed.campaign, "qodo_finding_recorded", batch, {
         iteration: findingIteration,
         finding,
-      });
-    }
+      }),
+    }));
 
+    let outcomeEvent: CampaignEventInput;
     if (gate.outcome === "pass") {
-      await this.appendReviewEvent(claimed.campaign, "quality_gate_passed", batch, {
+      outcomeEvent = this.reviewEvent(claimed.campaign, "quality_gate_passed", batch, {
         iteration: claimed.campaign.qodoIteration,
       });
-      return claimed.campaign;
-    }
-    if (gate.outcome === "escalate") {
-      await this.appendReviewEvent(claimed.campaign, "quality_gate_escalated", batch, {
+    } else if (gate.outcome === "escalate") {
+      outcomeEvent = this.reviewEvent(claimed.campaign, "quality_gate_escalated", batch, {
         iteration: snapshot.campaign.qodoIteration,
         reason: gate.reason,
       });
-      return claimed.campaign;
+    } else {
+      outcomeEvent = this.reviewEvent(claimed.campaign, "quality_gate_repair_requested", batch, {
+        iteration: gate.nextIteration,
+      });
     }
-
-    await this.appendReviewEvent(claimed.campaign, "quality_gate_repair_requested", batch, {
-      iteration: gate.nextIteration,
+    await this.store.applyQodoReview(campaignId, {
+      expectedVersion: snapshot.campaign.version,
+      expectedCommitSha: batch.commitSha,
+      expectedPullRequest: batch.pullRequest,
+      reviewId: batch.reviewId,
+      reviewIteration: snapshot.campaign.qodoIteration,
+      campaign: claimed.campaign,
+      claimedEvent,
+      findings: findingRecords,
+      outcomeEvent,
     });
+    if (gate.outcome !== "repair") return claimed.campaign;
+
     try {
       const result = await this.harness.runChildSession(
         this.repairPacket(snapshot, claimed.campaign, batch, combinedFindings),
         "repair",
         context,
       );
-      const nextCommitSha = repairCommit(result.output);
-      const resultingVersion = claimed.campaign.version + (nextCommitSha !== undefined && nextCommitSha !== batch.commitSha ? 1 : 0);
+      const repair = parseRepairOutput(result.output, batch.commitSha);
+      const nextCommitSha = repair.commitSha;
+      const resultingVersion = claimed.campaign.version + 1;
       if (isCancelled(context)) return claimed.campaign;
       const recordedVersion = await this.store.recordChildResult(campaignId, {
         expectedVersion: claimed.campaign.version,
@@ -127,10 +141,10 @@ export class SyncReview {
           output: result.output,
           resultingCampaignVersion: resultingVersion,
         }),
-        ...(nextCommitSha === undefined ? {} : { newCommitSha: nextCommitSha }),
+        newCommitSha: nextCommitSha,
         operationResult: {
           operation: "repair",
-          currentCommitSha: nextCommitSha ?? batch.commitSha,
+          currentCommitSha: nextCommitSha,
           pullRequest: batch.pullRequest,
           qodoIteration: claimed.campaign.qodoIteration,
         },
@@ -165,7 +179,7 @@ export class SyncReview {
       campaignId: snapshot.campaign.id,
       repository: snapshot.campaign.repository,
       issueNumber: snapshot.campaign.issueNumber,
-      goal: `Repair validated Qodo findings for iteration ${String(claimedCampaign.qodoIteration)}`,
+      goal: `Repair validated Qodo findings for iteration ${String(claimedCampaign.qodoIteration)}. Return only repair_result_v1 after tests pass; never publish or update the pull request.`,
       verifiedEvidence: snapshot.evidence
         .filter(({ kind }) => kind === "direct")
         .map(({ sourceUrl, observation }) => ({ sourceUrl, observation })),
@@ -177,7 +191,10 @@ export class SyncReview {
       currentCommitSha: batch.commitSha,
       context: {
         pullRequest: batch.pullRequest,
+        syncSessionId: batch.syncSessionId,
         reviewId: batch.reviewId,
+        reviewUrl: batch.reviewUrl,
+        sourceIdentity: batch.sourceIdentity,
         commitSha: batch.commitSha,
         testsPassed: batch.testsPassed,
         complete: batch.complete,
@@ -185,6 +202,24 @@ export class SyncReview {
         unresolvedFindings,
         externalWritesAllowed: false,
         publicationRequiresFreshUpdatePrApproval: true,
+        responseContract: "repair_result_v1",
+        responseSchema: {
+          additionalProperties: false,
+          required: ["status", "commitSha", "verification"],
+          fields: {
+            status: { const: "completed" },
+            commitSha: { type: "40-character lowercase Git SHA", semantics: "new local repair commit, different from the reviewed commit" },
+            verification: {
+              additionalProperties: false,
+              required: ["testsPassed", "commands", "evidence"],
+              fields: {
+                testsPassed: { const: true },
+                commands: { type: "non-empty array of exact commands run" },
+                evidence: { type: "non-empty array", item: { additionalProperties: false, required: ["kind", "sourceUrl", "observation"], kind: { const: "direct" } } },
+              },
+            },
+          },
+        },
       },
     };
   }
@@ -210,6 +245,9 @@ export class SyncReview {
       payload: {
         pullRequest: batch.pullRequest,
         reviewId: batch.reviewId,
+        reviewUrl: batch.reviewUrl,
+        sourceIdentity: batch.sourceIdentity,
+        sourceReceipt: batch.sourceReceipt,
         commitSha: batch.commitSha,
         testsPassed: batch.testsPassed,
         complete: batch.complete,
@@ -269,6 +307,8 @@ function assertReviewIsCurrent(snapshot: CampaignSnapshot, batch: QodoReviewBatc
   if (pullRequests.length !== 1 || pullRequests[0] !== batch.pullRequest) {
     throw new ApplicationError("campaign_conflict");
   }
+  if (batch.reviewUrl !== `${batch.pullRequest}#pullrequestreview-${batch.reviewId.replace(/^.*?(\d+)$/u, "$1")}` &&
+    !batch.reviewUrl.startsWith(`${batch.pullRequest}#pullrequestreview-`)) throw new ApplicationError("campaign_conflict");
   if (snapshot.events.some((event) =>
     event.eventType === "qodo_review_claimed" &&
     isRecord(event.payload) &&
@@ -301,10 +341,24 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function repairCommit(output: unknown): string | undefined {
-  if (!isRecord(output) || output.commitSha === undefined) return undefined;
-  if (typeof output.commitSha !== "string" || !/^[0-9a-f]{40}$/u.test(output.commitSha)) throw new Error("Invalid repair commit");
-  return output.commitSha;
+const repairOutputSchema = z.object({
+  status: z.literal("completed"),
+  commitSha: z.string().regex(/^[0-9a-f]{40}$/u),
+  verification: z.object({
+    testsPassed: z.literal(true),
+    commands: z.array(z.string().trim().min(1).max(2_000)).min(1).max(100),
+    evidence: z.array(z.object({
+      kind: z.literal("direct"),
+      sourceUrl: z.url().max(2_048),
+      observation: z.string().trim().min(1).max(2_000),
+    }).strict()).min(1).max(100),
+  }).strict(),
+}).strict();
+
+function parseRepairOutput(output: unknown, previousCommitSha: string): z.infer<typeof repairOutputSchema> {
+  const parsed = repairOutputSchema.parse(output);
+  if (parsed.commitSha === previousCommitSha) throw new Error("Repair did not produce a new verified commit");
+  return parsed;
 }
 
 function isCancelled(context?: HarnessRequestOptions): boolean {

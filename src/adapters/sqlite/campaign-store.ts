@@ -18,6 +18,7 @@ import {
   type ExternalActionReconciliationRecord,
   type ExternalActionStaleRecoveryRecord,
   type ExternalReference,
+  type QodoReviewClaimRecord,
 } from "../../application/ports/campaign-store.js";
 import { currentApprovalProposal } from "../../application/approval-proposal.js";
 import {
@@ -417,6 +418,56 @@ export class SqliteCampaignStore implements CampaignStore {
     assertQodoFindingIteration(iteration);
     let parsedFinding: QodoFinding;
     try { parsedFinding = parseQodoFinding(finding); } catch { throw new TypeError("Invalid Qodo finding"); }
+    this.#upsertQodoFinding(campaignId, iteration, parsedFinding);
+  }
+
+  async applyQodoReview(campaignId: string, record: QodoReviewClaimRecord): Promise<void> {
+    assertCampaignQodoIteration(record.campaign.qodoIteration);
+    if (record.campaign.id !== campaignId || record.campaign.version !== record.expectedVersion + 1 ||
+      !Number.isInteger(record.reviewIteration) || record.reviewIteration < 0 || record.reviewIteration > 3) {
+      throw new CampaignVersionConflict(campaignId, record.expectedVersion);
+    }
+    const eventRecords = [record.claimedEvent, ...record.findings.map(({ event }) => event), record.outcomeEvent];
+    if (record.claimedEvent.eventType !== "qodo_review_claimed" || !validQodoOutcome(record.campaign.status, record.outcomeEvent.eventType) ||
+      record.findings.some(({ event }) => event.eventType !== "qodo_finding_recorded") ||
+      new Set(eventRecords.map(({ id }) => id)).size !== eventRecords.length) throw new Error("Invalid atomic Qodo review events");
+    const occurredAt = eventRecords.map((event) => normalizeTimestamp(event.occurredAt, "event occurredAt"));
+    const parsedFindings = record.findings.map(({ iteration, finding, event }) => {
+      assertQodoFindingIteration(iteration);
+      return { iteration, finding: parseQodoFinding(finding), event };
+    });
+    const write = this.#database.transaction(() => {
+      this.#assertClaim(campaignId, record.expectedVersion, "qodo_review");
+      this.#assertNoBlockingExternalAction(campaignId);
+      const existing = this.#database.prepare("SELECT * FROM campaigns WHERE id = ?").get(campaignId) as CampaignRow | undefined;
+      if (existing === undefined || existing.qodo_iteration !== record.reviewIteration ||
+        existing.repository !== record.campaign.repository || existing.issue_number !== record.campaign.issueNumber ||
+        existing.issue_url !== record.campaign.issueUrl || existing.parent_session_id !== record.campaign.parentSessionId ||
+        this.#currentCommit(campaignId) !== record.expectedCommitSha || this.#currentPullRequest(campaignId) !== record.expectedPullRequest) {
+        throw new CampaignVersionConflict(campaignId, record.expectedVersion);
+      }
+      const duplicate = this.#database.prepare(`SELECT id FROM campaign_events WHERE campaign_id = ? AND event_type = 'qodo_review_claimed'
+        AND json_extract(payload_json, '$.reviewId') = ? AND json_extract(payload_json, '$.commitSha') = ?
+        AND json_extract(payload_json, '$.reviewIteration') = ? LIMIT 1`).get(campaignId, record.reviewId, record.expectedCommitSha, record.reviewIteration);
+      if (duplicate !== undefined) throw new CampaignVersionConflict(campaignId, record.expectedVersion);
+      const updated = this.#database.prepare(`UPDATE campaigns SET lane = ?, status = ?, qodo_iteration = ?, version = version + 1, updated_at = ?
+        WHERE id = ? AND version = ? AND status = 'qodo_review'`).run(
+        record.campaign.lane, record.campaign.status, record.campaign.qodoIteration, occurredAt[0], campaignId, record.expectedVersion,
+      );
+      if (updated.changes !== 1) throw new CampaignVersionConflict(campaignId, record.expectedVersion);
+      this.#insertEvent(campaignId, record.claimedEvent, occurredAt[0] as string);
+      for (let index = 0; index < parsedFindings.length; index += 1) {
+        const findingRecord = parsedFindings[index];
+        if (findingRecord === undefined) throw new Error("Missing Qodo finding record");
+        this.#upsertQodoFinding(campaignId, findingRecord.iteration, findingRecord.finding);
+        this.#insertEvent(campaignId, findingRecord.event, occurredAt[index + 1] as string);
+      }
+      this.#insertEvent(campaignId, record.outcomeEvent, occurredAt.at(-1) as string);
+    });
+    write.immediate();
+  }
+
+  #upsertQodoFinding(campaignId: string, iteration: number, parsedFinding: QodoFinding): void {
     const result = this.#database.prepare(`
       INSERT INTO qodo_findings (
         id, campaign_id, severity, status, summary, source_url, body, path, line, disposition, iteration
@@ -530,11 +581,15 @@ export class SqliteCampaignStore implements CampaignStore {
       if (record.newCommitSha !== undefined && ((payload.action !== "push_branch" && payload.action !== "update_pr") || payload.commitSha !== record.newCommitSha)) throw new Error("External action completion commit does not match claimed payload");
       const current = this.#currentCommit(campaignId);
       const changed = record.newCommitSha !== undefined && record.newCommitSha !== current;
-      const resultingVersion = claim.claimedCampaignVersion + (changed ? 1 : 0);
+      const returnsToReview = payload.action === "update_pr";
+      const resultingVersion = claim.claimedCampaignVersion + (changed || returnsToReview ? 1 : 0);
       assertExternalActionEventVersion(record.completedEvent.payload, claim.claimedCampaignVersion, resultingVersion);
       if (changed) {
         this.#replaceCommit(campaignId, record.newCommitSha);
-        const updated = this.#database.prepare("UPDATE campaigns SET version = version + 1, updated_at = ? WHERE id = ? AND version = ? AND status = ?").run(completedAt, campaignId, claim.claimedCampaignVersion, claim.claimedCampaignStatus);
+      }
+      if (changed || returnsToReview) {
+        const nextStatus = returnsToReview ? "qodo_review" : claim.claimedCampaignStatus;
+        const updated = this.#database.prepare("UPDATE campaigns SET version = version + 1, status = ?, updated_at = ? WHERE id = ? AND version = ? AND status = ?").run(nextStatus, completedAt, campaignId, claim.claimedCampaignVersion, claim.claimedCampaignStatus);
         if (updated.changes !== 1) throw new CampaignVersionConflict(campaignId, claim.claimedCampaignVersion);
       }
       this.#insertEvent(campaignId, record.completedEvent, occurredAt);
@@ -1004,6 +1059,12 @@ const statusesAllowingIndependentCommitReplacement = new Set<CampaignStatus>([
 const statusesAllowingIndependentPullRequestReplacement = new Set<CampaignStatus>([
   "contribution_approval", "pull_request_open", "qodo_review", "human_escalation",
 ]);
+
+function validQodoOutcome(status: CampaignStatus, eventType: string): boolean {
+  return (status === "qodo_review" && eventType === "quality_gate_passed") ||
+    (status === "repair" && eventType === "quality_gate_repair_requested") ||
+    (status === "human_escalation" && eventType === "quality_gate_escalated");
+}
 
 function assertQodoFindingIteration(iteration: number): void {
   if (!Number.isInteger(iteration) || iteration < 1 || iteration > 3) {

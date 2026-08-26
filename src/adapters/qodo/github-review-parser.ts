@@ -65,6 +65,24 @@ export function parseQodoReviewComments(
   return [...findings.values()];
 }
 
+export function hasNonAllowlistedActionableComment(
+  input: unknown,
+  allowlistedBotIdentities: readonly string[],
+): boolean {
+  const allowedAuthors = normalizedAllowlist(allowlistedBotIdentities);
+  const comments = z.array(z.unknown()).max(1_000).parse(input);
+  for (const candidate of comments) {
+    const identity = commentIdentitySchema.safeParse(candidate);
+    if (!identity.success || allowedAuthors.has(identity.data.user.login.toLocaleLowerCase("en-US"))) continue;
+    if (!isRecord(candidate)) continue;
+    const structuredSeverity = typeof candidate.severity === "string" ? candidate.severity.toLocaleLowerCase("en-US") : undefined;
+    const commentBody = typeof candidate.body === "string" ? candidate.body : "";
+    const labeledSeverity = severityLabel.exec(commentBody)?.[1]?.toLocaleLowerCase("en-US");
+    if (structuredSeverity === "high" || structuredSeverity === "medium" || labeledSeverity === "high" || labeledSeverity === "medium") return true;
+  }
+  return false;
+}
+
 function normalizeComment(comment: z.infer<typeof qodoCommentSchema>): QodoFinding {
   const explicitSeverity = comment.severity ?? severityLabel.exec(comment.body)?.[1]?.toLocaleLowerCase("en-US");
   const severity = isSeverity(explicitSeverity) ? explicitSeverity : "suggestion";
@@ -119,4 +137,8 @@ function containsControlCharacter(value: string): boolean {
     if (codeUnit <= 31 || codeUnit === 127) return true;
   }
   return false;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

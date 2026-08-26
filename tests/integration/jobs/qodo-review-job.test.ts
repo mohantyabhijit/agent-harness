@@ -132,6 +132,41 @@ describe("QodoReviewJob", () => {
     expect(fixture.review.requests[0]?.request.signal?.aborted).toBe(true);
     expect((await fixture.store.get("campaign-1"))?.campaign.status).toBe("qodo_review");
   });
+
+  it("catches store enumeration failure and exposes only sanitized health", async () => {
+    const fixture = await jobFixture("pass.json", 0);
+    const store = new Proxy(fixture.store, {
+      get(target, property) {
+        if (property === "listByStatus") return async () => { throw new Error("password=secret database down"); };
+        return Reflect.get(target, property, target) as unknown;
+      },
+    });
+    const scheduler: ReviewJobScheduler = { setInterval: () => 1, clearInterval: () => undefined };
+    const job = createQodoReviewJob({ store, review: fixture.review, syncReview: { execute: async () => campaign() }, scheduler, intervalMs: 10_000, shutdownTimeoutMs: 50 });
+
+    await expect(job.tick()).resolves.toBeUndefined();
+    expect(job.health()).toEqual({ status: "degraded", code: "store_unavailable" });
+    expect(JSON.stringify(job.health())).not.toContain("secret");
+  });
+
+  it("contains a campaign tick rejection without an unhandled scheduled promise", async () => {
+    const fixture = await jobFixture("pass.json", 0);
+    let scheduled: (() => void) | undefined;
+    const scheduler: ReviewJobScheduler = { setInterval: (callback) => { scheduled = callback; return 1; }, clearInterval: () => undefined };
+    const job = createQodoReviewJob({
+      store: fixture.store,
+      review: fixture.review,
+      syncReview: { execute: async () => { throw new Error("token=secret"); } },
+      scheduler,
+      intervalMs: 10_000,
+      shutdownTimeoutMs: 50,
+    });
+    job.start();
+    scheduled?.();
+    await vi.waitFor(() => { expect(job.health()).toEqual({ status: "degraded", code: "campaign_retry_pending" }); });
+    expect(JSON.stringify(job.health())).not.toContain("secret");
+    await job.stop();
+  });
 });
 
 class FakeQodoReview implements QodoReviewPort {
@@ -158,7 +193,11 @@ async function jobFixture(fixtureName: string, iteration: number) {
   const harness = new FakeHarness();
   const review = new FakeQodoReview();
   review.result = {
+    syncSessionId: "authenticated-sync-session-1",
     reviewId: String(fixture.reviewId),
+    reviewUrl: String(fixture.reviewUrl),
+    sourceIdentity: String(fixture.sourceIdentity),
+    sourceReceipt: String(fixture.sourceReceipt),
     commitSha: String(fixture.commitSha),
     testsPassed: Boolean(fixture.testsPassed),
     complete: Boolean(fixture.complete),
@@ -177,6 +216,9 @@ async function jobFixture(fixtureName: string, iteration: number) {
 
 interface RawReviewFixture {
   readonly reviewId: unknown;
+  readonly reviewUrl: unknown;
+  readonly sourceIdentity: unknown;
+  readonly sourceReceipt: unknown;
   readonly commitSha: unknown;
   readonly testsPassed: unknown;
   readonly complete: unknown;

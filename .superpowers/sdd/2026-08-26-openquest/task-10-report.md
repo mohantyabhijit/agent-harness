@@ -78,3 +78,29 @@ No local review, Qodo mutation, GitHub mutation, TrueForge live session, or exte
 - The GitHub App installation, automatic review trigger, configured TrueForge GitHub MCP session, and exact live Qodo bot login were not verified against the network in this task.
 - The detected Qodo CLI is a `next` release; commands are documented with a date and must be rechecked before a live run.
 - Provider behavior is covered through strict fixtures and injected harness/port seams. Live evidence still requires a controlled PR in an authorized repository.
+
+## Fix Round 1
+
+Addressed every load-bearing review finding with a trust-boundary redesign and new adversarial tests.
+
+- Child/model `qodo_github_review_v1` JSON is now only a locator/summary candidate. `TrueForgeQodoReview` requires an injected `QodoReviewAuthorityPort` to independently authenticate the GitHub review URL/ID, configured Qodo identity, repository, PR, commit, and opaque receipt. Canonical authority fields override child claims; receipt/identity mismatches fail closed. The default container uses an explicit unavailable authority until a real authenticated GitHub adapter is injected.
+- `QODO_BOT_IDENTITIES` is now required configuration with no inferred default. A configured Qodo allowlist is validated before startup.
+- An explicit non-Qodo high/medium comment makes an otherwise complete review ineligible for automated gating instead of silently passing.
+- Every `complete: false` batch, including one containing findings or `testsPassed: true`, is a no-op: no campaign version/status/iteration change, no finding/event write, and no repair dispatch.
+- Review claim, findings, provenance events, quality-gate outcome, campaign version, status, and iteration are persisted through one new atomic `CampaignStore.applyQodoReview` operation in both SQLite and the fake. A real SQLite abort trigger proves the whole write rolls back. Repair dispatch occurs only after that transaction commits.
+- Repair output is strict `repair_result_v1`: completed status, a new commit, passed tests, exact commands, and direct verification evidence, with unknown fields rejected. Missing/failed output escalates without recording repair completion or `update_pr` authority.
+- Exact approved `update_pr` completion now atomically returns `repair` to `qodo_review` while preserving the singleton PR, repaired commit, and current iteration. The end-to-end test exercises iterations 1 through 3 using real proposal/approval/action completion paths and no direct campaign-status mutation.
+- Fresh sync session identity, authenticated review provenance, and the exact response contract/field semantics are retained in the packet and durable internal events. Unauthenticated campaign projections no longer expose raw Qodo body/path/line.
+- Scheduler enumeration and per-campaign failures are contained. Scheduled callbacks cannot produce an unhandled rejected promise, and sanitized `ready`/`running`/`degraded` health is available through the job and `/api/healthz`.
+
+Verification:
+
+- `npm test -- tests/unit/adapters/qodo/trueforge-qodo-review.test.ts tests/unit/application/sync-review.test.ts tests/integration/jobs/qodo-review-job.test.ts` — PASS.
+- `npm test -- tests/integration/sqlite/campaign-store.test.ts` — PASS.
+- `npm test` — PASS, 25 files / 398 tests.
+- `npm run typecheck` — PASS.
+- `npm run lint` — PASS.
+- `npm run build` — PASS; Vite retained the existing large-chunk advisory.
+- `git diff --check` — PASS.
+
+Remaining live limitation: a live authenticated GitHub/Qodo evidence adapter and controlled PR receipt still need Task 12 provider verification. Until that adapter is injected, the production review job reports sanitized degraded health and makes no quality-gate mutation.

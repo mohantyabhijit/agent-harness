@@ -8,7 +8,7 @@ OpenQuest treats Qodo review data as untrusted GitHub evidence. A review can blo
 2. Grant it access only to the repositories OpenQuest is expected to review.
 3. In Qodo, enable automatic review for newly opened pull requests in those repositories.
 4. Open a controlled pull request and confirm that Qodo posts a review without a manual trigger.
-5. Record the exact GitHub bot login shown on that review. Configure the server's comma-separated `QODO_BOT_IDENTITIES` allowlist with only verified Qodo bot logins. The safe default is `qodo-merge-pro[bot]`.
+5. Record the exact GitHub bot login shown on that review. Configure the server's required comma-separated `QODO_BOT_IDENTITIES` allowlist with only verified Qodo bot logins. There is no inferred or built-in identity; startup fails when the allowlist is missing.
 
 Do not put GitHub, Qodo, or TrueForge credentials in this repository, campaign evidence, screenshots, logs, or the allowlist. Authentication stays in the GitHub App installation and the local Qodo/TrueForge credential stores.
 
@@ -34,9 +34,9 @@ qodo --json pr-review-session findings --pr-url https://github.com/owner/repo/pu
 
 ## Imported evidence
 
-Each polling run starts a fresh TrueForge `sync_qodo` child session. It requests GitHub review comments only from the configured bot identities and returns a bounded structured envelope tied to the campaign's current repository, pull-request number, and 40-character commit SHA.
+Each polling run starts a fresh TrueForge `sync_qodo` child session. The child locates and summarizes a bounded `qodo_github_review_v1` envelope tied to the current repository, pull request, review URL/ID, bot identity, provider receipt, and commit. Child/model JSON is never review authority: an independently injected authenticated GitHub adapter must re-fetch or verify the receipt and return canonical evidence. The quality gate uses only that canonical result. The default container fails review synchronization safely until that adapter is configured.
 
-OpenQuest accepts at most 1,000 comments. It excludes non-allowlisted authors, deduplicates identical comments by GitHub comment ID, and rejects conflicting duplicates, malformed fields, unsafe paths, cross-pull-request URLs, and oversized bodies. It preserves only:
+OpenQuest accepts at most 1,000 comments. It excludes non-allowlisted authors, deduplicates identical comments by GitHub comment ID, and rejects conflicting duplicates, malformed fields, unsafe paths, cross-pull-request URLs, and oversized bodies. Durable internal campaign memory preserves only:
 
 - GitHub comment ID and discussion URL
 - explicit severity, or `suggestion` when no severity label is present
@@ -45,13 +45,15 @@ OpenQuest accepts at most 1,000 comments. It excludes non-allowlisted authors, d
 - repository-relative path and positive line number
 - a technical disposition for every dismissed finding
 
-Alarming prose is not evidence of high or medium severity. Only an explicit Qodo severity field or an explicit `Severity:`/`Priority:` label is mapped. Malformed, incomplete, unavailable, or timed-out review output leaves the campaign in `qodo_review`; it never counts as a pass.
+Unauthenticated campaign responses expose only the safe summary, status, severity, disposition, and validated GitHub discussion URL. Raw bodies, file paths, and line numbers remain inside authorized campaign memory and repair packets.
+
+Alarming prose is not evidence of high or medium severity. Only an explicit Qodo severity field or an explicit `Severity:`/`Priority:` label is mapped. An explicit high/medium comment from a non-Qodo author cannot silently become a pass: the authenticated review remains incomplete for automated gating. Malformed, incomplete (even with findings), unavailable, or timed-out review output leaves the campaign in `qodo_review` without findings, iteration changes, or repair dispatch.
 
 ## Repair, approval, and escalation evidence
 
 The quality gate passes only when required tests pass, no open high/medium finding remains, and every remaining non-fixed finding has a disposition. Otherwise OpenQuest starts one fresh `repair` child session with the current PR, current commit, review ID, iteration, and unresolved findings.
 
-The repair child may produce a new commit in its sandbox, but Qodo synchronization never pushes it. Publishing requires a new `update_pr` proposal and a fresh, single-use approval for the exact current PR, exact repaired commit, current campaign version, and completed repair output. The store rechecks that authority atomically before the external callback.
+The repair child must return strict `repair_result_v1`: completed status, a new 40-character commit, passed tests, exact commands, and direct verification evidence, with no unknown fields. Missing or failed evidence cannot create durable repair authority. The child may produce a new commit in its sandbox, but Qodo synchronization never pushes it. Publishing requires a new `update_pr` proposal and a fresh, single-use approval for the exact current PR, exact repaired commit, current campaign version, and completed repair output. The store rechecks that authority atomically before the external callback. A successful approved update atomically returns the same campaign to `qodo_review` while preserving its PR, repaired commit, and iteration.
 
 Retain non-secret evidence for each iteration:
 

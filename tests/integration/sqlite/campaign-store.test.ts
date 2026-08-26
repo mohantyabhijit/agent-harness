@@ -6,12 +6,13 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SqliteCampaignStore } from "../../../src/adapters/sqlite/campaign-store.js";
 import { RunCampaign } from "../../../src/application/run-campaign.js";
+import { SyncReview } from "../../../src/application/sync-review.js";
 import { CampaignVersionConflict } from "../../../src/application/ports/campaign-store.js";
 import type { CampaignStore, ExternalActionClaimRecord } from "../../../src/application/ports/campaign-store.js";
 import { externalActionDigest } from "../../../src/application/external-action.js";
 import { issueApproval } from "../../../src/domain/approval.js";
 import { transitionCampaign } from "../../../src/domain/campaign.js";
-import { campaign, evidence } from "../../builders.js";
+import { campaign, evidence, openHighFinding } from "../../builders.js";
 import { FakeHarness } from "../../fakes/fake-harness.js";
 import { FakeCampaignStore } from "../../fakes/fake-campaign-store.js";
 
@@ -128,6 +129,36 @@ function insertRepairAuthority(database: Database.Database, input: { eventId: st
 }
 
 describe("SqliteCampaignStore", () => {
+  it("rolls back the Qodo claim, findings, events, and gate transition as one SQLite transaction", async () => {
+    const { database, store } = openMemoryStore();
+    await store.create(campaign({ status: "qodo_review", qodoIteration: 0 }));
+    database.prepare("INSERT INTO external_references (campaign_id, kind, value) VALUES ('campaign-1', 'commit', ?)").run("b".repeat(40));
+    database.prepare("INSERT INTO external_references (campaign_id, kind, value) VALUES ('campaign-1', 'pull_request', ?)").run("https://github.com/owner/repo/pull/7");
+    database.exec(`CREATE TRIGGER fail_atomic_qodo_event BEFORE INSERT ON campaign_events
+      WHEN NEW.event_type = 'qodo_finding_recorded' BEGIN SELECT RAISE(ABORT, 'injected qodo persistence failure'); END`);
+    let event = 0;
+    const syncReview = new SyncReview(store, new FakeHarness(), { now: () => "2026-08-26T00:00:00Z" }, { next: () => `sqlite-qodo-${String(++event)}` });
+
+    await expect(syncReview.execute("campaign-1", {
+      campaignId: "campaign-1",
+      syncSessionId: "authenticated-sync-session-1",
+      pullRequest: "https://github.com/owner/repo/pull/7",
+      reviewId: "review-1",
+      reviewUrl: "https://github.com/owner/repo/pull/7#pullrequestreview-1",
+      sourceIdentity: "qodo-merge-pro[bot]",
+      sourceReceipt: "authenticated-sqlite-receipt-1",
+      commitSha: "b".repeat(40),
+      testsPassed: true,
+      complete: true,
+      findings: [openHighFinding],
+    })).rejects.toThrow(/injected/i);
+
+    const snapshot = await store.get("campaign-1");
+    expect(snapshot?.campaign).toMatchObject({ status: "qodo_review", qodoIteration: 0, version: 1 });
+    expect(snapshot?.qodoFindings).toEqual([]);
+    expect(snapshot?.events).toEqual([]);
+  });
+
   it("retires duplicate untrusted legacy approvals before enforcing live-authority uniqueness", async () => {
     const { database, store } = openMemoryStore();
     await store.create(campaign({ status: "contribution_approval" }));
@@ -985,6 +1016,13 @@ describe("SqliteCampaignStore", () => {
       },
     })).resolves.toMatchObject({ status: "active", payload });
     expect((await store.get("campaign-1"))?.approvals[0]?.status).toBe("consumed");
+    await expect(store.completeExternalAction("campaign-1", {
+      claimId: "claim-1",
+      completedAt: "2026-08-26T00:03:00Z",
+      completedEvent: { id: "completed-update", eventType: "external_action_completed", payload: { claimedCampaignVersion: 3, resultingCampaignVersion: 4 }, occurredAt: "2026-08-26T00:03:00Z" },
+      newCommitSha: currentHead,
+    })).resolves.toBe(4);
+    expect((await store.get("campaign-1"))?.campaign).toMatchObject({ status: "qodo_review", qodoIteration: 1, version: 4 });
   });
 
   it.each([

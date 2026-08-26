@@ -17,6 +17,7 @@ import {
   type ExternalActionReconciliationRecord,
   type ExternalActionStaleRecoveryRecord,
   type ExternalReference,
+  type QodoReviewClaimRecord,
 } from "../../src/application/ports/campaign-store.js";
 import { parseQodoFinding } from "../../src/application/qodo-review-batch.js";
 import { currentApprovalProposal } from "../../src/application/approval-proposal.js";
@@ -40,6 +41,16 @@ interface MutableSnapshot {
   externalReferences: ExternalReference[];
   externalActionClaims: ExternalActionClaim[];
   operationResults: (CampaignOperationResult & { eventId: string; resultingCampaignVersion: number; childSessionId: string })[];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function validQodoOutcome(status: CampaignStatus, eventType: string): boolean {
+  return (status === "qodo_review" && eventType === "quality_gate_passed") ||
+    (status === "repair" && eventType === "quality_gate_repair_requested") ||
+    (status === "human_escalation" && eventType === "quality_gate_escalated");
 }
 
 export class FakeCampaignStore implements CampaignStore {
@@ -287,6 +298,55 @@ export class FakeCampaignStore implements CampaignStore {
     this.#findingIterations.set(key, iteration);
   }
 
+  async applyQodoReview(campaignId: string, record: QodoReviewClaimRecord): Promise<void> {
+    const beforeUpdate = this.beforeUpdate;
+    delete this.beforeUpdate;
+    await beforeUpdate?.();
+    const snapshot = this.#required(campaignId);
+    this.#assertNoBlockingExternalAction(snapshot);
+    this.#assertClaim(snapshot, campaignId, record.expectedVersion, "qodo_review");
+    if (record.campaign.id !== campaignId || record.campaign.version !== record.expectedVersion + 1 ||
+      record.reviewIteration !== snapshot.campaign.qodoIteration || singletonCommit(snapshot) !== record.expectedCommitSha ||
+      singletonPullRequest(snapshot) !== record.expectedPullRequest) throw new CampaignVersionConflict(campaignId, record.expectedVersion);
+    if (record.campaign.repository !== snapshot.campaign.repository || record.campaign.issueNumber !== snapshot.campaign.issueNumber ||
+      record.campaign.issueUrl !== snapshot.campaign.issueUrl || record.campaign.parentSessionId !== snapshot.campaign.parentSessionId) {
+      throw new CampaignIdentityConflict(campaignId);
+    }
+    if (snapshot.events.some(({ eventType, payload }) => eventType === "qodo_review_claimed" && isRecord(payload) &&
+      payload.reviewId === record.reviewId && payload.commitSha === record.expectedCommitSha && payload.reviewIteration === record.reviewIteration)) {
+      throw new CampaignVersionConflict(campaignId, record.expectedVersion);
+    }
+    if (record.claimedEvent.eventType !== "qodo_review_claimed" || !validQodoOutcome(record.campaign.status, record.outcomeEvent.eventType) ||
+      record.findings.some(({ event }) => event.eventType !== "qodo_finding_recorded")) throw new Error("Invalid atomic Qodo review events");
+    const events = [record.claimedEvent, ...record.findings.map(({ event }) => event), record.outcomeEvent];
+    for (const event of events) this.#assertEventAvailable(event.id);
+    if (new Set(events.map(({ id }) => id)).size !== events.length) throw new Error("Duplicate atomic Qodo review event");
+    const next = structuredClone(snapshot);
+    const nextIterations = new Map(this.#findingIterations);
+    for (const findingRecord of record.findings) {
+      if (!Number.isInteger(findingRecord.iteration) || findingRecord.iteration < 1 || findingRecord.iteration > 3) throw new Error("Invalid Qodo finding iteration");
+      const finding = parseQodoFinding(findingRecord.finding);
+      const key = `${campaignId}\u0000${finding.id}`;
+      const previousIteration = nextIterations.get(key);
+      if (previousIteration !== undefined && findingRecord.iteration < previousIteration) throw new Error(`Stale Qodo finding iteration for ${finding.id}`);
+      const index = next.qodoFindings.findIndex(({ id }) => id === finding.id);
+      if (index === -1) next.qodoFindings.push(structuredClone(finding));
+      else next.qodoFindings[index] = structuredClone(finding);
+      nextIterations.set(key, findingRecord.iteration);
+    }
+    if (this.failNextUpdate || this.failNextEvent) {
+      this.failNextUpdate = false;
+      this.failNextEvent = false;
+      throw new Error("Atomic Qodo review persistence failed");
+    }
+    next.campaign = structuredClone(record.campaign);
+    for (const event of events) this.#pushEvent(next, structuredClone(event));
+    this.#snapshots.set(campaignId, next);
+    this.#findingIterations.clear();
+    for (const [key, iteration] of nextIterations) this.#findingIterations.set(key, iteration);
+    for (const event of events) this.#eventIds.add(event.id);
+  }
+
   async claimExternalAction(campaignId: string, record: ExternalActionClaimRecord): Promise<ExternalActionClaim> {
     const beforeConsume = this.beforeConsumeApproval;
     delete this.beforeConsumeApproval;
@@ -368,13 +428,16 @@ export class FakeCampaignStore implements CampaignStore {
       this.failNextEvent = false;
       throw new Error("Campaign event persistence failed");
     }
-    const resultingVersion = this.#validatedExternalActionHeadVersion(claim, snapshot, record.newCommitSha);
+    const headVersion = this.#validatedExternalActionHeadVersion(claim, snapshot, record.newCommitSha);
+    const returnsToReview = claim.payload.action === "update_pr";
+    const resultingVersion = returnsToReview ? snapshot.campaign.version + 1 : headVersion;
     assertExternalActionEventVersion(record.completedEvent.payload, claim.claimedCampaignVersion, resultingVersion);
     if (record.newCommitSha !== undefined && singletonCommit(snapshot) !== record.newCommitSha) {
       snapshot.externalReferences = snapshot.externalReferences.filter(({ kind }) => kind !== "commit");
       snapshot.externalReferences.push({ kind: "commit", value: record.newCommitSha });
       snapshot.campaign = { ...snapshot.campaign, version: resultingVersion };
     }
+    if (returnsToReview) snapshot.campaign = { ...snapshot.campaign, status: "qodo_review", version: resultingVersion };
     this.#pushEvent(snapshot, record.completedEvent);
     this.#eventIds.add(record.completedEvent.id);
     Object.assign(claim, { status: "completed", closedAt: record.completedAt });

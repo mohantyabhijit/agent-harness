@@ -55,32 +55,14 @@ export function publicCampaignSnapshot(snapshot: CampaignSnapshot, now: number):
 }
 
 function safePublicQodoFinding(finding: CampaignSnapshot["qodoFindings"][number]): Readonly<Record<string, unknown>> {
-  const sourceFieldsAreValid =
-    finding.body !== undefined && finding.body.length >= 1 && finding.body.length <= 20_000 && finding.body.trim().length > 0 &&
-    finding.path !== undefined && safeQodoPath(finding.path) &&
-    finding.line !== undefined && Number.isSafeInteger(finding.line) && finding.line > 0;
   return {
     id: finding.id,
     severity: finding.severity,
     status: finding.status,
     summary: finding.summary,
     ...(finding.sourceUrl !== undefined && validQodoUrl(finding.sourceUrl) ? { sourceUrl: finding.sourceUrl } : {}),
-    ...(sourceFieldsAreValid ? { body: finding.body, path: finding.path, line: finding.line } : {}),
     ...(finding.disposition === undefined ? {} : { disposition: finding.disposition }),
   };
-}
-
-function safeQodoPath(value: string): boolean {
-  if (value.length < 1 || value.length > 1_024 || value !== value.trim() || value.startsWith("/") || value.includes("\\")) return false;
-  return value.split("/").every((segment) => segment.length > 0 && segment !== "." && segment !== ".." && !containsControlCharacter(segment));
-}
-
-function containsControlCharacter(value: string): boolean {
-  for (let index = 0; index < value.length; index += 1) {
-    const codeUnit = value.charCodeAt(index);
-    if (codeUnit <= 31 || codeUnit === 127) return true;
-  }
-  return false;
 }
 
 export function publicApproval(snapshot: CampaignSnapshot, approval: Approval, now: number): Readonly<Record<string, unknown>> {

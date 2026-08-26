@@ -120,6 +120,17 @@ function defaultOutput(operation: HarnessOperation): unknown {
   if (operation === "verify") {
     return { testsPassed: true };
   }
+  if (operation === "repair") {
+    return {
+      status: "completed",
+      commitSha: "c".repeat(40),
+      verification: {
+        testsPassed: true,
+        commands: ["npm test"],
+        evidence: [{ kind: "direct", sourceUrl: "https://github.com/owner/repo/actions/runs/1", observation: "All tests passed for the repair commit" }],
+      },
+    };
+  }
   return { status: "completed" };
 }
 

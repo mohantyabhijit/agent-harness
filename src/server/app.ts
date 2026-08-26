@@ -16,6 +16,7 @@ import { registerReviewRoutes } from "./routes/reviews.js";
 import { registerSpaceRoutes } from "./routes/spaces.js";
 import { ApiProblem } from "./routes/support.js";
 import type { AuthorizationPolicy, Capability } from "./authorization.js";
+import type { QodoReviewJobHealth } from "./jobs/qodo-review-job.js";
 
 const emptyQuerySchema = z.object({}).strict();
 
@@ -26,6 +27,7 @@ export interface AppDependencies {
   readonly clock: Clock;
   readonly ids: IdGenerator;
   readonly authorization: AuthorizationPolicy;
+  readonly reviewHealth?: () => QodoReviewJobHealth;
 }
 
 export function buildApp(dependencies: AppDependencies): FastifyInstance {
@@ -51,7 +53,10 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
     code: "not_found",
     message: "Route was not found",
   }));
-  app.get("/api/healthz", async () => ({ status: "ok" }));
+  app.get("/api/healthz", async () => {
+    const review = dependencies.reviewHealth?.();
+    return review?.status === "degraded" ? { status: "degraded", review: { code: review.code ?? "unexpected_failure" } } : { status: "ok" };
+  });
   registerSpaceRoutes(app);
   registerDiscoveryRoutes(app, { discover, catalog: dependencies.catalog });
   registerCampaignRoutes(app, { createCampaign, runCampaign, store: dependencies.store, clock: dependencies.clock });

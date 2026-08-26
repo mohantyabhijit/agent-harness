@@ -106,6 +106,24 @@ export interface ChildResultRecord {
   readonly operationResult?: CampaignOperationResult;
 }
 
+export interface QodoReviewFindingRecord {
+  readonly iteration: number;
+  readonly finding: QodoFinding;
+  readonly event: CampaignEventInput;
+}
+
+export interface QodoReviewClaimRecord {
+  readonly expectedVersion: number;
+  readonly expectedCommitSha: string;
+  readonly expectedPullRequest: string;
+  readonly reviewId: string;
+  readonly reviewIteration: number;
+  readonly campaign: Campaign;
+  readonly claimedEvent: CampaignEventInput;
+  readonly findings: readonly QodoReviewFindingRecord[];
+  readonly outcomeEvent: CampaignEventInput;
+}
+
 export interface CampaignOperationResult {
   readonly operation: "preflight" | "implement" | "verify" | "repair";
   readonly currentCommitSha: string;
@@ -149,6 +167,7 @@ export interface CampaignStore {
     expectedCampaignStatus: CampaignStatus,
   ): Promise<Approval>;
   recordQodoFinding(campaignId: string, iteration: number, finding: QodoFinding): Promise<void>;
+  applyQodoReview(campaignId: string, record: QodoReviewClaimRecord): Promise<void>;
   claimExternalAction(campaignId: string, record: ExternalActionClaimRecord): Promise<ExternalActionClaim>;
   completeExternalAction(campaignId: string, record: ExternalActionCompletionRecord): Promise<number>;
   markExternalActionOutcomeUnknown(campaignId: string, record: ExternalActionOutcomeUnknownRecord): Promise<void>;
@@ -198,4 +217,6 @@ export const reservedCampaignEventTypes = new Set([
   "external_action_outcome_unknown",
   "external_action_reconciled",
   "external_action_stale_recovered",
+  "qodo_review_claimed",
+  "qodo_finding_recorded",
 ]);
