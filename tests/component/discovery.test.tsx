@@ -96,7 +96,7 @@ describe("DiscoverPage", () => {
       getIssues: async () => [easyIssue, longTermIssue],
       createCampaign: async (input: unknown) => {
         created.push(input);
-        return { id: "campaign-101" };
+        return { id: ":review.1" };
       },
     };
     render(<DiscoverPage api={api} spaces={["developer_tools"]} navigate={(destination) => destinations.push(destination)} />);
@@ -114,7 +114,7 @@ describe("DiscoverPage", () => {
       lane: "easy_win",
     }]);
     await waitFor(() => {
-      expect(destinations).toEqual(["/campaigns/campaign-101"]);
+      expect(destinations).toEqual(["/campaigns/%3Areview.1"]);
     });
   });
 
