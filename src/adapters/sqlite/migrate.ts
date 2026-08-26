@@ -38,6 +38,13 @@ const schema = `
     consumed_at TEXT
   );
 
+  CREATE TABLE IF NOT EXISTS approval_issuance_keys (
+    campaign_id TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+    idempotency_key TEXT NOT NULL,
+    approval_id TEXT NOT NULL UNIQUE REFERENCES approvals(id) ON DELETE CASCADE,
+    PRIMARY KEY (campaign_id, idempotency_key)
+  );
+
   CREATE TABLE IF NOT EXISTS campaign_events (
     id TEXT PRIMARY KEY,
     campaign_id TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
@@ -84,11 +91,27 @@ const schema = `
     observed_canonical_head TEXT
   );
 
+  CREATE TABLE IF NOT EXISTS campaign_operation_results (
+    event_id TEXT PRIMARY KEY REFERENCES campaign_events(id) ON DELETE CASCADE,
+    campaign_id TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+    operation TEXT NOT NULL CHECK (operation IN ('preflight', 'implement', 'verify', 'repair')),
+    resulting_campaign_version INTEGER NOT NULL,
+    current_commit_sha TEXT NOT NULL,
+    pull_request TEXT,
+    qodo_iteration INTEGER NOT NULL CHECK (qodo_iteration BETWEEN 0 AND 3),
+    child_session_id TEXT NOT NULL
+  );
+
   CREATE INDEX IF NOT EXISTS campaigns_status_idx ON campaigns(status, created_at, id);
   CREATE INDEX IF NOT EXISTS campaign_events_order_idx ON campaign_events(campaign_id, occurred_at, id);
   CREATE UNIQUE INDEX IF NOT EXISTS external_action_claims_one_blocking_idx
     ON external_action_claims(campaign_id)
     WHERE status IN ('active', 'outcome_unknown');
+  CREATE UNIQUE INDEX IF NOT EXISTS approvals_one_approved_digest_idx
+    ON approvals(campaign_id, action_digest)
+    WHERE status = 'approved';
+  CREATE INDEX IF NOT EXISTS campaign_operation_results_authority_idx
+    ON campaign_operation_results(campaign_id, operation, resulting_campaign_version, current_commit_sha, pull_request, qodo_iteration);
 `;
 
 export function migrateCampaignStore(database: Database.Database): void {

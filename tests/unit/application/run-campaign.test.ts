@@ -447,7 +447,7 @@ describe("RunCampaign", () => {
     store.seed(campaign({ status: "repair", version: 3, qodoIteration: 1 }));
     store.seedExternalReference("campaign-1", { kind: "commit", value: nextCommit });
     store.seedExternalReference("campaign-1", { kind: "pull_request", value: updatePayload.pullRequest });
-    await store.appendEvent("campaign-1", {
+    await expect(store.appendEvent("campaign-1", {
       id: "repair-completed",
       eventType: "campaign_operation_completed",
       payload: {
@@ -461,7 +461,7 @@ describe("RunCampaign", () => {
         ...eventOverride,
       },
       occurredAt: "2026-08-26T00:00:30Z",
-    });
+    })).rejects.toThrow(/authoritative|guarded/i);
     await store.recordApproval(issueApproval({
       id: "approval-update",
       campaignId: "campaign-1",
@@ -529,7 +529,7 @@ describe("RunCampaign", () => {
     store.seedExternalReference("campaign-1", { kind: "commit", value: nextCommit });
     store.seedExternalReference("campaign-1", { kind: "pull_request", value: updatePayload.pullRequest });
     store.seedExternalReference("campaign-1", { kind: "pull_request", value: "https://github.com/owner/repo/pull/8" });
-    await store.appendEvent("campaign-1", {
+    await expect(store.appendEvent("campaign-1", {
       id: "repair-completed",
       eventType: "campaign_operation_completed",
       payload: {
@@ -542,7 +542,7 @@ describe("RunCampaign", () => {
         output: { status: "completed", commitSha: nextCommit },
       },
       occurredAt: "2026-08-26T00:00:30Z",
-    });
+    })).rejects.toThrow(/authoritative|guarded/i);
     await store.recordApproval(issueApproval({
       id: "approval-update",
       campaignId: "campaign-1",

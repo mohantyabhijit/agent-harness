@@ -1,9 +1,10 @@
 import type { CampaignSnapshot, CampaignStore } from "../../application/ports/campaign-store.js";
 import type { HarnessPort } from "../../application/ports/harness.js";
 import type { QodoReviewBatch, SyncReview } from "../../application/sync-review.js";
+import { parseQodoReviewBatch } from "../../application/qodo-review-batch.js";
 
 export interface QodoReviewSource {
-  fetch(snapshot: CampaignSnapshot): Promise<QodoReviewBatch | undefined>;
+  fetch(snapshot: CampaignSnapshot, options: { signal: AbortSignal; timeoutMs: number }): Promise<QodoReviewBatch | undefined>;
 }
 
 export interface ReviewJobScheduler {
@@ -23,21 +24,28 @@ export interface QodoReviewJobDependencies {
   readonly syncReview: Pick<SyncReview, "execute">;
   readonly scheduler: ReviewJobScheduler;
   readonly intervalMs: number;
+  readonly shutdownTimeoutMs: number;
 }
 
 export function createQodoReviewJob(dependencies: QodoReviewJobDependencies): QodoReviewJob {
   if (!Number.isSafeInteger(dependencies.intervalMs) || dependencies.intervalMs < 10_000) {
     throw new TypeError("Qodo review interval must be at least 10000 milliseconds");
   }
+  if (!Number.isSafeInteger(dependencies.shutdownTimeoutMs) || dependencies.shutdownTimeoutMs < 10 || dependencies.shutdownTimeoutMs > 30_000) {
+    throw new TypeError("Qodo shutdown timeout must be between 10 and 30000 milliseconds");
+  }
   let timer: unknown;
   let started = false;
   let activeTick: Promise<void> | undefined;
-  const runTick = async (): Promise<void> => {
+  let activeController: AbortController | undefined;
+  const runTick = async (signal: AbortSignal): Promise<void> => {
     const snapshots = await dependencies.store.listByStatus("qodo_review");
     for (const snapshot of snapshots) {
+      if (signal.aborted) return;
       if (snapshot.campaign.qodoIteration > 3) continue;
       try {
-        const batch = await dependencies.source.fetch(snapshot);
+        const batch = await dependencies.source.fetch(snapshot, { signal, timeoutMs: dependencies.shutdownTimeoutMs });
+        if (isAborted(signal)) return;
         if (batch !== undefined) await dependencies.syncReview.execute(snapshot.campaign.id, batch);
       } catch {
         // A later tick retries from durable campaign state. The job never
@@ -47,11 +55,13 @@ export function createQodoReviewJob(dependencies: QodoReviewJobDependencies): Qo
   };
   const tick = async (): Promise<void> => {
     if (activeTick !== undefined) return activeTick;
-    activeTick = runTick();
+    activeController = new AbortController();
+    activeTick = runTick(activeController.signal);
     try {
       await activeTick;
     } finally {
       activeTick = undefined;
+      activeController = undefined;
     }
   };
   return {
@@ -66,16 +76,26 @@ export function createQodoReviewJob(dependencies: QodoReviewJobDependencies): Qo
         started = false;
         timer = undefined;
       }
-      await activeTick;
+      activeController?.abort();
+      if (activeTick !== undefined) {
+        let deadline: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([activeTick, new Promise<void>((resolve) => { deadline = setTimeout(resolve, dependencies.shutdownTimeoutMs); })]);
+        } finally {
+          if (deadline !== undefined) clearTimeout(deadline);
+        }
+      }
     },
     tick,
   };
 }
 
+function isAborted(signal: AbortSignal): boolean { return signal.aborted; }
+
 export class HarnessQodoReviewSource implements QodoReviewSource {
   constructor(private readonly harness: HarnessPort) {}
 
-  async fetch(snapshot: CampaignSnapshot): Promise<QodoReviewBatch | undefined> {
+  async fetch(snapshot: CampaignSnapshot, options: { signal: AbortSignal; timeoutMs: number }): Promise<QodoReviewBatch | undefined> {
     const pullRequest = singletonReference(snapshot, "pull_request");
     const commitSha = singletonReference(snapshot, "commit");
     const result = await this.harness.runChildSession({
@@ -87,9 +107,8 @@ export class HarnessQodoReviewSource implements QodoReviewSource {
       approvals: snapshot.approvals.map(({ action, actionDigest, status }) => ({ action, digest: actionDigest, status })),
       currentCommitSha: commitSha,
       context: { pullRequest, commitSha, iteration: snapshot.campaign.qodoIteration },
-    }, "sync_qodo");
-    if (result.output === null || typeof result.output !== "object" || Array.isArray(result.output)) return undefined;
-    return result.output as QodoReviewBatch;
+    }, "sync_qodo", options);
+    return parseQodoReviewBatch(result.output);
   }
 }
 

@@ -2,6 +2,9 @@ import type Database from "better-sqlite3";
 import {
   CampaignIdentityConflict,
   CampaignVersionConflict,
+  ApprovalIssuanceConflict,
+  reservedCampaignEventTypes,
+  type ApprovalIssuanceRecord,
   type CampaignEvent,
   type ChildResultRecord,
   type CampaignSnapshot,
@@ -245,6 +248,7 @@ export class SqliteCampaignStore implements CampaignStore {
   }
 
   async appendEvent(campaignId: string, event: CampaignEvent): Promise<void> {
+    if (reservedCampaignEventTypes.has(event.eventType)) throw new Error("Authoritative campaign event requires its guarded store operation");
     const occurredAt = normalizeTimestamp(event.occurredAt, "event occurredAt");
     this.#database.prepare(`
       INSERT INTO campaign_events (id, campaign_id, event_type, payload_json, occurred_at)
@@ -253,29 +257,35 @@ export class SqliteCampaignStore implements CampaignStore {
   }
 
   async recordApproval(approval: Approval): Promise<void> {
-    const issuedAt = normalizeTimestamp(approval.issuedAt, "approval issuedAt");
-    const expiresAt = approval.expiresAt === undefined
-      ? null
-      : normalizeTimestamp(approval.expiresAt, "approval expiry");
-    const consumedAt = approval.consumedAt === undefined
-      ? null
-      : normalizeTimestamp(approval.consumedAt, "approval consumedAt");
     this.#database.transaction(() => {
-      this.#database.prepare(`
-        INSERT INTO approvals (
-          id, campaign_id, action, action_digest, status, issued_at, expires_at, consumed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        approval.id,
-        approval.campaignId,
-        approval.action,
-        approval.actionDigest,
-        approval.status,
-        issuedAt,
-        expiresAt,
-        consumedAt,
-      );
+      this.#insertApproval(approval);
     })();
+  }
+
+  async issueApproval(record: ApprovalIssuanceRecord): Promise<Approval> {
+    const key = record.idempotencyKey;
+    if (key.length < 8 || key.length > 128) throw new ApprovalIssuanceConflict();
+    const issue = this.#database.transaction(() => {
+      const replay = this.#database.prepare(`
+        SELECT approvals.* FROM approval_issuance_keys
+        JOIN approvals ON approvals.id = approval_issuance_keys.approval_id
+        WHERE approval_issuance_keys.campaign_id = ? AND approval_issuance_keys.idempotency_key = ?
+      `).get(record.approval.campaignId, key) as ApprovalRow | undefined;
+      if (replay !== undefined) {
+        if (replay.action_digest !== record.approval.actionDigest || replay.action !== record.approval.action) throw new ApprovalIssuanceConflict();
+        return mapApproval(replay);
+      }
+      const existing = this.#database.prepare("SELECT id FROM approvals WHERE campaign_id = ? AND action_digest = ? AND status = 'approved'").get(record.approval.campaignId, record.approval.actionDigest) as { id: string } | undefined;
+      if (existing !== undefined) throw new ApprovalIssuanceConflict();
+      this.#insertApproval(record.approval);
+      this.#database.prepare("INSERT INTO approval_issuance_keys (campaign_id, idempotency_key, approval_id) VALUES (?, ?, ?)").run(record.approval.campaignId, key, record.approval.id);
+      return record.approval;
+    });
+    try { return issue.immediate(); } catch (error) {
+      if (error instanceof ApprovalIssuanceConflict) throw error;
+      if (typeof error === "object" && error !== null && "code" in error && String(error.code).startsWith("SQLITE_CONSTRAINT")) throw new ApprovalIssuanceConflict();
+      throw error;
+    }
   }
 
   /** @deprecated Test/port compatibility only; production orchestration must claim atomically. */
@@ -558,7 +568,23 @@ export class SqliteCampaignStore implements CampaignStore {
       assertChildEventVersion(record.event.payload, record.expectedVersion, resultingVersion);
       this.#database.prepare("INSERT INTO external_references (campaign_id, kind, value) VALUES (?, 'child_session', ?) ON CONFLICT DO NOTHING").run(campaignId, record.childSessionId);
       this.#database.prepare("INSERT INTO external_references (campaign_id, kind, value) VALUES (?, 'sandbox', ?) ON CONFLICT DO NOTHING").run(campaignId, record.childSessionId);
+      if (record.event.eventType === "campaign_operation_completed") {
+        const result = record.operationResult;
+        if (result === undefined || result.currentCommitSha !== this.#currentCommit(campaignId)) throw new Error("Completed child result lacks typed operation authority");
+        const campaign = this.#database.prepare("SELECT qodo_iteration FROM campaigns WHERE id = ?").get(campaignId) as { qodo_iteration: number };
+        if (result.qodoIteration !== campaign.qodo_iteration) throw new Error("Operation result Qodo iteration does not match campaign");
+        if (result.operation === "repair" && (result.pullRequest === undefined || !isPullRequest(result.pullRequest, this.#repository(campaignId)) || this.#currentPullRequest(campaignId) !== result.pullRequest)) throw new Error("Repair result lacks current pull request identity");
+      } else if (record.operationResult !== undefined) {
+        throw new Error("Typed operation authority requires a completed child event");
+      }
       this.#database.prepare("INSERT INTO campaign_events (id, campaign_id, event_type, payload_json, occurred_at) VALUES (?, ?, ?, ?, ?)").run(record.event.id, campaignId, record.event.eventType, JSON.stringify(record.event.payload), occurredAt);
+      if (record.operationResult !== undefined) {
+        const result = record.operationResult;
+        this.#database.prepare(`INSERT INTO campaign_operation_results
+          (event_id, campaign_id, operation, resulting_campaign_version, current_commit_sha, pull_request, qodo_iteration, child_session_id)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+        ).run(record.event.id, campaignId, result.operation, resultingVersion, result.currentCommitSha, result.pullRequest ?? null, result.qodoIteration, record.childSessionId);
+      }
       return resultingVersion;
     });
     return write.immediate();
@@ -633,13 +659,27 @@ export class SqliteCampaignStore implements CampaignStore {
     if (pullRequests.length !== 1 || pullRequests[0]?.value !== payload.pullRequest || !isPullRequest(payload.pullRequest, campaign.repository)) {
       throw new Error("External action pull request does not match campaign memory");
     }
-    const eventRows = this.#database.prepare(`
-      SELECT id, event_type, payload_json, occurred_at
-      FROM campaign_events
-      WHERE campaign_id = ? AND event_type = 'campaign_operation_completed'
-    `).all(campaignId) as EventRow[];
-    const matches = eventRows.filter((row) => isMatchingRepairCompletion(row, campaign, payload));
+    const matches = this.#database.prepare(`
+      SELECT event_id FROM campaign_operation_results
+      WHERE campaign_id = ? AND operation = 'repair'
+        AND resulting_campaign_version = ? AND current_commit_sha = ?
+        AND pull_request = ? AND qodo_iteration = ?
+    `).all(campaignId, campaign.version, payload.commitSha, payload.pullRequest, campaign.qodo_iteration) as { event_id: string }[];
     if (matches.length !== 1) throw new Error("Campaign lacks one unambiguous repair completion event for this update");
+  }
+
+  #repository(campaignId: string): string {
+    const row = this.#database.prepare("SELECT repository FROM campaigns WHERE id = ?").get(campaignId) as { repository: string } | undefined;
+    if (row === undefined) throw new Error("Campaign does not exist");
+    return row.repository;
+  }
+
+  #insertApproval(approval: Approval): void {
+    const issuedAt = normalizeTimestamp(approval.issuedAt, "approval issuedAt");
+    const expiresAt = approval.expiresAt === undefined ? null : normalizeTimestamp(approval.expiresAt, "approval expiry");
+    const consumedAt = approval.consumedAt === undefined ? null : normalizeTimestamp(approval.consumedAt, "approval consumedAt");
+    this.#database.prepare(`INSERT INTO approvals (id, campaign_id, action, action_digest, status, issued_at, expires_at, consumed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(approval.id, approval.campaignId, approval.action, approval.actionDigest, approval.status, issuedAt, expiresAt, consumedAt);
   }
 
   #requiredExternalActionClaim(campaignId: string, claimId: string, status: ExternalActionClaim["status"]): ExternalActionClaim {
@@ -833,33 +873,6 @@ const statusesAllowingIndependentCommitReplacement = new Set<CampaignStatus>([
 const statusesAllowingIndependentPullRequestReplacement = new Set<CampaignStatus>([
   "contribution_approval", "pull_request_open", "qodo_review", "human_escalation",
 ]);
-
-function isMatchingRepairCompletion(
-  row: EventRow,
-  campaign: Pick<CampaignRow, "version" | "qodo_iteration">,
-  payload: Extract<ExternalActionPayload, { action: "update_pr" }>,
-): boolean {
-  let eventPayload: unknown;
-  try {
-    eventPayload = JSON.parse(row.payload_json) as unknown;
-  } catch {
-    return false;
-  }
-  if (!isRecord(eventPayload) || !isRecord(eventPayload.output)) return false;
-  const repairedFromCommit = eventPayload.commitSha;
-  if (typeof repairedFromCommit !== "string" || !/^[0-9a-f]{40}$/u.test(repairedFromCommit)) return false;
-  const expectedClaimedVersion = campaign.version - (repairedFromCommit === payload.commitSha ? 0 : 1);
-  return eventPayload.operation === "repair" &&
-    eventPayload.pullRequest === payload.pullRequest &&
-    eventPayload.iteration === campaign.qodo_iteration &&
-    eventPayload.claimedCampaignVersion === expectedClaimedVersion &&
-    eventPayload.resultingCampaignVersion === campaign.version &&
-    eventPayload.output.commitSha === payload.commitSha;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function assertQodoFindingIteration(iteration: number): void {
   if (!Number.isInteger(iteration) || iteration < 1 || iteration > 3) {

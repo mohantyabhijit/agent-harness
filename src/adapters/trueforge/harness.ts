@@ -6,7 +6,9 @@ import type {
   HarnessOperation,
   HarnessPort,
   HarnessSessionResult,
+  HarnessRequestOptions,
 } from "../../application/ports/harness.js";
+import { HarnessAuthRequired, HarnessExecutionFailed, HarnessOutputInvalid, HarnessUnavailable } from "../../application/ports/harness.js";
 
 const finalEnvelopeSchema = z
   .object({
@@ -129,59 +131,30 @@ const turnDoneSchema = z
   })
   .loose();
 
-export class HarnessUnavailable extends Error {
-  override readonly name = "HarnessUnavailable";
-
-  constructor() {
-    super("TrueForge is unavailable");
-  }
-}
-
-export class HarnessAuthRequired extends Error {
-  override readonly name = "HarnessAuthRequired";
-
-  constructor() {
-    super("TrueForge authentication is required");
-  }
-}
-
-export class HarnessExecutionFailed extends Error {
-  override readonly name = "HarnessExecutionFailed";
-
-  constructor() {
-    super("TrueForge execution failed");
-  }
-}
-
-export class HarnessOutputInvalid extends Error {
-  override readonly name = "HarnessOutputInvalid";
-
-  constructor() {
-    super("TrueForge returned invalid structured output");
-  }
-}
+export { HarnessAuthRequired, HarnessExecutionFailed, HarnessOutputInvalid, HarnessUnavailable } from "../../application/ports/harness.js";
 
 export class TrueForgeHarness implements HarnessPort {
   constructor(private readonly client: TrueForge) {}
 
-  async createParentSession(title: string): Promise<string> {
+  async createParentSession(title: string, options?: HarnessRequestOptions): Promise<string> {
     if (title.trim().length === 0) {
       throw new HarnessExecutionFailed();
     }
 
     try {
-      return await this.createNamedSession();
+      return await this.createNamedSession(options);
     } catch (error) {
       throw normalizeSdkError(error);
     }
   }
 
-  async deleteSession(sessionId: string): Promise<void> {
+  async deleteSession(sessionId: string, options?: HarnessRequestOptions): Promise<void> {
     if (sessionId.trim().length === 0) {
       throw new HarnessExecutionFailed();
     }
     try {
-      await this.client.sessions.delete(sessionId);
+      if (options === undefined) await this.client.sessions.delete(sessionId);
+      else await this.client.sessions.delete(sessionId, requestOptions(options));
     } catch (error) {
       throw normalizeSdkError(error);
     }
@@ -190,12 +163,13 @@ export class TrueForgeHarness implements HarnessPort {
   async runChildSession(
     packet: CampaignPacket,
     operation: HarnessOperation,
+    options?: HarnessRequestOptions,
   ): Promise<HarnessSessionResult> {
     try {
       // A session owns its sandbox in TrueForge. Creating one here ensures every
       // milestone or repair runs in a fresh child context and fresh sandbox.
-      const sessionId = await this.createNamedSession();
-      const stream = await this.streamSession(sessionId, packet, operation);
+      const sessionId = await this.createNamedSession(options);
+      const stream = await this.streamSession(sessionId, packet, operation, options);
       const createdTurnIds: string[] = [];
       let terminalState: z.infer<typeof turnDoneSchema>["state"] | undefined;
       let terminalCount = 0;
@@ -255,23 +229,29 @@ export class TrueForgeHarness implements HarnessPort {
     sessionId: string,
     packet: CampaignPacket,
     operation: HarnessOperation,
+    options?: HarnessRequestOptions,
   ): Promise<AsyncIterable<unknown>> {
     try {
-      const sdkStream = await this.client.sessions.createTurnStream(sessionId, {
-        input: [{ type: "user.message", content: JSON.stringify({ operation, packet }) }],
+      const input = {
+        input: [{ type: "user.message" as const, content: JSON.stringify({ operation, packet }) }],
         previousTurnId: "auto",
-      });
+      };
+      const sdkStream = options === undefined
+        ? await this.client.sessions.createTurnStream(sessionId, input)
+        : await this.client.sessions.createTurnStream(sessionId, input, requestOptions(options));
       return normalizeStreamErrors(sdkStream);
     } catch (error) {
       throw normalizeSdkError(error);
     }
   }
 
-  async getSessionEvents(sessionId: string): Promise<readonly unknown[]> {
+  async getSessionEvents(sessionId: string, options?: HarnessRequestOptions): Promise<readonly unknown[]> {
     try {
       // The pinned SDK returns core.Page as one AsyncIterable and follows
       // next_page_token internally; no separate cursor loop is needed here.
-      const page = await this.client.sessions.listEvents(sessionId, { limit: 100 });
+      const page = options === undefined
+        ? await this.client.sessions.listEvents(sessionId, { limit: 100 })
+        : await this.client.sessions.listEvents(sessionId, { limit: 100 }, requestOptions(options));
       const events: unknown[] = [];
       for await (const event of page) {
         events.push(event);
@@ -282,14 +262,23 @@ export class TrueForgeHarness implements HarnessPort {
     }
   }
 
-  private async createNamedSession(): Promise<string> {
-    const created = await this.client.sessions.create({ agent: { name: "openquest" } });
+  private async createNamedSession(options?: HarnessRequestOptions): Promise<string> {
+    const created = options === undefined
+      ? await this.client.sessions.create({ agent: { name: "openquest" } })
+      : await this.client.sessions.create({ agent: { name: "openquest" } }, requestOptions(options));
     const sessionId = created.data.id;
     if (typeof sessionId !== "string" || sessionId.length === 0) {
       throw new HarnessExecutionFailed();
     }
     return sessionId;
   }
+}
+
+function requestOptions(options?: HarnessRequestOptions): { abortSignal?: AbortSignal; timeoutInSeconds?: number } {
+  return {
+    ...(options?.signal === undefined ? {} : { abortSignal: options.signal }),
+    ...(options?.timeoutMs === undefined ? {} : { timeoutInSeconds: Math.ceil(options.timeoutMs / 1_000) }),
+  };
 }
 
 function parseCompletedTurn(

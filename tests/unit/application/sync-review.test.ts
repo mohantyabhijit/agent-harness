@@ -96,7 +96,7 @@ describe("SyncReview", () => {
     const { syncReview, store, harness } = fixture();
     await seedReview(store, campaign({ status: "qodo_review", qodoIteration: 1 }));
 
-    await expect(syncReview.execute("campaign-1", batch)).rejects.toThrow(/review|finding|campaign|commit/i);
+    await expect(syncReview.execute("campaign-1", batch)).rejects.toBeInstanceOf(Error);
     expect((await store.get("campaign-1"))?.qodoFindings).toEqual([]);
     expect(harness.operations).toEqual([]);
   });
@@ -106,7 +106,7 @@ describe("SyncReview", () => {
     await seedReview(store, campaign({ status: "qodo_review", qodoIteration: 1 }));
     store.seedExternalReference("campaign-1", { kind: "commit", value: "c".repeat(40) });
 
-    await expect(syncReview.execute("campaign-1", reviewBatch())).rejects.toThrow(/stale|commit/i);
+    await expect(syncReview.execute("campaign-1", reviewBatch())).rejects.toMatchObject({ code: "campaign_conflict" });
     expect(harness.operations).toEqual([]);
   });
 
@@ -115,7 +115,7 @@ describe("SyncReview", () => {
     await seedReview(store, campaign({ status: "qodo_review", qodoIteration: 1 }));
     store.seedExternalReference("campaign-1", { kind: "pull_request", value: "review-other" });
 
-    await expect(syncReview.execute("campaign-1", reviewBatch())).rejects.toThrow(/pull-request/i);
+    await expect(syncReview.execute("campaign-1", reviewBatch())).rejects.toMatchObject({ code: "campaign_conflict" });
     expect(harness.operations).toEqual([]);
   });
 
@@ -178,7 +178,7 @@ describe("SyncReview", () => {
     const { syncReview, store, harness } = fixture();
     store.seed(campaign({ status: "human_escalation", qodoIteration: 3 }));
 
-    await expect(syncReview.execute("campaign-1", reviewBatch())).rejects.toThrow(/qodo review/i);
+    await expect(syncReview.execute("campaign-1", reviewBatch())).rejects.toMatchObject({ code: "invalid_transition" });
     expect(harness.operations).toEqual([]);
   });
 
@@ -196,7 +196,7 @@ describe("SyncReview", () => {
     const second = reviewBatch({ reviewId: "review-b", commitSha: nextCommit, findings: [fixed] });
 
     await expect(syncReview.execute("campaign-1", second)).resolves.toMatchObject({ status: "qodo_review" });
-    await expect(syncReview.execute("campaign-1", second)).rejects.toThrow(/already synchronized/i);
+    await expect(syncReview.execute("campaign-1", second)).rejects.toMatchObject({ code: "campaign_conflict" });
     const claimed = (await store.get("campaign-1"))?.events.filter(({ eventType }) => eventType === "qodo_review_claimed");
     expect(claimed).toHaveLength(2);
   });

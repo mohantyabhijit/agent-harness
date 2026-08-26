@@ -1,12 +1,12 @@
 import Fastify, { type FastifyInstance } from "fastify";
 import { z } from "zod";
 
-import { HarnessAuthRequired, HarnessExecutionFailed, HarnessOutputInvalid, HarnessUnavailable } from "../adapters/trueforge/harness.js";
+import { ApplicationError } from "../application/errors.js";
 import { CreateCampaign, type Clock, type IdGenerator } from "../application/create-campaign.js";
 import { DiscoverRepositories } from "../application/discover.js";
-import { CampaignIdentityConflict, CampaignVersionConflict, type CampaignStore } from "../application/ports/campaign-store.js";
+import { ApprovalIssuanceConflict, CampaignIdentityConflict, CampaignVersionConflict, type CampaignStore } from "../application/ports/campaign-store.js";
 import type { GithubCatalogPort } from "../application/ports/github-catalog.js";
-import type { HarnessPort } from "../application/ports/harness.js";
+import { HarnessError, type HarnessPort } from "../application/ports/harness.js";
 import { RunCampaign } from "../application/run-campaign.js";
 import { SyncReview } from "../application/sync-review.js";
 import { registerApprovalRoutes } from "./routes/approvals.js";
@@ -15,6 +15,7 @@ import { registerDiscoveryRoutes } from "./routes/discovery.js";
 import { registerReviewRoutes } from "./routes/reviews.js";
 import { registerSpaceRoutes } from "./routes/spaces.js";
 import { ApiProblem } from "./routes/support.js";
+import type { AuthorizationPolicy } from "./authorization.js";
 
 const emptyQuerySchema = z.object({}).strict();
 
@@ -24,6 +25,7 @@ export interface AppDependencies {
   readonly harness: HarnessPort;
   readonly clock: Clock;
   readonly ids: IdGenerator;
+  readonly authorization: AuthorizationPolicy;
 }
 
 export function buildApp(dependencies: AppDependencies): FastifyInstance {
@@ -35,6 +37,10 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
 
   app.addHook("preValidation", async (request) => {
     emptyQuerySchema.parse(request.query);
+  });
+  app.addHook("onRequest", async (request) => {
+    if (request.method === "GET" || request.method === "HEAD") return;
+    dependencies.authorization.require(request, request.url.endsWith("/reviews/sync") ? "review_provider" : "operator");
   });
   app.setErrorHandler((error, _request, reply) => {
     const problem = mapError(error);
@@ -56,22 +62,26 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
 function mapError(error: unknown): ApiProblem {
   if (error instanceof ApiProblem) return error;
   if (error instanceof z.ZodError) return new ApiProblem(400, "invalid_request", "Request validation failed");
-  if (error instanceof HarnessUnavailable || error instanceof HarnessAuthRequired || error instanceof HarnessExecutionFailed || error instanceof HarnessOutputInvalid) {
+  if (error instanceof HarnessError) {
     return new ApiProblem(503, "harness_unavailable", "Agent harness is unavailable");
   }
+  if (error instanceof ApplicationError) {
+    const mapped = {
+      campaign_not_found: [404, "campaign_not_found", "Campaign was not found"],
+      campaign_conflict: [409, "campaign_conflict", "Campaign conflicts with current state"],
+      approval_required: [412, "approval_required", "Exact action approval is required"],
+      invalid_transition: [422, "invalid_transition", "Campaign transition is not allowed"],
+      invalid_request: [400, "invalid_request", "Request validation failed"],
+    } as const;
+    const [status, code, message] = mapped[error.code];
+    return new ApiProblem(status, code, message);
+  }
   if (!(error instanceof Error)) return new ApiProblem(500, "internal_error", "Request could not be completed");
-  if (/Campaign does not exist/u.test(error.message)) return new ApiProblem(404, "campaign_not_found", "Campaign was not found");
-  if (("statusCode" in error && error.statusCode === 400) || /^Invalid (?:external action payload|Qodo review batch|Qodo finding)/u.test(error.message)) {
+  if (("statusCode" in error && error.statusCode === 400) || ("code" in error && ["FST_ERR_CTP_BODY_TOO_LARGE", "FST_ERR_CTP_INVALID_MEDIA_TYPE", "FST_ERR_CTP_EMPTY_JSON_BODY"].includes(String(error.code)))) {
     return new ApiProblem(400, "invalid_request", "Request validation failed");
   }
-  if (error instanceof CampaignVersionConflict || error instanceof CampaignIdentityConflict || /already exists|stale|already synchronized|ambiguous|does not match campaign (?:memory|identity)|current head/i.test(error.message)) {
+  if (error instanceof CampaignVersionConflict || error instanceof CampaignIdentityConflict || error instanceof ApprovalIssuanceConflict) {
     return new ApiProblem(409, "campaign_conflict", "Campaign conflicts with current state");
-  }
-  if (/approval|exact external action/i.test(error.message)) {
-    return new ApiProblem(412, "approval_required", "Exact action approval is required");
-  }
-  if (/transition|cannot run|not awaiting|current state|requires explicit human recovery|lacks a repair completion/i.test(error.message)) {
-    return new ApiProblem(422, "invalid_transition", "Campaign transition is not allowed");
   }
   return new ApiProblem(500, "internal_error", "Request could not be completed");
 }

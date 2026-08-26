@@ -100,6 +100,19 @@ export interface ChildResultRecord {
   readonly childSessionId: string;
   readonly event: CampaignEvent;
   readonly newCommitSha?: string;
+  readonly operationResult?: CampaignOperationResult;
+}
+
+export interface CampaignOperationResult {
+  readonly operation: "preflight" | "implement" | "verify" | "repair";
+  readonly currentCommitSha: string;
+  readonly pullRequest?: string;
+  readonly qodoIteration: number;
+}
+
+export interface ApprovalIssuanceRecord {
+  readonly approval: Approval;
+  readonly idempotencyKey: string;
 }
 
 export interface CampaignStore {
@@ -111,6 +124,7 @@ export interface CampaignStore {
   appendEvidence(campaignId: string, evidence: Evidence): Promise<void>;
   appendEvent(campaignId: string, event: CampaignEvent): Promise<void>;
   recordApproval(approval: Approval): Promise<void>;
+  issueApproval(record: ApprovalIssuanceRecord): Promise<Approval>;
   /** @deprecated Production orchestration must use claimExternalAction so approval consumption and the durable claim are atomic. */
   consumeApproval(
     approvalId: string,
@@ -154,3 +168,19 @@ export class CampaignIdentityConflict extends Error {
     this.name = "CampaignIdentityConflict";
   }
 }
+
+export class ApprovalIssuanceConflict extends Error {
+  constructor() {
+    super("Approval issuance conflicts with an existing human confirmation");
+    this.name = "ApprovalIssuanceConflict";
+  }
+}
+
+export const reservedCampaignEventTypes = new Set([
+  "campaign_operation_completed",
+  "external_action_attempted",
+  "external_action_completed",
+  "external_action_outcome_unknown",
+  "external_action_reconciled",
+  "external_action_stale_recovered",
+]);

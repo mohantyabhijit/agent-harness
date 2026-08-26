@@ -33,7 +33,7 @@ describe("CreateCampaign", () => {
         issueUrl: first.issueUrl,
         lane: "easy_win",
       }),
-    ).rejects.toThrow(/already exists/i);
+    ).rejects.toMatchObject({ code: "campaign_conflict" });
     expect(harness.parentSessions).toEqual(["session-1"]);
   });
 
@@ -72,7 +72,7 @@ describe("CreateCampaign", () => {
     const rejected = results.find(({ status }) => status === "rejected");
     expect(rejected).toMatchObject({ status: "rejected" });
     if (rejected?.status === "rejected") {
-      expect(rejected.reason).toEqual(new Error("Campaign already exists for this repository issue"));
+      expect(rejected.reason).toMatchObject({ code: "campaign_conflict" });
     }
     const stored = await store.findByIssue("OWNER/REPO", 42);
     expect(stored?.campaign.parentSessionId).toBe("session-1");

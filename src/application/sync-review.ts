@@ -8,16 +8,10 @@ import type { Clock, IdGenerator } from "./create-campaign.js";
 import type { CampaignEvent, CampaignSnapshot, CampaignStore } from "./ports/campaign-store.js";
 import type { CampaignPacket, HarnessPort } from "./ports/harness.js";
 import { isPullRequest } from "./external-action.js";
+import { parseQodoReviewBatch, type QodoReviewBatch } from "./qodo-review-batch.js";
+import { ApplicationError } from "./errors.js";
 
-export interface QodoReviewBatch {
-  readonly campaignId: string;
-  readonly pullRequest: string;
-  readonly reviewId: string;
-  readonly commitSha: string;
-  readonly testsPassed: boolean;
-  readonly complete: boolean;
-  readonly findings: readonly QodoFinding[];
-}
+export type { QodoReviewBatch } from "./qodo-review-batch.js";
 
 interface ClaimedReview {
   readonly campaign: Campaign;
@@ -33,13 +27,13 @@ export class SyncReview {
   ) {}
 
   async execute(campaignId: string, input: QodoReviewBatch): Promise<Campaign> {
-    const batch = parseReviewBatch(input);
+    const batch = parseQodoReviewBatch(input);
     if (batch.campaignId !== campaignId) {
-      throw new Error("Qodo review campaign does not match requested campaign");
+      throw new ApplicationError("campaign_conflict");
     }
     const snapshot = await this.requiredSnapshot(campaignId);
     if (snapshot.campaign.status !== "qodo_review") {
-      throw new Error("Campaign is not awaiting Qodo review");
+      throw new ApplicationError("invalid_transition");
     }
     assertReviewIsCurrent(snapshot, batch);
 
@@ -105,6 +99,12 @@ export class SyncReview {
           resultingCampaignVersion: resultingVersion,
         }),
         ...(nextCommitSha === undefined ? {} : { newCommitSha: nextCommitSha }),
+        operationResult: {
+          operation: "repair",
+          currentCommitSha: nextCommitSha ?? batch.commitSha,
+          pullRequest: batch.pullRequest,
+          qodoIteration: claimed.campaign.qodoIteration,
+        },
       });
       return { ...claimed.campaign, version: recordedVersion };
     } catch {
@@ -197,7 +197,7 @@ export class SyncReview {
   private async requiredSnapshot(campaignId: string): Promise<CampaignSnapshot> {
     const snapshot = await this.store.get(campaignId);
     if (snapshot === undefined) {
-      throw new Error("Campaign does not exist");
+      throw new ApplicationError("campaign_not_found");
     }
     return snapshot;
   }
@@ -220,20 +220,20 @@ function claimReview(campaign: Campaign, gate: QualityGateResult): ClaimedReview
 }
 
 function assertReviewIsCurrent(snapshot: CampaignSnapshot, batch: QodoReviewBatch): void {
-  if (!isPullRequest(batch.pullRequest, snapshot.campaign.repository)) throw new Error("Invalid Qodo pull-request identity");
+  if (!isPullRequest(batch.pullRequest, snapshot.campaign.repository)) throw new ApplicationError("campaign_conflict");
   const commitReferences = snapshot.externalReferences.filter(({ kind }) => kind === "commit");
   const currentCommit = commitReferences[0];
   if (commitReferences.length !== 1 || currentCommit === undefined || currentCommit.value !== batch.commitSha) {
-    throw new Error("Stale Qodo review commit does not match campaign memory");
+    throw new ApplicationError("campaign_conflict");
   }
   const pullRequests = snapshot.externalReferences
     .filter(({ kind }) => kind === "pull_request")
     .map(({ value }) => value);
   if (new Set(pullRequests).size > 1) {
-    throw new Error("Qodo review has ambiguous pull-request campaign memory");
+    throw new ApplicationError("campaign_conflict");
   }
   if (pullRequests.length !== 1 || pullRequests[0] !== batch.pullRequest) {
-    throw new Error("Stale Qodo review does not match pull-request campaign memory");
+    throw new ApplicationError("campaign_conflict");
   }
   if (snapshot.events.some((event) =>
     event.eventType === "qodo_review_claimed" &&
@@ -242,7 +242,7 @@ function assertReviewIsCurrent(snapshot: CampaignSnapshot, batch: QodoReviewBatc
     event.payload.commitSha === batch.commitSha &&
     event.payload.reviewIteration === snapshot.campaign.qodoIteration
   )) {
-    throw new Error("Stale Qodo review batch was already synchronized");
+    throw new ApplicationError("campaign_conflict");
   }
 }
 
@@ -255,81 +255,6 @@ function mergeFindings(
     findings.set(finding.id, finding);
   }
   return [...findings.values()];
-}
-
-function parseReviewBatch(input: unknown): QodoReviewBatch {
-  if (!isRecord(input)) {
-    throw new Error("Invalid Qodo review batch");
-  }
-  const allowedKeys = new Set([
-    "campaignId",
-    "pullRequest",
-    "reviewId",
-    "commitSha",
-    "testsPassed",
-    "complete",
-    "findings",
-  ]);
-  if (
-    Object.keys(input).some((key) => !allowedKeys.has(key)) ||
-    typeof input.campaignId !== "string" ||
-    input.campaignId.trim().length === 0 ||
-    typeof input.pullRequest !== "string" ||
-    typeof input.reviewId !== "string" ||
-    input.reviewId.trim().length === 0 ||
-    typeof input.commitSha !== "string" ||
-    !/^[0-9a-f]{40}$/u.test(input.commitSha) ||
-    typeof input.testsPassed !== "boolean" ||
-    typeof input.complete !== "boolean" ||
-    !Array.isArray(input.findings) ||
-    (!input.complete && input.findings.length === 0)
-  ) {
-    throw new Error("Invalid Qodo review batch");
-  }
-  const findings = input.findings.map(parseFinding);
-  if (new Set(findings.map(({ id }) => id)).size !== findings.length) throw new Error("Invalid Qodo review batch");
-  if (!/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/[1-9][0-9]*$/u.test(input.pullRequest)) throw new Error("Invalid Qodo review batch");
-  return {
-    campaignId: input.campaignId,
-    pullRequest: input.pullRequest,
-    reviewId: input.reviewId,
-    commitSha: input.commitSha,
-    testsPassed: input.testsPassed,
-    complete: input.complete,
-    findings,
-  };
-}
-
-function parseFinding(finding: unknown): QodoFinding {
-  if (!isRecord(finding)) {
-    throw new Error("Invalid Qodo finding");
-  }
-  const allowedKeys = new Set(["id", "severity", "status", "summary", "sourceUrl", "disposition"]);
-  const severities: readonly QodoFinding["severity"][] = ["high", "medium", "low", "suggestion"];
-  const statuses: readonly QodoFinding["status"][] = ["open", "fixed", "dismissed"];
-  if (
-    Object.keys(finding).some((key) => !allowedKeys.has(key)) ||
-    typeof finding.id !== "string" ||
-    finding.id.trim().length === 0 ||
-    !severities.includes(finding.severity as QodoFinding["severity"]) ||
-    !statuses.includes(finding.status as QodoFinding["status"]) ||
-    typeof finding.summary !== "string" ||
-    finding.summary.trim().length === 0 ||
-    (finding.sourceUrl !== undefined &&
-      (typeof finding.sourceUrl !== "string" || finding.sourceUrl.trim().length === 0)) ||
-    (finding.disposition !== undefined &&
-      (typeof finding.disposition !== "string" || finding.disposition.trim().length === 0))
-  ) {
-    throw new Error("Invalid Qodo finding");
-  }
-  return {
-    id: finding.id,
-    severity: finding.severity as QodoFinding["severity"],
-    status: finding.status as QodoFinding["status"],
-    summary: finding.summary,
-    ...(finding.sourceUrl === undefined ? {} : { sourceUrl: finding.sourceUrl }),
-    ...(finding.disposition === undefined ? {} : { disposition: finding.disposition }),
-  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -10,6 +10,7 @@ import { SyncReview } from "../application/sync-review.js";
 import type { AppDependencies } from "./app.js";
 import type { ServerConfig } from "./config.js";
 import { createQodoReviewJob, HarnessQodoReviewSource, type QodoReviewJob, type ReviewJobScheduler } from "./jobs/qodo-review-job.js";
+import { bearerAuthorizationPolicy } from "./authorization.js";
 
 export interface ServerContainer {
   readonly dependencies: AppDependencies;
@@ -30,6 +31,7 @@ export function createContainer(config: ServerConfig): ServerContainer {
     catalog: new TrueForgeGithubCatalog(harness),
     clock,
     ids,
+    authorization: bearerAuthorizationPolicy({ operator: config.OPERATOR_BEARER_TOKEN, reviewProvider: config.REVIEW_PROVIDER_BEARER_TOKEN }),
   };
   const scheduler: ReviewJobScheduler = {
     setInterval: (callback, intervalMs) => setInterval(callback, intervalMs),
@@ -41,6 +43,7 @@ export function createContainer(config: ServerConfig): ServerContainer {
     syncReview: new SyncReview(store, harness, clock, ids),
     scheduler,
     intervalMs: config.QODO_POLL_INTERVAL_MS,
+    shutdownTimeoutMs: config.QODO_SHUTDOWN_TIMEOUT_MS,
   });
   return {
     dependencies,

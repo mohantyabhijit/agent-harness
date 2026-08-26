@@ -4,6 +4,9 @@ import { z } from "zod";
 import type { CreateCampaign } from "../../application/create-campaign.js";
 import type { CampaignStore } from "../../application/ports/campaign-store.js";
 import type { RunCampaign } from "../../application/run-campaign.js";
+import { ApplicationError } from "../../application/errors.js";
+import { CampaignIdentityConflict, CampaignVersionConflict } from "../../application/ports/campaign-store.js";
+import { HarnessError } from "../../application/ports/harness.js";
 import { boundedUrlSchema, campaignIdSchema, campaignNotFound, issueNumberSchema, publicCampaignSnapshot, repositorySchema } from "./support.js";
 
 const createCampaignSchema = z
@@ -46,6 +49,11 @@ export function registerCampaignRoutes(app: FastifyInstance, dependencies: Campa
   app.post("/api/campaigns/:id/actions/:action", async (request) => {
     const { id, action } = actionParamsSchema.parse(request.params);
     emptyBodySchema.parse(request.body ?? {});
-    return dependencies.runCampaign.execute(id, action);
+    try {
+      return await dependencies.runCampaign.execute(id, action);
+    } catch (error) {
+      if (error instanceof ApplicationError || error instanceof HarnessError || error instanceof CampaignVersionConflict || error instanceof CampaignIdentityConflict) throw error;
+      throw new ApplicationError("invalid_transition");
+    }
   });
 }

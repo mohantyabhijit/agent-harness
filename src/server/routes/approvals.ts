@@ -4,7 +4,7 @@ import { z } from "zod";
 import { externalActionDigest, validateExternalActionPayload, type ExternalActionPayload } from "../../application/external-action.js";
 import type { Clock, IdGenerator } from "../../application/create-campaign.js";
 import type { CampaignStore, CampaignSnapshot } from "../../application/ports/campaign-store.js";
-import { isApprovalActionAllowed, issueApproval } from "../../domain/approval.js";
+import { isApprovalActionAllowed, issueApproval as createApproval } from "../../domain/approval.js";
 import { ApiProblem, campaignIdSchema, campaignNotFound, issueNumberSchema, repositorySchema } from "./support.js";
 
 const textSchema = z.string().trim().min(1).max(20_000);
@@ -20,6 +20,7 @@ const externalActionPayloadSchema = z.discriminatedUnion("action", [
 ]);
 const approvalBodySchema = z.object({ payload: externalActionPayloadSchema, expiresAt: z.iso.datetime({ offset: true }).optional() }).strict();
 const paramsSchema = z.object({ id: campaignIdSchema }).strict();
+const idempotencyKeySchema = z.string().min(8).max(128).regex(/^[\x21-\x7E]+$/u);
 
 export interface ApprovalRouteDependencies {
   readonly store: CampaignStore;
@@ -31,12 +32,13 @@ export function registerApprovalRoutes(app: FastifyInstance, dependencies: Appro
   app.post("/api/campaigns/:id/approvals", async (request, reply) => {
     const { id } = paramsSchema.parse(request.params);
     const input = approvalBodySchema.parse(request.body);
+    const idempotencyKey = idempotencyKeySchema.parse(request.headers["idempotency-key"]);
     validateExternalActionPayload(input.payload);
     const snapshot = await dependencies.store.get(id);
     if (snapshot === undefined) throw campaignNotFound();
     assertApprovalCanBeIssued(snapshot, input.payload);
     const issuedAt = dependencies.clock.now();
-    const approval = issueApproval({
+    const approval = createApproval({
       id: dependencies.ids.next(),
       campaignId: id,
       action: input.payload.action,
@@ -44,8 +46,8 @@ export function registerApprovalRoutes(app: FastifyInstance, dependencies: Appro
       issuedAt,
       ...(input.expiresAt === undefined ? {} : { expiresAt: input.expiresAt }),
     });
-    await dependencies.store.recordApproval(approval);
-    return reply.code(201).send({ approval, brief: actionBrief(input.payload) });
+    const issued = await dependencies.store.issueApproval({ approval, idempotencyKey });
+    return reply.code(201).send({ approval: issued, brief: actionBrief(input.payload) });
   });
 }
 

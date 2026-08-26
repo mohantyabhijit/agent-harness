@@ -1,6 +1,7 @@
 import type { CampaignStore } from "./ports/campaign-store.js";
 import type { HarnessPort } from "./ports/harness.js";
 import type { Campaign } from "../domain/campaign.js";
+import { ApplicationError } from "./errors.js";
 
 export interface Clock {
   now(): string;
@@ -34,7 +35,7 @@ export class CreateCampaign {
       throw new Error("Campaign existence could not be checked");
     }
     if (existing) {
-      throw new Error("Campaign already exists for this repository issue");
+      throw new ApplicationError("campaign_conflict");
     }
 
     const campaignId = requiredValue(this.ids.next(), "campaign identifier");
@@ -78,7 +79,7 @@ export class CreateCampaign {
         // only through the fixed, non-secret error below.
       }
       if (duplicate) {
-        throw new Error("Campaign already exists for this repository issue");
+        throw new ApplicationError("campaign_conflict");
       }
       throw new Error("Campaign could not be created");
     }

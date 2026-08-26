@@ -1,6 +1,10 @@
 import {
   CampaignIdentityConflict,
   CampaignVersionConflict,
+  ApprovalIssuanceConflict,
+  reservedCampaignEventTypes,
+  type ApprovalIssuanceRecord,
+  type CampaignOperationResult,
   type CampaignEvent,
   type ChildResultRecord,
   type CampaignSnapshot,
@@ -31,6 +35,7 @@ interface MutableSnapshot {
   qodoFindings: QodoFinding[];
   externalReferences: ExternalReference[];
   externalActionClaims: ExternalActionClaim[];
+  operationResults: (CampaignOperationResult & { eventId: string; resultingCampaignVersion: number; childSessionId: string })[];
 }
 
 export class FakeCampaignStore implements CampaignStore {
@@ -127,6 +132,7 @@ export class FakeCampaignStore implements CampaignStore {
   }
 
   async appendEvent(campaignId: string, event: CampaignEvent): Promise<void> {
+    if (reservedCampaignEventTypes.has(event.eventType)) throw new Error("Authoritative campaign event requires its guarded store operation");
     if (this.failNextEvent) {
       this.failNextEvent = false;
       throw new Error("Campaign event persistence failed");
@@ -143,6 +149,24 @@ export class FakeCampaignStore implements CampaignStore {
       throw new Error(`Approval ${approval.id} already exists`);
     }
     snapshot.approvals.push(structuredClone(approval));
+  }
+
+  readonly #approvalKeys = new Map<string, string>();
+
+  async issueApproval(record: ApprovalIssuanceRecord): Promise<Approval> {
+    if (record.idempotencyKey.length < 8 || record.idempotencyKey.length > 128) throw new ApprovalIssuanceConflict();
+    const mapKey = `${record.approval.campaignId}\u0000${record.idempotencyKey}`;
+    const snapshot = this.#required(record.approval.campaignId);
+    const replayId = this.#approvalKeys.get(mapKey);
+    if (replayId !== undefined) {
+      const replay = snapshot.approvals.find(({ id }) => id === replayId);
+      if (replay === undefined || replay.action !== record.approval.action || replay.actionDigest !== record.approval.actionDigest) throw new ApprovalIssuanceConflict();
+      return structuredClone(replay);
+    }
+    if (snapshot.approvals.some(({ actionDigest, status }) => actionDigest === record.approval.actionDigest && status === "approved")) throw new ApprovalIssuanceConflict();
+    await this.recordApproval(record.approval);
+    this.#approvalKeys.set(mapKey, record.approval.id);
+    return structuredClone(record.approval);
   }
 
   /** @deprecated Test compatibility only; orchestration claims through claimExternalAction. */
@@ -428,6 +452,14 @@ export class FakeCampaignStore implements CampaignStore {
     for (const kind of ["child_session", "sandbox"] as const) {
       if (!nextReferences.some((reference) => reference.kind === kind && reference.value === record.childSessionId)) nextReferences.push({ kind, value: record.childSessionId });
     }
+    if (record.event.eventType === "campaign_operation_completed") {
+      const result = record.operationResult;
+      const resultingCommit = nextReferences.find(({ kind }) => kind === "commit")?.value;
+      if (result === undefined || result.currentCommitSha !== resultingCommit) throw new Error("Completed child result lacks typed operation authority");
+      if (result.qodoIteration !== snapshot.campaign.qodoIteration) throw new Error("Operation result Qodo iteration does not match campaign");
+      if (result.operation === "repair" && (result.pullRequest === undefined || !isPullRequest(result.pullRequest, snapshot.campaign.repository) || singletonPullRequest(snapshot) !== result.pullRequest)) throw new Error("Repair result lacks current pull request identity");
+      snapshot.operationResults.push({ ...structuredClone(result), eventId: record.event.id, resultingCampaignVersion: resultingVersion, childSessionId: record.childSessionId });
+    } else if (record.operationResult !== undefined) throw new Error("Typed operation authority requires a completed child event");
     snapshot.externalReferences = nextReferences;
     snapshot.events.push(structuredClone(record.event));
     this.#eventIds.add(record.event.id);
@@ -487,6 +519,7 @@ export class FakeCampaignStore implements CampaignStore {
       qodoFindings: [],
       externalReferences: [],
       externalActionClaims: [],
+      operationResults: [],
     });
   }
 
@@ -506,7 +539,15 @@ export class FakeCampaignStore implements CampaignStore {
 }
 
 function cloneSnapshot(snapshot: MutableSnapshot): CampaignSnapshot {
-  return structuredClone(snapshot);
+  return structuredClone({
+    campaign: snapshot.campaign,
+    evidence: snapshot.evidence,
+    events: snapshot.events,
+    approvals: snapshot.approvals,
+    qodoFindings: snapshot.qodoFindings,
+    externalReferences: snapshot.externalReferences,
+    externalActionClaims: snapshot.externalActionClaims,
+  });
 }
 
 function assertCommitSha(commitSha: string): void {
@@ -547,29 +588,10 @@ function assertUpdatePullRequestIdentity(
   if (pullRequests.length !== 1 || pullRequests[0]?.value !== payload.pullRequest || !isPullRequest(payload.pullRequest, snapshot.campaign.repository)) {
     throw new Error("External action pull request does not match campaign memory");
   }
-  const matches = snapshot.events.filter((event) => isMatchingRepairCompletion(event, snapshot, payload));
+  const matches = snapshot.operationResults.filter((result) => result.operation === "repair" &&
+    result.resultingCampaignVersion === snapshot.campaign.version && result.currentCommitSha === payload.commitSha &&
+    result.pullRequest === payload.pullRequest && result.qodoIteration === snapshot.campaign.qodoIteration);
   if (matches.length !== 1) throw new Error("Campaign lacks one unambiguous repair completion event for this update");
-}
-
-function isMatchingRepairCompletion(
-  event: CampaignEvent,
-  snapshot: MutableSnapshot,
-  payload: Extract<import("../../src/application/external-action.js").ExternalActionPayload, { action: "update_pr" }>,
-): boolean {
-  if (event.eventType !== "campaign_operation_completed" || !isRecord(event.payload) || !isRecord(event.payload.output)) return false;
-  const repairedFromCommit = event.payload.commitSha;
-  if (typeof repairedFromCommit !== "string" || !/^[0-9a-f]{40}$/u.test(repairedFromCommit)) return false;
-  const expectedClaimedVersion = snapshot.campaign.version - (repairedFromCommit === payload.commitSha ? 0 : 1);
-  return event.payload.operation === "repair" &&
-    event.payload.pullRequest === payload.pullRequest &&
-    event.payload.iteration === snapshot.campaign.qodoIteration &&
-    event.payload.claimedCampaignVersion === expectedClaimedVersion &&
-    event.payload.resultingCampaignVersion === snapshot.campaign.version &&
-    event.payload.output.commitSha === payload.commitSha;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function assertExternalActionEventVersion(payload: unknown, expectedVersion: number, resultingVersion: number): void {

@@ -34,6 +34,16 @@ describe("TrueForgeHarness", () => {
     expect(client.sessions.create).toHaveBeenCalledWith({ agent: { name: "openquest" } });
   });
 
+  it("passes injected cancellation and timeout options to the SDK", async () => {
+    const controller = new AbortController();
+    const client = { sessions: { create: vi.fn().mockResolvedValue({ data: { id: "session-1" } }) } };
+    const harness = new TrueForgeHarness(client as never);
+
+    await harness.createParentSession("owner/repo#42", { signal: controller.signal, timeoutMs: 1_500 });
+
+    expect(client.sessions.create).toHaveBeenCalledWith({ agent: { name: "openquest" } }, { abortSignal: controller.signal, timeoutInSeconds: 2 });
+  });
+
   it("deletes an unused parent session for campaign-creation compensation", async () => {
     const client = { sessions: { delete: vi.fn().mockResolvedValue(undefined) } };
     const harness = new TrueForgeHarness(client as never);

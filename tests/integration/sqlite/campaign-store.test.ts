@@ -13,6 +13,7 @@ import { issueApproval } from "../../../src/domain/approval.js";
 import { transitionCampaign } from "../../../src/domain/campaign.js";
 import { campaign, evidence } from "../../builders.js";
 import { FakeHarness } from "../../fakes/fake-harness.js";
+import { FakeCampaignStore } from "../../fakes/fake-campaign-store.js";
 
 const databases: Database.Database[] = [];
 const temporaryDirectories: string[] = [];
@@ -92,7 +93,56 @@ function externalClaimRecord(): ExternalActionClaimRecord {
   };
 }
 
+function insertRepairAuthority(database: Database.Database, input: { eventId: string; currentHead: string; pullRequest: string; qodoIteration?: number }): void {
+  database.prepare("INSERT INTO campaign_events (id, campaign_id, event_type, payload_json, occurred_at) VALUES (?, 'campaign-1', 'campaign_operation_completed', '{}', '2026-08-26T00:00:30Z')").run(input.eventId);
+  database.prepare(`INSERT INTO campaign_operation_results
+    (event_id, campaign_id, operation, resulting_campaign_version, current_commit_sha, pull_request, qodo_iteration, child_session_id)
+    VALUES (?, 'campaign-1', 'repair', 3, ?, ?, ?, ?)`
+  ).run(input.eventId, input.currentHead, input.pullRequest, input.qodoIteration ?? 1, `child-${input.eventId}`);
+}
+
 describe("SqliteCampaignStore", () => {
+  it.each([
+    ["SQLite", () => openMemoryStore().store],
+    ["fake", () => new FakeCampaignStore()],
+  ])("rejects fabricated authoritative events in the %s store", async (_label, factory) => {
+    const store = factory();
+    if (store instanceof FakeCampaignStore) store.seed(campaign({ status: "repair", qodoIteration: 1 }));
+    else await store.create(campaign({ status: "repair", qodoIteration: 1 }));
+    await expect(store.appendEvent("campaign-1", { id: "forged", eventType: "campaign_operation_completed", payload: { operation: "repair" }, occurredAt: "2026-08-26T00:00:00Z" })).rejects.toThrow(/guarded|authoritative/i);
+    await expect(store.appendEvent("campaign-1", { id: "forged-claim", eventType: "external_action_attempted", payload: {}, occurredAt: "2026-08-26T00:00:00Z" })).rejects.toThrow(/guarded|authoritative/i);
+    expect((await store.get("campaign-1"))?.events).toHaveLength(0);
+  });
+
+  it("issues approvals idempotently and permits a fresh confirmation only after consumption", async () => {
+    const { store, database } = openMemoryStore();
+    await store.create(campaign({ status: "contribution_approval", version: 7 }));
+    database.prepare("INSERT INTO external_references (campaign_id, kind, value) VALUES (?, 'commit', ?)").run("campaign-1", "a".repeat(40));
+    const first = issueApproval({ id: "approval-idem-1", campaignId: "campaign-1", action: "create_pr", actionDigest: externalActionDigest(externalPayload), issuedAt: "2026-08-26T00:00:00Z" });
+    expect((await store.issueApproval({ approval: first, idempotencyKey: "confirmation-001" })).id).toBe(first.id);
+    expect((await store.issueApproval({ approval: { ...first, id: "discarded" }, idempotencyKey: "confirmation-001" })).id).toBe(first.id);
+    const concurrent = await Promise.allSettled([
+      store.issueApproval({ approval: { ...first, id: "approval-idem-2" }, idempotencyKey: "confirmation-002" }),
+      store.issueApproval({ approval: { ...first, id: "approval-idem-3" }, idempotencyKey: "confirmation-003" }),
+    ]);
+    expect(concurrent.every(({ status }) => status === "rejected")).toBe(true);
+    await store.claimExternalAction("campaign-1", { ...externalClaimRecord(), approvalId: first.id });
+    expect((await store.issueApproval({ approval: { ...first, id: "ignored-replay" }, idempotencyKey: "confirmation-001" })).status).toBe("consumed");
+    await expect(store.issueApproval({ approval: { ...first, id: "approval-idem-fresh" }, idempotencyKey: "confirmation-004" })).resolves.toMatchObject({ id: "approval-idem-fresh", status: "approved" });
+  });
+
+  it("allows only one approved digest across concurrent confirmation keys and connections", async () => {
+    const { storeA, storeB } = openTwoConnectionStore("openquest-approval-issuance-");
+    await storeA.create(campaign({ status: "contribution_approval" }));
+    const base = issueApproval({ id: "approval-a", campaignId: "campaign-1", action: "create_pr", actionDigest: "sha256:same-action", issuedAt: "2026-08-26T00:00:00Z" });
+    const results = await Promise.allSettled([
+      storeA.issueApproval({ approval: base, idempotencyKey: "confirmation-A" }),
+      storeB.issueApproval({ approval: { ...base, id: "approval-b" }, idempotencyKey: "confirmation-B" }),
+    ]);
+    expect(results.filter(({ status }) => status === "fulfilled")).toHaveLength(1);
+    expect(results.filter(({ status }) => status === "rejected")).toHaveLength(1);
+    expect((await storeA.get("campaign-1"))?.approvals.filter(({ status }) => status === "approved")).toHaveLength(1);
+  });
   it("creates the campaign and initial event in one transaction", async () => {
     const { store } = openMemoryStore();
     const initialEvent = {
@@ -452,6 +502,7 @@ describe("SqliteCampaignStore", () => {
       childSessionId: "child-1",
       event: { id: "child-event", eventType: "campaign_operation_completed", payload: { claimedCampaignVersion: 4, resultingCampaignVersion: 5 }, occurredAt: "2026-08-26T00:01:00Z" },
       newCommitSha: "b".repeat(40),
+      operationResult: { operation: "implement", currentCommitSha: "b".repeat(40), qodoIteration: 0 },
     });
 
     expect(version).toBe(5);
@@ -464,8 +515,9 @@ describe("SqliteCampaignStore", () => {
   });
 
   it("forbids generic repair-time rotation while the claimed child can atomically publish its commit", async () => {
-    const { store } = openMemoryStore();
+    const { store, database } = openMemoryStore();
     await store.create(campaign({ status: "repair", version: 2, qodoIteration: 1 }));
+    database.prepare("INSERT INTO external_references (campaign_id, kind, value) VALUES (?, 'pull_request', ?)").run("campaign-1", "https://github.com/owner/repo/pull/7");
     await expect(store.replaceCurrentCommit("campaign-1", "b".repeat(40), 2, "repair")).rejects.toThrow(/repair/i);
     const version = await store.recordChildResult("campaign-1", {
       expectedVersion: 2,
@@ -473,6 +525,7 @@ describe("SqliteCampaignStore", () => {
       childSessionId: "repair-child",
       event: { id: "repair-completed", eventType: "campaign_operation_completed", payload: { claimedCampaignVersion: 2, resultingCampaignVersion: 3 }, occurredAt: "2026-08-26T00:01:00Z" },
       newCommitSha: "b".repeat(40),
+      operationResult: { operation: "repair", currentCommitSha: "b".repeat(40), pullRequest: "https://github.com/owner/repo/pull/7", qodoIteration: 1 },
     });
     expect(version).toBe(3);
     expect((await store.get("campaign-1"))?.externalReferences).toContainEqual({ kind: "commit", value: "b".repeat(40) });
@@ -574,20 +627,7 @@ describe("SqliteCampaignStore", () => {
     await store.create(campaign({ status: "repair", version: 3, qodoIteration: 1 }));
     database.prepare("INSERT INTO external_references (campaign_id, kind, value) VALUES (?, 'commit', ?)").run("campaign-1", currentHead);
     database.prepare("INSERT INTO external_references (campaign_id, kind, value) VALUES (?, 'pull_request', ?)").run("campaign-1", payload.pullRequest);
-    await store.appendEvent("campaign-1", {
-      id: "repair-completed",
-      eventType: "campaign_operation_completed",
-      payload: {
-        operation: "repair",
-        pullRequest: payload.pullRequest,
-        commitSha: "a".repeat(40),
-        iteration: 1,
-        claimedCampaignVersion: 2,
-        resultingCampaignVersion: 3,
-        output: { status: "completed", commitSha: currentHead },
-      },
-      occurredAt: "2026-08-26T00:00:30Z",
-    });
+    insertRepairAuthority(database, { eventId: "repair-completed", currentHead, pullRequest: payload.pullRequest });
     await store.recordApproval(issueApproval({
       id: "approval-update",
       campaignId: "campaign-1",
@@ -642,30 +682,11 @@ describe("SqliteCampaignStore", () => {
     if (scenario === "ambiguous_pr") {
       database.prepare("INSERT INTO external_references (campaign_id, kind, value) VALUES (?, 'pull_request', ?)").run("campaign-1", "https://github.com/owner/repo/pull/8");
     }
-    const eventPayload = {
-      operation: "repair",
-      pullRequest: payload.pullRequest,
-      commitSha: "a".repeat(40),
-      iteration: scenario === "mismatched_event" ? 2 : 1,
-      claimedCampaignVersion: 2,
-      resultingCampaignVersion: 3,
-      output: { status: "completed", commitSha: currentHead },
-    };
     if (scenario !== "missing_event") {
-      await store.appendEvent("campaign-1", {
-        id: "repair-completed-1",
-        eventType: "campaign_operation_completed",
-        payload: eventPayload,
-        occurredAt: "2026-08-26T00:00:30Z",
-      });
+      insertRepairAuthority(database, { eventId: "repair-completed-1", currentHead, pullRequest: payload.pullRequest, qodoIteration: scenario === "mismatched_event" ? 2 : 1 });
     }
     if (scenario === "ambiguous_event") {
-      await store.appendEvent("campaign-1", {
-        id: "repair-completed-2",
-        eventType: "campaign_operation_completed",
-        payload: eventPayload,
-        occurredAt: "2026-08-26T00:00:31Z",
-      });
+      insertRepairAuthority(database, { eventId: "repair-completed-2", currentHead, pullRequest: payload.pullRequest });
     }
     await store.recordApproval(issueApproval({
       id: "approval-update",
@@ -709,20 +730,7 @@ describe("SqliteCampaignStore", () => {
     await storeA.create(campaign({ status: "repair", version: 3, qodoIteration: 1 }));
     databaseA.prepare("INSERT INTO external_references (campaign_id, kind, value) VALUES (?, 'commit', ?)").run("campaign-1", currentHead);
     databaseA.prepare("INSERT INTO external_references (campaign_id, kind, value) VALUES (?, 'pull_request', ?)").run("campaign-1", payload.pullRequest);
-    await storeA.appendEvent("campaign-1", {
-      id: "repair-completed",
-      eventType: "campaign_operation_completed",
-      payload: {
-        operation: "repair",
-        pullRequest: payload.pullRequest,
-        commitSha: "a".repeat(40),
-        iteration: 1,
-        claimedCampaignVersion: 2,
-        resultingCampaignVersion: 3,
-        output: { status: "completed", commitSha: currentHead },
-      },
-      occurredAt: "2026-08-26T00:00:30Z",
-    });
+    insertRepairAuthority(databaseA, { eventId: "repair-completed", currentHead, pullRequest: payload.pullRequest });
     await storeA.recordApproval(issueApproval({
       id: "approval-update",
       campaignId: "campaign-1",

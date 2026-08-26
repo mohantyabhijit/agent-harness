@@ -12,6 +12,8 @@ import type {
   HarnessPort,
   HarnessSessionResult,
 } from "./ports/harness.js";
+import { HarnessError } from "./ports/harness.js";
+import { ApplicationError } from "./errors.js";
 import {
   deepFreeze,
   externalActionDigest,
@@ -310,14 +312,16 @@ export class RunCampaign {
         childSessionId: result.sessionId,
         event: this.operationEvent(claimed, resultingVersion, "campaign_operation_completed", "preflight", result, output),
         newCommitSha: output.commitSha,
+        operationResult: { operation: "preflight", currentCommitSha: output.commitSha, qodoIteration: claimed.qodoIteration },
       });
       const recorded = { ...claimed, version: recordedVersion };
       const transitioned = transitionCampaign(recorded, output.verdict === "pass" ? "baseline" : "quarantined");
       await this.store.update(transitioned, recorded.version);
       return transitioned;
-    } catch {
+    } catch (error) {
       await this.failClaimedOperation(claimed, "quarantined", "preflight_execution_failed");
-      throw new Error("Preflight execution failed; campaign quarantined");
+      if (error instanceof HarnessError) throw error;
+      throw new Error("Preflight execution failed; campaign quarantined", { cause: error });
     }
   }
 
@@ -343,11 +347,13 @@ export class RunCampaign {
         childSessionId: result.sessionId,
         event: this.operationEvent(claimed, resultingVersion, "campaign_operation_completed", "implement", result, { result: result.output, previousCommitSha: currentCommitSha, currentCommitSha: resultingCommitSha }),
         ...(nextCommitSha === undefined ? {} : { newCommitSha: nextCommitSha }),
+        operationResult: { operation: "implement", currentCommitSha: resultingCommitSha, qodoIteration: claimed.qodoIteration },
       });
       return { ...claimed, version: recordedVersion };
-    } catch {
+    } catch (error) {
       await this.failClaimedOperation(claimed, "human_escalation", "implementation_execution_failed");
-      throw new Error("Implementation execution failed; human reconciliation required");
+      if (error instanceof HarnessError) throw error;
+      throw new Error("Implementation execution failed; human reconciliation required", { cause: error });
     }
   }
 
@@ -373,11 +379,13 @@ export class RunCampaign {
         expectedStatus: "verification",
         childSessionId: result.sessionId,
         event: this.operationEvent(claimed, claimed.version, "campaign_operation_completed", "verify", result, { result: result.output, currentCommitSha }),
+        operationResult: { operation: "verify", currentCommitSha, qodoIteration: claimed.qodoIteration },
       });
       return { ...claimed, version: recordedVersion };
-    } catch {
+    } catch (error) {
       await this.failClaimedOperation(claimed, "human_escalation", "verification_execution_failed");
-      throw new Error("Verification execution failed; human reconciliation required");
+      if (error instanceof HarnessError) throw error;
+      throw new Error("Verification execution failed; human reconciliation required", { cause: error });
     }
   }
 
@@ -438,7 +446,6 @@ export class RunCampaign {
       if (requiredCurrentCommit(snapshot) !== payload.commitSha) throw new Error("External action commit does not match current campaign head");
       const pullRequests = snapshot.externalReferences.filter(({ kind }) => kind === "pull_request");
       if (pullRequests.length !== 1 || pullRequests[0]?.value !== payload.pullRequest) throw new Error("External action pull request does not match campaign memory");
-      if (!hasRepairCompletion(snapshot, payload)) throw new Error("Campaign lacks a repair completion event for this update");
     }
   }
 
@@ -478,7 +485,7 @@ export class RunCampaign {
   private async requiredSnapshot(campaignId: string): Promise<CampaignSnapshot> {
     const snapshot = await this.store.get(campaignId);
     if (snapshot === undefined) {
-      throw new Error("Campaign does not exist");
+      throw new ApplicationError("campaign_not_found");
     }
     return snapshot;
   }
@@ -502,21 +509,6 @@ function hasOperationCompletion(
     }
     return event.payload.operation === operation && event.payload.resultingCampaignVersion === version &&
       isRecord(event.payload.output) && event.payload.output.currentCommitSha === commitSha;
-  });
-}
-
-function hasRepairCompletion(snapshot: CampaignSnapshot, payload: Extract<ExternalActionPayload, { action: "update_pr" }>): boolean {
-  return snapshot.events.some((event) => {
-    if (event.eventType !== "campaign_operation_completed" || !isRecord(event.payload) || !isRecord(event.payload.output)) return false;
-    const repairedFromCommit = event.payload.commitSha;
-    if (typeof repairedFromCommit !== "string" || !/^[0-9a-f]{40}$/u.test(repairedFromCommit)) return false;
-    const expectedClaimedVersion = snapshot.campaign.version - (repairedFromCommit === payload.commitSha ? 0 : 1);
-    return event.payload.operation === "repair" &&
-      event.payload.claimedCampaignVersion === expectedClaimedVersion &&
-      event.payload.resultingCampaignVersion === snapshot.campaign.version &&
-      event.payload.pullRequest === payload.pullRequest &&
-      event.payload.iteration === snapshot.campaign.qodoIteration &&
-      event.payload.output.commitSha === payload.commitSha;
   });
 }
 
