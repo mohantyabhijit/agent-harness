@@ -113,7 +113,7 @@ describe("SyncReview", () => {
   it("rejects a review identity that disagrees with pull-request campaign memory", async () => {
     const { syncReview, store, harness } = fixture();
     await seedReview(store, campaign({ status: "qodo_review", qodoIteration: 1 }));
-    await store.setExternalReference("campaign-1", { kind: "pull_request", value: "review-other" });
+    store.seedExternalReference("campaign-1", { kind: "pull_request", value: "review-other" });
 
     await expect(syncReview.execute("campaign-1", reviewBatch())).rejects.toThrow(/pull-request/i);
     expect(harness.operations).toEqual([]);
@@ -319,7 +319,7 @@ function reviewBatch(overrides: Partial<QodoReviewBatch> = {}): QodoReviewBatch 
 async function seedReview(store: FakeCampaignStore, value: ReturnType<typeof campaign>): Promise<void> {
   store.seed(value);
   store.seedExternalReference(value.id, { kind: "commit", value: commitSha });
-  await store.setExternalReference(value.id, { kind: "pull_request", value: "https://github.com/owner/repo/pull/7" });
+  store.seedExternalReference(value.id, { kind: "pull_request", value: "https://github.com/owner/repo/pull/7" });
 }
 
 function fixture(): { syncReview: SyncReview; store: FakeCampaignStore; harness: FakeHarness } {

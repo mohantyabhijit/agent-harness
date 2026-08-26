@@ -3,11 +3,11 @@ import Database from "better-sqlite3";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { SqliteCampaignStore } from "../../../src/adapters/sqlite/campaign-store.js";
 import { RunCampaign } from "../../../src/application/run-campaign.js";
 import { CampaignVersionConflict } from "../../../src/application/ports/campaign-store.js";
-import type { ExternalActionClaimRecord } from "../../../src/application/ports/campaign-store.js";
+import type { CampaignStore, ExternalActionClaimRecord } from "../../../src/application/ports/campaign-store.js";
 import { externalActionDigest } from "../../../src/application/external-action.js";
 import { issueApproval } from "../../../src/domain/approval.js";
 import { transitionCampaign } from "../../../src/domain/campaign.js";
@@ -400,6 +400,31 @@ describe("SqliteCampaignStore", () => {
     expect((await store.get("campaign-1"))?.externalReferences).toEqual([{ kind: "commit", value: "a".repeat(40) }]);
   });
 
+  it("versions singleton pull-request identity and rejects generic pull-request writes", async () => {
+    const { store } = openMemoryStore();
+    await store.create(campaign({ status: "pull_request_open", version: 4 }));
+
+    await expect(store.setExternalReference("campaign-1", {
+      kind: "pull_request",
+      value: "https://github.com/owner/repo/pull/7",
+    })).rejects.toThrow(/pull request/i);
+    await expect(store.replaceCurrentPullRequest(
+      "campaign-1",
+      "https://github.com/owner/repo/pull/7",
+      4,
+      "pull_request_open",
+    )).resolves.toBe(5);
+    await expect(store.replaceCurrentPullRequest(
+      "campaign-1",
+      "https://github.com/owner/repo/pull/8",
+      4,
+      "pull_request_open",
+    )).rejects.toThrow(/version/i);
+    expect((await store.get("campaign-1"))?.externalReferences).toEqual([
+      { kind: "pull_request", value: "https://github.com/owner/repo/pull/7" },
+    ]);
+  });
+
   it("atomically fences child result references, event, and commit against recovery", async () => {
     const { store } = openMemoryStore();
     await store.create(campaign({ status: "implementation", version: 4 }));
@@ -532,6 +557,219 @@ describe("SqliteCampaignStore", () => {
       attemptedEvent: { ...externalClaimRecord().attemptedEvent, payload: { claimedCampaignVersion: 3, resultingCampaignVersion: 3 } },
     })).rejects.toThrow(/current campaign head/i);
     expect((await store.get("campaign-1"))?.approvals[0]?.status).toBe("approved");
+  });
+
+  it("atomically claims update_pr only for the exact singleton PR and durable repair completion", async () => {
+    const { store, database } = openMemoryStore();
+    const currentHead = "c".repeat(40);
+    const payload = {
+      action: "update_pr" as const,
+      repository: "owner/repo",
+      issueNumber: 42,
+      pullRequest: "https://github.com/owner/repo/pull/7",
+      branch: "openquest/fix-42",
+      commitSha: currentHead,
+      body: "Publish reviewed repair",
+    };
+    await store.create(campaign({ status: "repair", version: 3, qodoIteration: 1 }));
+    database.prepare("INSERT INTO external_references (campaign_id, kind, value) VALUES (?, 'commit', ?)").run("campaign-1", currentHead);
+    database.prepare("INSERT INTO external_references (campaign_id, kind, value) VALUES (?, 'pull_request', ?)").run("campaign-1", payload.pullRequest);
+    await store.appendEvent("campaign-1", {
+      id: "repair-completed",
+      eventType: "campaign_operation_completed",
+      payload: {
+        operation: "repair",
+        pullRequest: payload.pullRequest,
+        commitSha: "a".repeat(40),
+        iteration: 1,
+        claimedCampaignVersion: 2,
+        resultingCampaignVersion: 3,
+        output: { status: "completed", commitSha: currentHead },
+      },
+      occurredAt: "2026-08-26T00:00:30Z",
+    });
+    await store.recordApproval(issueApproval({
+      id: "approval-update",
+      campaignId: "campaign-1",
+      action: "update_pr",
+      actionDigest: externalActionDigest(payload),
+      issuedAt: "2026-08-26T00:00:00Z",
+    }));
+
+    await expect(store.claimExternalAction("campaign-1", {
+      ...externalClaimRecord(),
+      approvalId: "approval-update",
+      actionDigest: externalActionDigest(payload),
+      payload,
+      expectedCurrentCommitSha: currentHead,
+      expectedVersion: 3,
+      expectedStatus: "repair",
+      attemptedEvent: {
+        ...externalClaimRecord().attemptedEvent,
+        payload: { claimedCampaignVersion: 3, resultingCampaignVersion: 3 },
+      },
+    })).resolves.toMatchObject({ status: "active", payload });
+    expect((await store.get("campaign-1"))?.approvals[0]?.status).toBe("consumed");
+  });
+
+  it.each([
+    ["missing pull request", "missing_pr"],
+    ["ambiguous pull request", "ambiguous_pr"],
+    ["mismatched pull request", "mismatched_pr"],
+    ["missing repair completion", "missing_event"],
+    ["mismatched repair completion", "mismatched_event"],
+    ["ambiguous repair completion", "ambiguous_event"],
+  ] as const)("atomically rejects update_pr with %s without consuming approval", async (_label, scenario) => {
+    const { store, database } = openMemoryStore();
+    const currentHead = "c".repeat(40);
+    const payload = {
+      action: "update_pr" as const,
+      repository: "owner/repo",
+      issueNumber: 42,
+      pullRequest: "https://github.com/owner/repo/pull/7",
+      branch: "openquest/fix-42",
+      commitSha: currentHead,
+      body: "Publish reviewed repair",
+    };
+    await store.create(campaign({ status: "repair", version: 3, qodoIteration: 1 }));
+    database.prepare("INSERT INTO external_references (campaign_id, kind, value) VALUES (?, 'commit', ?)").run("campaign-1", currentHead);
+    if (scenario !== "missing_pr") {
+      database.prepare("INSERT INTO external_references (campaign_id, kind, value) VALUES (?, 'pull_request', ?)").run(
+        "campaign-1",
+        scenario === "mismatched_pr" ? "https://github.com/owner/repo/pull/8" : payload.pullRequest,
+      );
+    }
+    if (scenario === "ambiguous_pr") {
+      database.prepare("INSERT INTO external_references (campaign_id, kind, value) VALUES (?, 'pull_request', ?)").run("campaign-1", "https://github.com/owner/repo/pull/8");
+    }
+    const eventPayload = {
+      operation: "repair",
+      pullRequest: payload.pullRequest,
+      commitSha: "a".repeat(40),
+      iteration: scenario === "mismatched_event" ? 2 : 1,
+      claimedCampaignVersion: 2,
+      resultingCampaignVersion: 3,
+      output: { status: "completed", commitSha: currentHead },
+    };
+    if (scenario !== "missing_event") {
+      await store.appendEvent("campaign-1", {
+        id: "repair-completed-1",
+        eventType: "campaign_operation_completed",
+        payload: eventPayload,
+        occurredAt: "2026-08-26T00:00:30Z",
+      });
+    }
+    if (scenario === "ambiguous_event") {
+      await store.appendEvent("campaign-1", {
+        id: "repair-completed-2",
+        eventType: "campaign_operation_completed",
+        payload: eventPayload,
+        occurredAt: "2026-08-26T00:00:31Z",
+      });
+    }
+    await store.recordApproval(issueApproval({
+      id: "approval-update",
+      campaignId: "campaign-1",
+      action: "update_pr",
+      actionDigest: externalActionDigest(payload),
+      issuedAt: "2026-08-26T00:00:00Z",
+    }));
+
+    await expect(store.claimExternalAction("campaign-1", {
+      ...externalClaimRecord(),
+      approvalId: "approval-update",
+      actionDigest: externalActionDigest(payload),
+      payload,
+      expectedCurrentCommitSha: currentHead,
+      expectedVersion: 3,
+      expectedStatus: "repair",
+      attemptedEvent: {
+        ...externalClaimRecord().attemptedEvent,
+        payload: { claimedCampaignVersion: 3, resultingCampaignVersion: 3 },
+      },
+    })).rejects.toThrow(/pull request|repair completion/i);
+    const snapshot = await store.get("campaign-1");
+    expect(snapshot?.approvals[0]?.status).toBe("approved");
+    expect(snapshot?.externalActionClaims).toEqual([]);
+    expect(snapshot?.events.filter(({ eventType }) => eventType === "external_action_attempted")).toEqual([]);
+  });
+
+  it("atomically fences a pull-request identity inserted between app validation and claim", async () => {
+    const { storeA, databaseA, databaseB } = openTwoConnectionStore("openquest-update-pr-race-");
+    const currentHead = "c".repeat(40);
+    const payload = {
+      action: "update_pr" as const,
+      repository: "owner/repo",
+      issueNumber: 42,
+      pullRequest: "https://github.com/owner/repo/pull/7",
+      branch: "openquest/fix-42",
+      commitSha: currentHead,
+      body: "Publish reviewed repair",
+    };
+    await storeA.create(campaign({ status: "repair", version: 3, qodoIteration: 1 }));
+    databaseA.prepare("INSERT INTO external_references (campaign_id, kind, value) VALUES (?, 'commit', ?)").run("campaign-1", currentHead);
+    databaseA.prepare("INSERT INTO external_references (campaign_id, kind, value) VALUES (?, 'pull_request', ?)").run("campaign-1", payload.pullRequest);
+    await storeA.appendEvent("campaign-1", {
+      id: "repair-completed",
+      eventType: "campaign_operation_completed",
+      payload: {
+        operation: "repair",
+        pullRequest: payload.pullRequest,
+        commitSha: "a".repeat(40),
+        iteration: 1,
+        claimedCampaignVersion: 2,
+        resultingCampaignVersion: 3,
+        output: { status: "completed", commitSha: currentHead },
+      },
+      occurredAt: "2026-08-26T00:00:30Z",
+    });
+    await storeA.recordApproval(issueApproval({
+      id: "approval-update",
+      campaignId: "campaign-1",
+      action: "update_pr",
+      actionDigest: externalActionDigest(payload),
+      issuedAt: "2026-08-26T00:00:00Z",
+    }));
+    let raced = false;
+    const racingStore = new Proxy(storeA, {
+      get(target, property) {
+        if (property === "claimExternalAction") {
+          return async (campaignId: string, record: ExternalActionClaimRecord) => {
+            if (!raced) {
+              raced = true;
+              databaseB.transaction(() => {
+                databaseB.prepare("DELETE FROM external_references WHERE campaign_id = ? AND kind = 'pull_request'").run(campaignId);
+                databaseB.prepare("INSERT INTO external_references (campaign_id, kind, value) VALUES (?, 'pull_request', ?)").run(campaignId, "https://github.com/owner/repo/pull/8");
+              }).immediate();
+            }
+            return target.claimExternalAction(campaignId, record);
+          };
+        }
+        const value = Reflect.get(target, property, target) as unknown;
+        // The proxy binds private-field methods back to their concrete adapter.
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-return
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as CampaignStore;
+    let eventNumber = 0;
+    const runner = new RunCampaign(
+      racingStore,
+      new FakeHarness(),
+      { now: () => "2026-08-26T00:01:00Z" },
+      { next: () => `race-event-${String(++eventNumber)}` },
+    );
+    const callback = vi.fn(async () => undefined);
+
+    await expect(runner.executeApprovedExternalAction(
+      "campaign-1",
+      { approvalId: "approval-update", payload },
+      callback,
+    )).rejects.toThrow(/pull request/i);
+    expect(callback).not.toHaveBeenCalled();
+    const snapshot = await storeA.get("campaign-1");
+    expect(snapshot?.approvals[0]?.status).toBe("approved");
+    expect(snapshot?.externalActionClaims).toEqual([]);
+    expect(snapshot?.events.filter(({ eventType }) => eventType === "external_action_attempted")).toEqual([]);
   });
 
   it("rolls back duplicate multi-connection claims and leaves exactly one consumed approval", async () => {

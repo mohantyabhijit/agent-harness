@@ -17,6 +17,7 @@ import {
 import {
   canonicalExternalActionJson,
   externalActionDigest,
+  isPullRequest,
   validateExternalActionPayload,
   type ExternalActionPayload,
 } from "../../application/external-action.js";
@@ -386,6 +387,7 @@ export class SqliteCampaignStore implements CampaignStore {
       const currentCommitSha = this.#currentCommit(campaignId);
       if (currentCommitSha !== record.expectedCurrentCommitSha) throw new CampaignVersionConflict(campaignId, record.expectedVersion);
       if ((record.payload.action === "create_pr" || record.payload.action === "update_pr") && record.payload.commitSha !== currentCommitSha) throw new Error("External action commit does not match current campaign head");
+      if (record.payload.action === "update_pr") this.#assertUpdatePullRequestIdentity(campaignId, record.payload);
 
       const approvalRow = this.#database.prepare("SELECT * FROM approvals WHERE id = ?").get(record.approvalId) as ApprovalRow | undefined;
       if (approvalRow === undefined || approvalRow.campaign_id !== campaignId || approvalRow.action !== record.payload.action || approvalRow.action_digest !== record.actionDigest) throw new Error("Approval does not match this external action");
@@ -564,6 +566,7 @@ export class SqliteCampaignStore implements CampaignStore {
 
   async setExternalReference(campaignId: string, reference: ExternalReference): Promise<void> {
     if (reference.kind === "commit") throw new Error("Current commit requires a versioned replacement");
+    if (reference.kind === "pull_request") throw new Error("Current pull request requires a versioned replacement");
     const write = this.#database.transaction(() => {
       this.#database.prepare(`
         INSERT INTO external_references (campaign_id, kind, value)
@@ -572,6 +575,30 @@ export class SqliteCampaignStore implements CampaignStore {
       `).run(campaignId, reference.kind, reference.value);
     });
     write.immediate();
+  }
+
+  async replaceCurrentPullRequest(
+    campaignId: string,
+    pullRequest: string,
+    expectedVersion: number,
+    expectedStatus: CampaignStatus,
+  ): Promise<number> {
+    if (!statusesAllowingIndependentPullRequestReplacement.has(expectedStatus)) {
+      throw new Error(`Campaign status ${expectedStatus} does not allow independent current pull request replacement`);
+    }
+    const replace = this.#database.transaction(() => {
+      const campaign = this.#database.prepare("SELECT repository FROM campaigns WHERE id = ?").get(campaignId) as Pick<CampaignRow, "repository"> | undefined;
+      if (campaign === undefined || !isPullRequest(pullRequest, campaign.repository)) throw new Error("Invalid current pull request");
+      this.#assertClaim(campaignId, expectedVersion, expectedStatus);
+      this.#assertNoBlockingExternalAction(campaignId);
+      const current = this.#currentPullRequest(campaignId);
+      if (current === pullRequest) return expectedVersion;
+      this.#replacePullRequest(campaignId, pullRequest);
+      const updated = this.#database.prepare("UPDATE campaigns SET version = version + 1, updated_at = ? WHERE id = ? AND version = ? AND status = ?").run(new Date().toISOString(), campaignId, expectedVersion, expectedStatus);
+      if (updated.changes !== 1) throw new CampaignVersionConflict(campaignId, expectedVersion);
+      return expectedVersion + 1;
+    });
+    return replace.immediate();
   }
 
   #assertClaim(campaignId: string, expectedVersion: number, expectedStatus: CampaignStatus): void {
@@ -590,6 +617,31 @@ export class SqliteCampaignStore implements CampaignStore {
     return commits[0]?.value;
   }
 
+  #currentPullRequest(campaignId: string): string | undefined {
+    const pullRequests = this.#database.prepare("SELECT value FROM external_references WHERE campaign_id = ? AND kind = 'pull_request'").all(campaignId) as { value: string }[];
+    if (pullRequests.length > 1) throw new Error("Campaign current pull request is ambiguous");
+    return pullRequests[0]?.value;
+  }
+
+  #assertUpdatePullRequestIdentity(
+    campaignId: string,
+    payload: Extract<ExternalActionPayload, { action: "update_pr" }>,
+  ): void {
+    const campaign = this.#database.prepare("SELECT repository, version, qodo_iteration FROM campaigns WHERE id = ?").get(campaignId) as Pick<CampaignRow, "repository" | "version" | "qodo_iteration"> | undefined;
+    if (campaign === undefined) throw new Error("Campaign does not exist");
+    const pullRequests = this.#database.prepare("SELECT value FROM external_references WHERE campaign_id = ? AND kind = 'pull_request'").all(campaignId) as { value: string }[];
+    if (pullRequests.length !== 1 || pullRequests[0]?.value !== payload.pullRequest || !isPullRequest(payload.pullRequest, campaign.repository)) {
+      throw new Error("External action pull request does not match campaign memory");
+    }
+    const eventRows = this.#database.prepare(`
+      SELECT id, event_type, payload_json, occurred_at
+      FROM campaign_events
+      WHERE campaign_id = ? AND event_type = 'campaign_operation_completed'
+    `).all(campaignId) as EventRow[];
+    const matches = eventRows.filter((row) => isMatchingRepairCompletion(row, campaign, payload));
+    if (matches.length !== 1) throw new Error("Campaign lacks one unambiguous repair completion event for this update");
+  }
+
   #requiredExternalActionClaim(campaignId: string, claimId: string, status: ExternalActionClaim["status"]): ExternalActionClaim {
     const row = this.#database.prepare("SELECT * FROM external_action_claims WHERE id = ? AND campaign_id = ? AND status = ?").get(claimId, campaignId, status) as ExternalActionClaimRow | undefined;
     if (row === undefined) throw new Error(`External action claim ${claimId} is not ${status}`);
@@ -599,6 +651,11 @@ export class SqliteCampaignStore implements CampaignStore {
   #replaceCommit(campaignId: string, commitSha: string): void {
     this.#database.prepare("DELETE FROM external_references WHERE campaign_id = ? AND kind = 'commit'").run(campaignId);
     this.#database.prepare("INSERT INTO external_references (campaign_id, kind, value) VALUES (?, 'commit', ?)").run(campaignId, commitSha);
+  }
+
+  #replacePullRequest(campaignId: string, pullRequest: string): void {
+    this.#database.prepare("DELETE FROM external_references WHERE campaign_id = ? AND kind = 'pull_request'").run(campaignId);
+    this.#database.prepare("INSERT INTO external_references (campaign_id, kind, value) VALUES (?, 'pull_request', ?)").run(campaignId, pullRequest);
   }
 
   #snapshot(row: CampaignRow): CampaignSnapshot {
@@ -772,6 +829,37 @@ const statusesAllowingIndependentCommitReplacement = new Set<CampaignStatus>([
   "policy_review", "coordination_pending", "preflight", "quarantined", "baseline", "implementation",
   "verification", "contribution_approval", "pull_request_open", "qodo_review", "human_escalation",
 ]);
+
+const statusesAllowingIndependentPullRequestReplacement = new Set<CampaignStatus>([
+  "contribution_approval", "pull_request_open", "qodo_review", "human_escalation",
+]);
+
+function isMatchingRepairCompletion(
+  row: EventRow,
+  campaign: Pick<CampaignRow, "version" | "qodo_iteration">,
+  payload: Extract<ExternalActionPayload, { action: "update_pr" }>,
+): boolean {
+  let eventPayload: unknown;
+  try {
+    eventPayload = JSON.parse(row.payload_json) as unknown;
+  } catch {
+    return false;
+  }
+  if (!isRecord(eventPayload) || !isRecord(eventPayload.output)) return false;
+  const repairedFromCommit = eventPayload.commitSha;
+  if (typeof repairedFromCommit !== "string" || !/^[0-9a-f]{40}$/u.test(repairedFromCommit)) return false;
+  const expectedClaimedVersion = campaign.version - (repairedFromCommit === payload.commitSha ? 0 : 1);
+  return eventPayload.operation === "repair" &&
+    eventPayload.pullRequest === payload.pullRequest &&
+    eventPayload.iteration === campaign.qodo_iteration &&
+    eventPayload.claimedCampaignVersion === expectedClaimedVersion &&
+    eventPayload.resultingCampaignVersion === campaign.version &&
+    eventPayload.output.commitSha === payload.commitSha;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 
 function assertQodoFindingIteration(iteration: number): void {
   if (!Number.isInteger(iteration) || iteration < 1 || iteration > 3) {

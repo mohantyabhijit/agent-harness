@@ -131,6 +131,12 @@ export interface CampaignStore {
     expectedVersion: number,
     expectedStatus: CampaignStatus,
   ): Promise<number>;
+  replaceCurrentPullRequest(
+    campaignId: string,
+    pullRequest: string,
+    expectedVersion: number,
+    expectedStatus: CampaignStatus,
+  ): Promise<number>;
   recordChildResult(campaignId: string, record: ChildResultRecord): Promise<number>;
   setExternalReference(campaignId: string, reference: ExternalReference): Promise<void>;
 }

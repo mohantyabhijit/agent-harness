@@ -513,6 +513,65 @@ describe("RunCampaign", () => {
     expect((await store.get("campaign-1"))?.externalActionClaims).toEqual([]);
   });
 
+  it("makes the fake claim reject ambiguous pull-request and repair-completion identity atomically", async () => {
+    const nextCommit = "c".repeat(40);
+    const updatePayload = {
+      action: "update_pr" as const,
+      repository: "owner/repo",
+      issueNumber: 42,
+      pullRequest: "https://github.com/owner/repo/pull/7",
+      branch: "openquest/fix-42",
+      commitSha: nextCommit,
+      body: "Publish reviewed repair",
+    };
+    const store = new FakeCampaignStore();
+    store.seed(campaign({ status: "repair", version: 3, qodoIteration: 1 }));
+    store.seedExternalReference("campaign-1", { kind: "commit", value: nextCommit });
+    store.seedExternalReference("campaign-1", { kind: "pull_request", value: updatePayload.pullRequest });
+    store.seedExternalReference("campaign-1", { kind: "pull_request", value: "https://github.com/owner/repo/pull/8" });
+    await store.appendEvent("campaign-1", {
+      id: "repair-completed",
+      eventType: "campaign_operation_completed",
+      payload: {
+        operation: "repair",
+        pullRequest: updatePayload.pullRequest,
+        commitSha,
+        iteration: 1,
+        claimedCampaignVersion: 2,
+        resultingCampaignVersion: 3,
+        output: { status: "completed", commitSha: nextCommit },
+      },
+      occurredAt: "2026-08-26T00:00:30Z",
+    });
+    await store.recordApproval(issueApproval({
+      id: "approval-update",
+      campaignId: "campaign-1",
+      action: "update_pr",
+      actionDigest: externalActionDigest(updatePayload),
+      issuedAt: "2026-08-26T00:00:00Z",
+    }));
+
+    await expect(store.claimExternalAction("campaign-1", {
+      claimId: "claim-update",
+      approvalId: "approval-update",
+      actionDigest: externalActionDigest(updatePayload),
+      payload: updatePayload,
+      expectedCurrentCommitSha: nextCommit,
+      expectedVersion: 3,
+      expectedStatus: "repair",
+      consumedAt: "2026-08-26T00:01:00Z",
+      leaseStartedAt: "2026-08-26T00:01:00Z",
+      attemptedEvent: {
+        id: "attempt-update",
+        eventType: "external_action_attempted",
+        payload: { claimedCampaignVersion: 3, resultingCampaignVersion: 3 },
+        occurredAt: "2026-08-26T00:01:00Z",
+      },
+    })).rejects.toThrow(/pull request/i);
+    expect((await store.get("campaign-1"))?.approvals[0]?.status).toBe("approved");
+    expect((await store.get("campaign-1"))?.externalActionClaims).toEqual([]);
+  });
+
   it("recovers only a stale active claim and fences its late original completion", async () => {
     const store = new FakeCampaignStore();
     const harness = new FakeHarness();

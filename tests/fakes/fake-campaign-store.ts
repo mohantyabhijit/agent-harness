@@ -13,7 +13,7 @@ import {
   type ExternalActionStaleRecoveryRecord,
   type ExternalReference,
 } from "../../src/application/ports/campaign-store.js";
-import { externalActionDigest, validateExternalActionPayload } from "../../src/application/external-action.js";
+import { externalActionDigest, isPullRequest, validateExternalActionPayload } from "../../src/application/external-action.js";
 import {
   consumeApproval as consumeDomainApproval,
   isApprovalActionAllowed,
@@ -228,6 +228,7 @@ export class FakeCampaignStore implements CampaignStore {
     const currentCommitSha = singletonCommit(snapshot);
     if (currentCommitSha !== record.expectedCurrentCommitSha) throw new CampaignVersionConflict(campaignId, record.expectedVersion);
     if ((record.payload.action === "create_pr" || record.payload.action === "update_pr") && record.payload.commitSha !== currentCommitSha) throw new Error("External action commit does not match current campaign head");
+    if (record.payload.action === "update_pr") assertUpdatePullRequestIdentity(snapshot, record.payload);
     if (externalActionDigest(record.payload) !== record.actionDigest) throw new Error("External action payload digest does not match claim");
     const approvalIndex = snapshot.approvals.findIndex(({ id }) => id === record.approvalId);
     const approval = snapshot.approvals[approvalIndex];
@@ -351,6 +352,7 @@ export class FakeCampaignStore implements CampaignStore {
     }
     const snapshot = this.#required(campaignId);
     if (reference.kind === "commit") throw new Error("Current commit requires a versioned replacement");
+    if (reference.kind === "pull_request") throw new Error("Current pull request requires a versioned replacement");
     if (
       !snapshot.externalReferences.some(
         (candidate) => candidate.kind === reference.kind && candidate.value === reference.value,
@@ -358,6 +360,25 @@ export class FakeCampaignStore implements CampaignStore {
     ) {
       snapshot.externalReferences.push(structuredClone(reference));
     }
+  }
+
+  async replaceCurrentPullRequest(
+    campaignId: string,
+    pullRequest: string,
+    expectedVersion: number,
+    expectedStatus: CampaignStatus,
+  ): Promise<number> {
+    const snapshot = this.#required(campaignId);
+    if (!isPullRequest(pullRequest, snapshot.campaign.repository)) throw new Error("Invalid current pull request");
+    if (!statusesAllowingIndependentPullRequestReplacement.has(expectedStatus)) throw new Error(`Campaign status ${expectedStatus} does not allow independent current pull request replacement`);
+    this.#assertNoBlockingExternalAction(snapshot);
+    this.#assertClaim(snapshot, campaignId, expectedVersion, expectedStatus);
+    const current = singletonPullRequest(snapshot);
+    if (current === pullRequest) return expectedVersion;
+    snapshot.externalReferences = snapshot.externalReferences.filter(({ kind }) => kind !== "pull_request");
+    snapshot.externalReferences.push({ kind: "pull_request", value: pullRequest });
+    snapshot.campaign = { ...snapshot.campaign, version: expectedVersion + 1 };
+    return expectedVersion + 1;
   }
 
   async replaceCurrentCommit(
@@ -512,6 +533,45 @@ function singletonCommit(snapshot: MutableSnapshot): string | undefined {
   return commits[0]?.value;
 }
 
+function singletonPullRequest(snapshot: MutableSnapshot): string | undefined {
+  const pullRequests = snapshot.externalReferences.filter(({ kind }) => kind === "pull_request");
+  if (pullRequests.length > 1) throw new Error("Campaign current pull request is ambiguous");
+  return pullRequests[0]?.value;
+}
+
+function assertUpdatePullRequestIdentity(
+  snapshot: MutableSnapshot,
+  payload: Extract<import("../../src/application/external-action.js").ExternalActionPayload, { action: "update_pr" }>,
+): void {
+  const pullRequests = snapshot.externalReferences.filter(({ kind }) => kind === "pull_request");
+  if (pullRequests.length !== 1 || pullRequests[0]?.value !== payload.pullRequest || !isPullRequest(payload.pullRequest, snapshot.campaign.repository)) {
+    throw new Error("External action pull request does not match campaign memory");
+  }
+  const matches = snapshot.events.filter((event) => isMatchingRepairCompletion(event, snapshot, payload));
+  if (matches.length !== 1) throw new Error("Campaign lacks one unambiguous repair completion event for this update");
+}
+
+function isMatchingRepairCompletion(
+  event: CampaignEvent,
+  snapshot: MutableSnapshot,
+  payload: Extract<import("../../src/application/external-action.js").ExternalActionPayload, { action: "update_pr" }>,
+): boolean {
+  if (event.eventType !== "campaign_operation_completed" || !isRecord(event.payload) || !isRecord(event.payload.output)) return false;
+  const repairedFromCommit = event.payload.commitSha;
+  if (typeof repairedFromCommit !== "string" || !/^[0-9a-f]{40}$/u.test(repairedFromCommit)) return false;
+  const expectedClaimedVersion = snapshot.campaign.version - (repairedFromCommit === payload.commitSha ? 0 : 1);
+  return event.payload.operation === "repair" &&
+    event.payload.pullRequest === payload.pullRequest &&
+    event.payload.iteration === snapshot.campaign.qodoIteration &&
+    event.payload.claimedCampaignVersion === expectedClaimedVersion &&
+    event.payload.resultingCampaignVersion === snapshot.campaign.version &&
+    event.payload.output.commitSha === payload.commitSha;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function assertExternalActionEventVersion(payload: unknown, expectedVersion: number, resultingVersion: number): void {
   if (typeof payload !== "object" || payload === null || Array.isArray(payload) || !("claimedCampaignVersion" in payload) || payload.claimedCampaignVersion !== expectedVersion || !("resultingCampaignVersion" in payload) || payload.resultingCampaignVersion !== resultingVersion) throw new Error("External action event is not bound to the campaign version");
 }
@@ -538,4 +598,8 @@ function assertStaleRecoveryEvent(event: CampaignEvent, claim: ExternalActionCla
 const statusesAllowingIndependentCommitReplacement = new Set<CampaignStatus>([
   "policy_review", "coordination_pending", "preflight", "quarantined", "baseline", "implementation",
   "verification", "contribution_approval", "pull_request_open", "qodo_review", "human_escalation",
+]);
+
+const statusesAllowingIndependentPullRequestReplacement = new Set<CampaignStatus>([
+  "contribution_approval", "pull_request_open", "qodo_review", "human_escalation",
 ]);
