@@ -131,7 +131,7 @@ export interface ProposalApprovalIssuanceRecord {
 
 export interface CampaignStore {
   create(campaign: Campaign, initialEvent?: CampaignEventInput): Promise<void>;
-  get(id: string): Promise<CampaignSnapshot | undefined>;
+  get(id: string, observedAt?: string): Promise<CampaignSnapshot | undefined>;
   findByIssue(repository: string, issueNumber: number): Promise<CampaignSnapshot | undefined>;
   update(campaign: Campaign, expectedVersion: number): Promise<void>;
   listByStatus(status: CampaignStatus): Promise<readonly CampaignSnapshot[]>;

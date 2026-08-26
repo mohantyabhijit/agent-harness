@@ -20,7 +20,7 @@ const eventLabels: Readonly<Record<string, string>> = {
 
 export function CampaignTimeline({ events, approvals }: CampaignTimelineProps) {
   const entries = [
-    ...events.map((event) => ({ id: `event-${event.id}`, occurredAt: event.occurredAt, sequence: event.sequence, durable: true, label: eventLabels[event.eventType] ?? humanize(event.eventType), facts: event.facts })),
+    ...events.map((event) => ({ id: `event-${event.id}`, occurredAt: event.occurredAt, sequence: event.sequence, durable: true, label: eventLabel(event), facts: event.facts })),
     ...approvals.map((approval) => ({ id: `approval-${approval.id}`, occurredAt: approval.consumedAt ?? approval.issuedAt, sequence: Number.MAX_SAFE_INTEGER, durable: false, label: `${approvalActionName(approval.action)} approval ${approval.status}`, facts: approval.consumedAt === undefined ? { issuedAt: approval.issuedAt } : { issuedAt: approval.issuedAt, consumedAt: approval.consumedAt } })),
   ].toSorted((left, right) => Number(right.durable) - Number(left.durable) || (left.durable ? left.sequence - right.sequence : Date.parse(left.occurredAt) - Date.parse(right.occurredAt)) || left.id.localeCompare(right.id));
   return <section aria-labelledby="timeline-heading" className="campaign-panel">
@@ -32,6 +32,14 @@ export function CampaignTimeline({ events, approvals }: CampaignTimelineProps) {
       </li>)}
     </ol>}
   </section>;
+}
+
+function eventLabel(event: CampaignSnapshot["events"][number]): string {
+  if (event.eventType === "external_action_reconciled") {
+    if (event.facts.disposition === "confirmed_completed") return "External action confirmed completed";
+    if (event.facts.disposition === "confirmed_not_completed") return "External action confirmed not completed";
+  }
+  return eventLabels[event.eventType] ?? humanize(event.eventType);
 }
 
 function humanize(value: string): string { return value.replace(/([a-z])([A-Z])/gu, "$1 $2").split("_").map((word) => `${word.slice(0, 1).toUpperCase()}${word.slice(1)}`).join(" "); }

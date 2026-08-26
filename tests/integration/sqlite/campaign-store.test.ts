@@ -250,6 +250,79 @@ describe("SqliteCampaignStore", () => {
   });
 
   it.each([
+    ["newer valid", async (store: CampaignStore) => { await appendApprovalProposal(store, "proposal-newest"); }],
+    ["newer malformed", async (store: CampaignStore) => {
+      await store.appendEvent("campaign-1", { id: "proposal-malformed", eventType: "external_action_proposed", occurredAt: "2026-08-26T00:00:30Z", payload: { proposalId: "proposal-malformed", malformed: true } });
+    }],
+  ] as const)("atomically rejects and retires approval after a %s proposal in both stores", async (_label, appendNewest) => {
+    for (const store of [openMemoryStore().store as CampaignStore, new FakeCampaignStore() as CampaignStore]) {
+      if (store instanceof FakeCampaignStore) store.seed(campaign({ status: "contribution_approval", version: 7 }));
+      else await store.create(campaign({ status: "contribution_approval", version: 6 }));
+      if (store instanceof FakeCampaignStore) store.seedExternalReference("campaign-1", { kind: "commit", value: externalPayload.commitSha });
+      else await store.replaceCurrentCommit("campaign-1", externalPayload.commitSha, 6, "contribution_approval");
+      const version = (await store.get("campaign-1"))?.campaign.version ?? 0;
+      await issueBoundApproval(store, { id: "approval-1", payload: externalPayload, version, status: "contribution_approval", currentCommitSha: externalPayload.commitSha });
+      await appendNewest(store);
+
+      await expect(store.claimExternalAction("campaign-1", { ...externalClaimRecord(), expectedVersion: version, attemptedEvent: { ...externalClaimRecord().attemptedEvent, payload: { claimedCampaignVersion: version, resultingCampaignVersion: version } } })).rejects.toThrow(/approved proposal authority|current proposal/i);
+
+      const after = await store.get("campaign-1");
+      expect(after?.approvals[0]).toMatchObject({ id: "approval-1", status: "rejected", active: false });
+      expect(after?.externalActionClaims).toEqual([]);
+      expect(after?.events.some(({ eventType }) => eventType === "external_action_attempted")).toBe(false);
+    }
+  });
+
+  it("rolls back every fake proposal-issuance mutation when the approval id is duplicated", async () => {
+    const store = new FakeCampaignStore();
+    store.seed(campaign({ status: "contribution_approval", version: 7 }));
+    store.seedExternalReference("campaign-1", { kind: "commit", value: externalPayload.commitSha });
+    await issueBoundApproval(store, { id: "approval-duplicate", payload: externalPayload, version: 7, status: "contribution_approval", currentCommitSha: externalPayload.commitSha });
+    await appendApprovalProposal(store, "proposal-fresh");
+    const request = { campaignId: "campaign-1", proposalId: "proposal-fresh", actionDigest: externalActionDigest(externalPayload), expectedVersion: 7, approvalId: "approval-duplicate", issuedAt: "2026-08-26T00:01:00Z", expiresAt: "2026-08-26T01:01:00Z", idempotencyKey: "duplicate-rollback" };
+
+    await expect(store.issueApprovalForProposal(request)).rejects.toThrow(/already exists/i);
+    expect((await store.get("campaign-1"))?.approvals).toEqual([expect.objectContaining({ id: "approval-duplicate", status: "approved", active: true })]);
+    await expect(store.issueApprovalForProposal({ ...request, approvalId: "approval-fresh" })).resolves.toMatchObject({ id: "approval-fresh", active: true });
+  });
+
+  it.each([
+    ["SQLite", () => openMemoryStore().store as CampaignStore],
+    ["fake", () => new FakeCampaignStore() as CampaignStore],
+  ])("permanently retires an expiry observed by the %s store even after clock rollback", async (_label, factory) => {
+    const store = factory();
+    if (store instanceof FakeCampaignStore) store.seed(campaign({ status: "contribution_approval", version: 7 }));
+    else await store.create(campaign({ status: "contribution_approval", version: 7 }));
+    if (store instanceof FakeCampaignStore) store.seedExternalReference("campaign-1", { kind: "commit", value: externalPayload.commitSha });
+    else await store.replaceCurrentCommit("campaign-1", externalPayload.commitSha, 7, "contribution_approval");
+    const version = (await store.get("campaign-1"))?.campaign.version ?? 0;
+    await issueBoundApproval(store, { id: "approval-expiring", payload: externalPayload, version, status: "contribution_approval", currentCommitSha: externalPayload.commitSha });
+
+    expect((await store.get("campaign-1", "2026-08-26T02:00:00Z"))?.approvals[0]).toMatchObject({ active: false });
+    expect((await store.get("campaign-1", "2026-08-26T00:30:00Z"))?.approvals[0]).toMatchObject({ active: false });
+  });
+
+  it.each([
+    ["SQLite", () => openMemoryStore().store as CampaignStore],
+    ["fake", () => new FakeCampaignStore() as CampaignStore],
+  ])("permanently retires expiry observed during a %s claim before rejecting it", async (_label, factory) => {
+    const store = factory();
+    if (store instanceof FakeCampaignStore) {
+      store.seed(campaign({ status: "contribution_approval", version: 7 }));
+      store.seedExternalReference("campaign-1", { kind: "commit", value: externalPayload.commitSha });
+    } else {
+      await store.create(campaign({ status: "contribution_approval", version: 6 }));
+      await store.replaceCurrentCommit("campaign-1", externalPayload.commitSha, 6, "contribution_approval");
+    }
+    await issueBoundApproval(store, { id: "approval-1", payload: externalPayload, version: 7, status: "contribution_approval", currentCommitSha: externalPayload.commitSha });
+    const afterExpiry = { ...externalClaimRecord(), consumedAt: "2026-08-26T02:00:00Z", leaseStartedAt: "2026-08-26T02:00:00Z", attemptedEvent: { ...externalClaimRecord().attemptedEvent, occurredAt: "2026-08-26T02:00:00Z" } };
+
+    await expect(store.claimExternalAction("campaign-1", afterExpiry)).rejects.toThrow(/approval.*available|expired/i);
+    expect((await store.get("campaign-1"))?.approvals[0]).toMatchObject({ status: "approved", active: false });
+    await expect(store.claimExternalAction("campaign-1", externalClaimRecord())).rejects.toThrow(/approved proposal authority|available/i);
+  });
+
+  it.each([
     ["SQLite", () => openMemoryStore().store as CampaignStore],
     ["fake", () => new FakeCampaignStore() as CampaignStore],
   ])("cannot fabricate executable proposal authority through generic %s store methods", async (_label, factory) => {

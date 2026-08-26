@@ -31,7 +31,7 @@ export interface DurableApprovalProposal {
 }
 
 const proposalSchema = z.object({
-  proposalId: z.string().trim().min(1).max(128).regex(/^[A-Za-z0-9._:-]+$/u),
+  proposalId: z.string().min(1).max(128).regex(/^[A-Za-z0-9._:-]+$/u),
   payload: z.custom<ExternalActionPayload>((value) => { try { validateExternalActionPayload(value as ExternalActionPayload); return true; } catch { return false; } }),
   actionDigest: digest,
   expectedCampaignVersion: z.number().int().positive(),
@@ -54,6 +54,8 @@ export function currentApprovalProposal(snapshot: CampaignSnapshot): DurableAppr
   if (!parsed.success || parsed.data.proposalId !== newest.id) return null;
   const proposal = parsed.data as DurableApprovalProposal;
   const { payload } = proposal;
+  if (snapshot.approvals.some((approval) => approval.status === "consumed" && approval.proposalId === proposal.proposalId &&
+    approval.actionDigest === proposal.actionDigest && approval.expectedCampaignVersion === proposal.expectedCampaignVersion)) return null;
   const currentCommit = singleton(snapshot, "commit");
   if (
     proposal.actionDigest !== externalActionDigest(payload) ||

@@ -4,7 +4,7 @@ import { currentApprovalProposal, proposalActionSummary } from "../../applicatio
 import type { CampaignSnapshot } from "../../application/ports/campaign-store.js";
 import type { Approval } from "../../domain/approval.js";
 
-export const campaignIdSchema = z.string().trim().min(1).max(128).regex(/^[A-Za-z0-9._:-]+$/u);
+export const campaignIdSchema = z.string().min(1).max(128).regex(/^[A-Za-z0-9._:-]+$/u);
 export const repositoryPartSchema = z.string().min(1).max(100).regex(/^[A-Za-z0-9_.-]+$/u);
 export const repositorySchema = z.string().min(3).max(201).regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u);
 export const issueNumberSchema = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
@@ -25,14 +25,15 @@ export function campaignNotFound(): ApiProblem {
   return new ApiProblem(404, "campaign_not_found", "Campaign was not found");
 }
 
-export function publicCampaignSnapshot(snapshot: CampaignSnapshot): Readonly<Record<string, unknown>> {
+export function publicCampaignSnapshot(snapshot: CampaignSnapshot, now: number): Readonly<Record<string, unknown>> {
+  if (!Number.isFinite(now)) throw new Error("Campaign projection clock is invalid");
   assertValidEventSequence(snapshot);
   const proposal = currentApprovalProposal(snapshot);
   return {
     ...snapshot.campaign,
     evidence: snapshot.evidence,
     events: snapshot.events.filter(({ eventType, sequence }) => publicEventTypes.has(eventType) && typeof sequence === "number" && Number.isSafeInteger(sequence) && sequence > 0).map(({ id, eventType, occurredAt, sequence, payload }) => ({ id, eventType, occurredAt, sequence, facts: safeEventFacts(eventType, payload) })),
-    approvals: snapshot.approvals.map((approval) => publicApprovalWithProposal(approval, proposal, Date.now())),
+    approvals: snapshot.approvals.map((approval) => publicApprovalWithProposal(approval, proposal, now)),
     qodoFindings: snapshot.qodoFindings.map(({ sourceUrl, ...finding }) => ({ ...finding, ...(sourceUrl !== undefined && validQodoUrl(sourceUrl) ? { sourceUrl } : {}) })),
     externalReferences: snapshot.externalReferences.filter(({ value }) => value.length <= 2_048),
     externalActionClaims: snapshot.externalActionClaims.map((claim) => ({
@@ -53,7 +54,8 @@ export function publicCampaignSnapshot(snapshot: CampaignSnapshot): Readonly<Rec
   };
 }
 
-export function publicApproval(snapshot: CampaignSnapshot, approval: Approval, now = Date.now()): Readonly<Record<string, unknown>> {
+export function publicApproval(snapshot: CampaignSnapshot, approval: Approval, now: number): Readonly<Record<string, unknown>> {
+  if (!Number.isFinite(now)) throw new Error("Approval projection clock is invalid");
   return publicApprovalWithProposal(approval, currentApprovalProposal(snapshot), now);
 }
 
@@ -87,7 +89,7 @@ function safeEventFacts(eventType: string, payload: unknown): Readonly<Record<st
   const allowedByType: Readonly<Record<string, readonly string[]>> = {
     campaign_created: ["status"], campaign_operation_completed: ["operation", "status", "claimedCampaignVersion", "resultingCampaignVersion", "iteration", "testsPassed", "childSessionId", "sandboxSessionId", "currentCommitSha", "commitSha", "pullRequest"],
     campaign_operation_rejected: ["operation", "reason", "claimedCampaignVersion", "resultingCampaignVersion"],
-    external_action_proposed: ["action", "claimedCampaignVersion"], external_action_attempted: ["action", "claimedCampaignVersion", "resultingCampaignVersion"], external_action_completed: ["action", "claimedCampaignVersion", "resultingCampaignVersion"], external_action_outcome_unknown: ["action", "reason", "claimedCampaignVersion", "resultingCampaignVersion"], external_action_reconciled: ["action", "reason", "claimedCampaignVersion", "resultingCampaignVersion"], external_action_stale_recovered: ["action", "reason", "claimedCampaignVersion", "resultingCampaignVersion"],
+    external_action_proposed: ["action", "claimedCampaignVersion"], external_action_attempted: ["action", "claimedCampaignVersion", "resultingCampaignVersion"], external_action_completed: ["action", "claimedCampaignVersion", "resultingCampaignVersion"], external_action_outcome_unknown: ["action", "reason", "claimedCampaignVersion", "resultingCampaignVersion"], external_action_reconciled: ["action", "disposition", "observedCanonicalHead", "reason", "claimedCampaignVersion", "resultingCampaignVersion"], external_action_stale_recovered: ["action", "reason", "claimedCampaignVersion", "resultingCampaignVersion"],
     qodo_review_claimed: ["outcome", "reviewIteration", "reviewId", "testsPassed", "complete", "commitSha", "pullRequest", "claimedCampaignVersion"], qodo_finding_recorded: ["iteration", "reviewId", "commitSha", "pullRequest", "claimedCampaignVersion"], quality_gate_passed: ["iteration", "reviewId", "commitSha", "pullRequest", "claimedCampaignVersion"], quality_gate_escalated: ["iteration", "reason", "reviewId", "commitSha", "pullRequest", "claimedCampaignVersion"], quality_gate_repair_requested: ["iteration", "reviewId", "commitSha", "pullRequest", "claimedCampaignVersion"], repair_execution_failed: ["reason", "reviewId", "commitSha", "pullRequest", "claimedCampaignVersion"],
     interrupted_operation_recovered: ["targetStatus", "reason", "claimedCampaignVersion"], preflight_execution_failed: ["reason", "claimedCampaignVersion"], implementation_execution_failed: ["reason", "claimedCampaignVersion"], verification_execution_failed: ["reason", "claimedCampaignVersion"],
   };
@@ -110,6 +112,7 @@ const factEnums: Readonly<Record<string, readonly string[]>> = {
   operation: ["preflight", "implement", "verify", "repair"], action: ["post_issue_comment", "request_assignment", "push_branch", "create_pr", "update_pr"],
   status: ["policy_review", "coordination_pending", "preflight", "quarantined", "baseline", "implementation", "verification", "contribution_approval", "pull_request_open", "qodo_review", "repair", "human_escalation", "merged", "closed", "withdrawn", "completed", "failed"],
   targetStatus: ["quarantined", "human_escalation"], outcome: ["pass", "repair", "escalate"], verdict: ["pass", "quarantine"],
+  disposition: ["confirmed_completed", "confirmed_not_completed"],
   reason: ["maximum_qodo_iterations", "tests_failed", "repair_child_failed", "invalid_preflight_output", "operation_result_not_safely_recorded", "external_action_result_unknown", "human_external_action_reconciliation", "operator_recovered_stale_active_claim", "operator_recovered_interrupted_operation"],
 };
 const publicEventTypes = new Set(["campaign_created", "campaign_operation_completed", "campaign_operation_rejected", "external_action_proposed", "external_action_attempted", "external_action_completed", "external_action_outcome_unknown", "external_action_reconciled", "external_action_stale_recovered", "interrupted_operation_recovered", "preflight_execution_failed", "implementation_execution_failed", "verification_execution_failed", "qodo_review_claimed", "qodo_finding_recorded", "quality_gate_passed", "quality_gate_escalated", "quality_gate_repair_requested", "repair_execution_failed"]);
@@ -118,7 +121,7 @@ function validFact(key: string, value: unknown): value is string | number | bool
   if (typeof value === "number") return Number.isSafeInteger(value) && value >= 0;
   if (typeof value !== "string" || value.length === 0 || value.length > 2_048) return false;
   const leaf = key.includes(".") ? key.slice(key.lastIndexOf(".") + 1) : key;
-  if (leaf === "currentCommitSha" || leaf === "commitSha") return /^[0-9a-f]{40}$/u.test(value);
+  if (leaf === "currentCommitSha" || leaf === "commitSha" || leaf === "observedCanonicalHead") return /^[0-9a-f]{40}$/u.test(value);
   if (leaf === "pullRequest") return /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/[1-9][0-9]*$/u.test(value);
   const values = factEnums[leaf];
   return values === undefined ? /^[A-Za-z0-9._:-]+$/u.test(value) : values.includes(value);

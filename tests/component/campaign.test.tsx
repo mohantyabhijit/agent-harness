@@ -117,4 +117,13 @@ describe("CampaignPage", () => {
     expect(entries[0]).toHaveTextContent("Campaign created");
     expect(entries[1]).toHaveTextContent("Campaign operation completed");
   });
+
+  it("labels a reconciled external action with its validated disposition", async () => {
+    render(<CampaignPage api={campaignApi(async () => ({ ...snapshot, approvals: [], events: [
+      { id: "reconciled", eventType: "external_action_reconciled", occurredAt: "2026-08-26T00:10:00Z", sequence: 1, facts: { action: "create_pr", disposition: "confirmed_completed", observedCanonicalHead: "b".repeat(40) } },
+    ] }))} campaignId="campaign-1" />);
+
+    expect(await screen.findByText("External action confirmed completed")).toBeVisible();
+    expect(screen.getByText(/observed canonical head/i)).toBeVisible();
+  });
 });

@@ -78,8 +78,17 @@ export class FakeCampaignStore implements CampaignStore {
     }
   }
 
-  async get(id: string): Promise<CampaignSnapshot | undefined> {
+  async get(id: string, observedAt?: string): Promise<CampaignSnapshot | undefined> {
     const snapshot = this.#snapshots.get(id);
+    if (snapshot !== undefined && observedAt !== undefined) {
+      const canonicalObservedAt = canonicalTimestamp(observedAt, "approval observation");
+      for (let index = 0; index < snapshot.approvals.length; index += 1) {
+        const approval = snapshot.approvals[index];
+        if (approval?.status === "approved" && approval.active === true && approval.expiresAt !== undefined && Date.parse(approval.expiresAt) <= Date.parse(canonicalObservedAt)) {
+          snapshot.approvals[index] = { ...approval, active: false };
+        }
+      }
+    }
     return snapshot === undefined ? undefined : cloneSnapshot(snapshot);
   }
 
@@ -183,7 +192,8 @@ export class FakeCampaignStore implements CampaignStore {
       if (replay === undefined || replay.proposalId !== record.proposalId || replay.actionDigest !== record.actionDigest || replay.expectedCampaignVersion !== record.expectedVersion) throw new ApprovalIssuanceConflict();
       return structuredClone(replay);
     }
-    const proposal = currentApprovalProposal(cloneSnapshot(snapshot));
+    const staged = structuredClone(snapshot);
+    const proposal = currentApprovalProposal(cloneSnapshot(staged));
     if (proposal === null || proposal.proposalId !== record.proposalId || proposal.actionDigest !== record.actionDigest || proposal.expectedCampaignVersion !== record.expectedVersion) throw new ApprovalIssuanceConflict();
     const approval = issueDomainApproval({
       id: record.approvalId, campaignId: record.campaignId, action: proposal.payload.action, actionDigest: proposal.actionDigest,
@@ -192,16 +202,18 @@ export class FakeCampaignStore implements CampaignStore {
       expectedCurrentCommitSha: proposal.expectedCurrentCommitSha ?? null, payload: structuredClone(proposal.payload),
       trustedProposalAuthority: true, active: true,
     });
-    for (let index = 0; index < snapshot.approvals.length; index += 1) {
-      const existing = snapshot.approvals[index];
+    for (let index = 0; index < staged.approvals.length; index += 1) {
+      const existing = staged.approvals[index];
       if (existing?.status === "approved" && existing.active === true &&
         (existing.expiresAt !== undefined && Date.parse(existing.expiresAt) <= Date.parse(record.issuedAt) ||
           existing.proposalId !== proposal.proposalId || existing.expectedCampaignVersion !== proposal.expectedCampaignVersion || existing.trustedProposalAuthority !== true)) {
-        snapshot.approvals[index] = { ...existing, active: false };
+        staged.approvals[index] = { ...existing, active: false };
       }
     }
-    if (snapshot.approvals.some(({ actionDigest, status, active }) => actionDigest === approval.actionDigest && status === "approved" && active === true)) throw new ApprovalIssuanceConflict();
-    await this.#recordTrustedApproval(approval);
+    if (staged.approvals.some(({ actionDigest, status, active }) => actionDigest === approval.actionDigest && status === "approved" && active === true)) throw new ApprovalIssuanceConflict();
+    if ([...this.#snapshots.values()].some((candidate) => candidate.approvals.some(({ id }) => id === approval.id))) throw new Error(`Approval ${approval.id} already exists`);
+    staged.approvals.push(structuredClone(approval));
+    this.#snapshots.set(record.campaignId, staged);
     this.#approvalKeys.set(mapKey, approval.id);
     return structuredClone(approval);
   }
@@ -277,15 +289,8 @@ export class FakeCampaignStore implements CampaignStore {
     const snapshot = this.#required(campaignId);
     this.#assertClaim(snapshot, campaignId, record.expectedVersion, record.expectedStatus);
     this.#assertNoBlockingExternalAction(snapshot);
-    this.#assertEventAvailable(record.attemptedEvent.id);
     if (record.attemptedEvent.eventType !== "external_action_attempted") throw new Error("Invalid external action attempted event");
     assertExternalActionEventVersion(record.attemptedEvent.payload, record.expectedVersion, record.expectedVersion);
-    if (this.failNextEvent) {
-      this.failNextEvent = false;
-      throw new Error("Campaign event persistence failed");
-    }
-    if ([...this.#snapshots.values()].some((candidate) => candidate.externalActionClaims.some(({ id }) => id === record.claimId))) throw new Error(`External action claim ${record.claimId} already exists`);
-    if ([...this.#snapshots.values()].some((candidate) => candidate.externalActionClaims.some(({ approvalId }) => approvalId === record.approvalId))) throw new Error("Approval already has an external action claim");
     const currentCommitSha = singletonCommit(snapshot);
     if (currentCommitSha !== record.expectedCurrentCommitSha) throw new CampaignVersionConflict(campaignId, record.expectedVersion);
     if (record.payload.action === "push_branch" && currentCommitSha === undefined) throw new Error("Branch push requires a current campaign head");
@@ -294,6 +299,17 @@ export class FakeCampaignStore implements CampaignStore {
     if (externalActionDigest(record.payload) !== record.actionDigest) throw new Error("External action payload digest does not match claim");
     const approvalIndex = snapshot.approvals.findIndex(({ id }) => id === record.approvalId);
     const approval = snapshot.approvals[approvalIndex];
+    if (approval?.active === true && approval.trustedProposalAuthority === true && approval.expiresAt !== undefined && Date.parse(approval.expiresAt) <= Date.parse(consumedAt)) {
+      snapshot.approvals[approvalIndex] = { ...approval, active: false };
+      throw new Error("Approval is not available because it expired");
+    }
+    if (approval?.active === true && approval.trustedProposalAuthority === true) {
+      const proposal = currentApprovalProposal(cloneSnapshot(snapshot));
+      if (!approvalMatchesProposal(approval, proposal)) {
+        snapshot.approvals[approvalIndex] = { ...approval, status: "rejected", active: false };
+        throw new Error("External action does not match the current approved proposal authority");
+      }
+    }
     if (approval === undefined || approval.active !== true || approval.trustedProposalAuthority !== true || approval.campaignId !== campaignId || approval.proposalId === undefined || approval.payload === undefined ||
       approval.expectedCampaignVersion !== snapshot.campaign.version || approval.expectedCampaignStatus !== snapshot.campaign.status ||
       approval.expectedCurrentCommitSha !== (currentCommitSha ?? null) || approval.actionDigest !== record.actionDigest ||
@@ -301,6 +317,13 @@ export class FakeCampaignStore implements CampaignStore {
     validateExternalActionPayload(approval.payload as import("../../src/application/external-action.js").ExternalActionPayload);
     if (!isApprovalActionAllowed(approval.action, approval.expectedCampaignStatus)) throw new Error("Campaign state does not allow this approval action");
     const consumed = consumeDomainApproval(approval, record.actionDigest, record.consumedAt);
+    this.#assertEventAvailable(record.attemptedEvent.id);
+    if (this.failNextEvent) {
+      this.failNextEvent = false;
+      throw new Error("Campaign event persistence failed");
+    }
+    if ([...this.#snapshots.values()].some((candidate) => candidate.externalActionClaims.some(({ id }) => id === record.claimId))) throw new Error(`External action claim ${record.claimId} already exists`);
+    if ([...this.#snapshots.values()].some((candidate) => candidate.externalActionClaims.some(({ approvalId }) => approvalId === record.approvalId))) throw new Error("Approval already has an external action claim");
     const claim: ExternalActionClaim = {
       id: record.claimId,
       campaignId,
@@ -576,12 +599,6 @@ export class FakeCampaignStore implements CampaignStore {
     return snapshot;
   }
 
-  async #recordTrustedApproval(approval: Approval): Promise<void> {
-    const snapshot = this.#required(approval.campaignId);
-    if ([...this.#snapshots.values()].some((candidate) => candidate.approvals.some(({ id }) => id === approval.id))) throw new Error(`Approval ${approval.id} already exists`);
-    snapshot.approvals.push(structuredClone(approval));
-  }
-
   #assertEventAvailable(eventId: string): void {
     if (this.#eventIds.has(eventId)) {
       throw new Error(`Campaign event ${eventId} already exists`);
@@ -609,6 +626,14 @@ function cloneSnapshot(snapshot: MutableSnapshot): CampaignSnapshot {
     externalReferences: snapshot.externalReferences,
     externalActionClaims: snapshot.externalActionClaims,
   });
+}
+
+function approvalMatchesProposal(approval: Approval, proposal: ReturnType<typeof currentApprovalProposal>): boolean {
+  if (proposal === null || approval.payload === undefined) return false;
+  return approval.proposalId === proposal.proposalId && approval.action === proposal.payload.action &&
+    approval.actionDigest === proposal.actionDigest && approval.expectedCampaignVersion === proposal.expectedCampaignVersion &&
+    approval.expectedCampaignStatus === proposal.expectedCampaignStatus && approval.expectedCurrentCommitSha === (proposal.expectedCurrentCommitSha ?? null) &&
+    canonicalExternalActionJson(approval.payload as import("../../src/application/external-action.js").ExternalActionPayload) === canonicalExternalActionJson(proposal.payload);
 }
 
 function assertCommitSha(commitSha: string): void {

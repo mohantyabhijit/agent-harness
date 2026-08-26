@@ -359,7 +359,7 @@ describe("RunCampaign", () => {
     await expect(service.executeApprovedExternalAction("campaign-1", { approvalId: "approval-push-stale", payload: push }, action)).rejects.toThrow(/approved proposal|version|head/i);
 
     expect(action).not.toHaveBeenCalled();
-    expect((await store.get("campaign-1"))?.approvals[0]?.status).toBe("approved");
+    expect((await store.get("campaign-1"))?.approvals[0]).toMatchObject({ status: "rejected", active: false });
   });
 
   it("allows only one concurrent caller to cross the approval seam", async () => {

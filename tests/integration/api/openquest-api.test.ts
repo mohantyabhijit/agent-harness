@@ -107,10 +107,29 @@ describe("OpenQuest API", () => {
 
     expect(Object.keys(approval).sort()).toEqual(["action", "actionDigest", "expectedCampaignVersion", "expiresAt", "id", "isActive", "issuedAt", "proposalId", "status"]);
     expect(approval).toEqual(snapshot.approvals[0]);
-    expect(approval).toMatchObject({ proposalId: confirmation.proposalId, expectedCampaignVersion: 7, actionDigest: confirmation.actionDigest, isActive: false });
+    expect(approval).toMatchObject({ proposalId: confirmation.proposalId, expectedCampaignVersion: 7, actionDigest: confirmation.actionDigest, isActive: true });
     expect(approval).not.toHaveProperty("payload");
     expect(approval).not.toHaveProperty("expectedCampaignStatus");
     expect(approval).not.toHaveProperty("expectedCurrentCommitSha");
+    await app.close();
+  });
+
+  it("uses the injected request clock and permanently retires an observed expiry across clock rollback", async () => {
+    let now = "2026-08-26T00:00:00Z";
+    const { app, store } = buildTestApp({ clock: { now: () => now } });
+    const head = "a".repeat(40);
+    const payload = { action: "create_pr" as const, repository: "owner/repo", issueNumber: 42, branch: "openquest/fix-42", baseBranch: "main", commitSha: head, title: "Fix", body: "Body" };
+    store.seed(campaign({ status: "contribution_approval", version: 7 }));
+    store.seedExternalReference("campaign-1", { kind: "commit", value: head });
+    await appendProposal(store, payload, { id: "proposal-clock", version: 7, status: "contribution_approval", currentHead: head });
+    const request = { method: "POST" as const, url: "/api/campaigns/campaign-1/approvals", headers: { "idempotency-key": "clock-confirmation" }, payload: { proposalId: "proposal-clock", actionDigest: externalActionDigest(payload), expectedCampaignVersion: 7 } };
+
+    expect((await app.inject(request)).json().approval).toMatchObject({ issuedAt: "2026-08-26T00:00:00.000Z", isActive: true });
+    now = "2026-08-26T00:11:00Z";
+    expect((await app.inject({ method: "GET", url: "/api/campaigns/campaign-1" })).json().approvals[0]).toMatchObject({ isActive: false });
+    expect((await store.get("campaign-1"))?.approvals[0]).toMatchObject({ active: false });
+    now = "2026-08-26T00:05:00Z";
+    expect((await app.inject({ method: "GET", url: "/api/campaigns/campaign-1" })).json().approvals[0]).toMatchObject({ isActive: false });
     await app.close();
   });
 
@@ -125,6 +144,15 @@ describe("OpenQuest API", () => {
     expect(missing.statusCode).toBe(400);
     expect(oversized.statusCode).toBe(400);
     expect((await store.get("campaign-1"))?.approvals).toEqual([]);
+    await app.close();
+  });
+
+  it("rejects multiline or transformed proposal identifiers at the approval route", async () => {
+    const { app } = buildTestApp();
+    for (const proposalId of ["proposal\nid", " proposal-id "]) {
+      const response = await app.inject({ method: "POST", url: "/api/campaigns/campaign-1/approvals", headers: { "idempotency-key": "identifier-check" }, payload: { proposalId, actionDigest: `sha256:${"a".repeat(64)}`, expectedCampaignVersion: 7 } });
+      expect(response.statusCode).toBe(400);
+    }
     await app.close();
   });
 

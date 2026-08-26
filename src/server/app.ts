@@ -54,7 +54,7 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
   app.get("/api/healthz", async () => ({ status: "ok" }));
   registerSpaceRoutes(app);
   registerDiscoveryRoutes(app, { discover, catalog: dependencies.catalog });
-  registerCampaignRoutes(app, { createCampaign, runCampaign, store: dependencies.store });
+  registerCampaignRoutes(app, { createCampaign, runCampaign, store: dependencies.store, clock: dependencies.clock });
   registerApprovalRoutes(app, { store: dependencies.store, clock: dependencies.clock, ids: dependencies.ids });
   registerReviewRoutes(app, { syncReview });
   return app;

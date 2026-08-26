@@ -5,9 +5,15 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@truefoundry/trueforge-ui", () => ({ TrueForgeUI: () => <div /> }));
 
-import type { ApprovalActionSummary, ApprovalProposal, CampaignSnapshot, OpenQuestApi } from "../../src/web/api.js";
+import { externalActionDigest, type ExternalActionPayload } from "../../src/application/external-action.js";
+import type { CampaignStatus } from "../../src/domain/campaign.js";
+import { buildApp } from "../../src/server/app.js";
+import { createOpenQuestApi, type ApprovalActionSummary, type ApprovalProposal, type CampaignSnapshot, type FetchLike, type OpenQuestApi } from "../../src/web/api.js";
 import { ChangeBrief } from "../../src/web/components/ChangeBrief.js";
 import { CampaignPage } from "../../src/web/routes/CampaignPage.js";
+import { campaign } from "../builders.js";
+import { FakeCampaignStore } from "../fakes/fake-campaign-store.js";
+import { FakeHarness } from "../fakes/fake-harness.js";
 
 const payload: ApprovalActionSummary = {
   action: "create_pr",
@@ -93,6 +99,46 @@ describe("ChangeBrief", () => {
     render(<ChangeBrief onApprove={vi.fn()} proposal={{ ...proposal, action }} />);
     expect(screen.getAllByText(expectedLabel)[0]).toBeVisible();
   });
+
+  it("preserves all five exact actions through the Fastify route, browser parser, and rendered brief", async () => {
+    const fixtures: readonly { readonly payload: ExternalActionPayload; readonly status: CampaignStatus; readonly head?: string; readonly pullRequest?: string; readonly checks: readonly (readonly [string, string])[] }[] = [
+      { payload: { action: "post_issue_comment", repository: "owner/repo", issueNumber: 42, body: "  exact\tcomment\r\nsecond line\n  " }, status: "coordination_pending", checks: [["Issue comment", "  exact\tcomment\r\nsecond line\n  "]] },
+      { payload: { action: "request_assignment", repository: "owner/repo", issueNumber: 42, assignee: "octocat-dev" }, status: "coordination_pending", checks: [["Requested assignee", "octocat-dev"]] },
+      { payload: { action: "push_branch", repository: "owner/repo", issueNumber: 42, branch: "openquest/exact-42", commitSha: "b".repeat(40) }, status: "contribution_approval", head: "a".repeat(40), checks: [["Branch", "openquest/exact-42"], ["Source commit", "a".repeat(40)], ["Target commit", "b".repeat(40)]] },
+      { payload: { action: "create_pr", repository: "owner/repo", issueNumber: 42, branch: "openquest/exact-42", baseBranch: "main", commitSha: "a".repeat(40), title: "  Exact title bytes  ", body: "  exact\tPR\r\nbody\n  " }, status: "contribution_approval", head: "a".repeat(40), checks: [["Pull request title", "  Exact title bytes  "], ["Pull request body", "  exact\tPR\r\nbody\n  "]] },
+      { payload: { action: "update_pr", repository: "owner/repo", issueNumber: 42, pullRequest: "https://github.com/owner/repo/pull/7", branch: "openquest/exact-42", commitSha: "c".repeat(40), body: "  exact\tupdate\r\nbody\n  " }, status: "repair", head: "c".repeat(40), pullRequest: "https://github.com/owner/repo/pull/7", checks: [["Pull request", "https://github.com/owner/repo/pull/7"], ["Updated body", "  exact\tupdate\r\nbody\n  "]] },
+    ];
+
+    for (const [index, fixture] of fixtures.entries()) {
+      cleanup();
+      const store = new FakeCampaignStore();
+      store.seed(campaign({ status: fixture.status, version: 7 }));
+      if (fixture.head !== undefined) store.seedExternalReference("campaign-1", { kind: "commit", value: fixture.head });
+      if (fixture.pullRequest !== undefined) store.seedExternalReference("campaign-1", { kind: "pull_request", value: fixture.pullRequest });
+      const proposalId = `proposal-exact-${String(index)}`;
+      await store.appendEvent("campaign-1", { id: proposalId, eventType: "external_action_proposed", occurredAt: "2026-08-26T00:00:00Z", payload: {
+        proposalId, payload: fixture.payload, actionDigest: externalActionDigest(fixture.payload), expectedCampaignVersion: 7, expectedCampaignStatus: fixture.status,
+        ...(fixture.head === undefined ? {} : { expectedCurrentCommitSha: fixture.head }),
+        brief: proposal.brief,
+      } });
+      const app = buildApp({ store, harness: new FakeHarness(), catalog: { listRepositories: async () => [], listIssues: async () => [] }, clock: { now: () => "2026-08-26T00:00:00Z" }, ids: { next: () => "unused-id" }, authorization: { require: () => undefined } });
+      const fetcher: FetchLike = async (input, init) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        const response = await app.inject({ method: init?.method === "POST" ? "POST" : "GET", url, headers: Object.fromEntries(new Headers(init?.headers).entries()), ...(typeof init?.body === "string" ? { payload: init.body } : {}) });
+        return new Response(response.body, { status: response.statusCode, headers: new Headers(response.headers as Record<string, string>) });
+      };
+
+      const loaded = await createOpenQuestApi({ fetch: fetcher }).getCampaign("campaign-1");
+      expect(loaded.approvalProposal).not.toBeNull();
+      render(<ChangeBrief onApprove={vi.fn()} proposal={loaded.approvalProposal as ApprovalProposal} />);
+      for (const [label, exactValue] of fixture.checks) {
+        const labelNode = screen.getAllByText(label).find((element) => element.tagName === "DT");
+        const rendered = labelNode?.parentElement?.querySelector<HTMLElement>(".pre-wrap")?.textContent;
+        expect(rendered).toBe(exactValue);
+      }
+      await app.close();
+    }
+  });
 });
 
 describe("Campaign approval", () => {
@@ -142,6 +188,23 @@ describe("Campaign approval", () => {
     expect(approvalSignal?.aborted).toBe(true);
   });
 
+  it("does not carry an abort-ignoring POST lock across A-B-A navigation", async () => {
+    const issueApproval = vi.fn<OpenQuestApi["issueApproval"]>(async () => new Promise(() => undefined));
+    const getCampaign = vi.fn(async (id: string) => ({ ...snapshot, id }));
+    const api = { getCampaign, issueApproval };
+    const view = render(<CampaignPage api={api} campaignId="campaign-1" createIdempotencyKey={() => "approval-route-a"} />);
+    await screen.findByText(payload.title);
+    fireEvent.click(screen.getByRole("checkbox", { name: /reviewed every field/i }));
+    fireEvent.click(screen.getByRole("button", { name: /approve scoped pull request/i }));
+
+    view.rerender(<CampaignPage api={api} campaignId="campaign-2" createIdempotencyKey={() => "approval-route-b"} />);
+    view.rerender(<CampaignPage api={api} campaignId="campaign-1" createIdempotencyKey={() => "approval-route-a2"} />);
+
+    const checkbox = await screen.findByRole("checkbox", { name: /reviewed every field/i });
+    await waitFor(() => { expect(checkbox).toBeEnabled(); });
+    expect(screen.queryByRole("button", { name: /issuing scoped approval/i })).not.toBeInTheDocument();
+  });
+
   it("renders the refreshed durable approval after issuance", async () => {
     let reads = 0;
     const approved = { id: "approval-1", action: "create_pr" as const, actionDigest: proposal.actionDigest, status: "approved" as const, issuedAt: "2026-08-26T00:10:00Z", expiresAt: "2099-08-26T00:20:00Z", proposalId: proposal.proposalId, expectedCampaignVersion: 7, isActive: true };
@@ -155,6 +218,40 @@ describe("Campaign approval", () => {
     fireEvent.click(screen.getByRole("button", { name: /approve scoped pull request/i }));
 
     expect(await screen.findByText("Pull request approval approved")).toBeVisible();
+  });
+
+  it.each([
+    ["inactive", { approvals: [{ id: "approval-inactive", action: "create_pr" as const, actionDigest: proposal.actionDigest, status: "approved" as const, issuedAt: "2026-08-26T00:10:00Z", proposalId: proposal.proposalId, expectedCampaignVersion: 7, isActive: false }] }],
+    ["expired", { approvals: [{ id: "approval-expired", action: "create_pr" as const, actionDigest: proposal.actionDigest, status: "approved" as const, issuedAt: "2026-08-26T00:00:00Z", expiresAt: "2026-08-26T00:10:00Z", proposalId: proposal.proposalId, expectedCampaignVersion: 7, isActive: false }] }],
+    ["absent", { approvals: [] }],
+  ] as const)("clears POST optimism when the authoritative approval is %s", async (_label, refreshed) => {
+    let reads = 0;
+    const postApproval = { id: "approval-post", action: "create_pr" as const, actionDigest: proposal.actionDigest, status: "approved" as const, issuedAt: "2026-08-26T00:00:00Z", expiresAt: "2099-08-26T00:10:00Z", proposalId: proposal.proposalId, expectedCampaignVersion: 7, isActive: true };
+    const getCampaign = vi.fn(async () => reads++ === 0 ? snapshot : { ...snapshot, ...refreshed });
+    render(<CampaignPage api={{ getCampaign, issueApproval: async () => postApproval }} campaignId="campaign-1" createIdempotencyKey={() => "approval-authority"} />);
+    await screen.findByText(payload.title);
+    fireEvent.click(screen.getByRole("checkbox", { name: /reviewed every field/i }));
+    fireEvent.click(screen.getByRole("button", { name: /approve scoped pull request/i }));
+
+    await waitFor(() => { expect(getCampaign).toHaveBeenCalledTimes(2); });
+    expect(screen.queryByRole("button", { name: /scoped proposal approved/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /approve scoped pull request/i })).toBeEnabled();
+    expect(screen.getByRole("checkbox", { name: /reviewed every field/i })).toBeEnabled();
+  });
+
+  it("follows a consumed authoritative snapshot without asking to approve a proposal that disappeared", async () => {
+    let reads = 0;
+    const postApproval = { id: "approval-post", action: "create_pr" as const, actionDigest: proposal.actionDigest, status: "approved" as const, issuedAt: "2026-08-26T00:00:00Z", proposalId: proposal.proposalId, expectedCampaignVersion: 7, isActive: true };
+    const consumed = { ...postApproval, status: "consumed" as const, consumedAt: "2026-08-26T00:01:00Z", isActive: false };
+    const getCampaign = vi.fn(async () => reads++ === 0 ? snapshot : { ...snapshot, approvalProposal: null, approvals: [consumed] });
+    render(<CampaignPage api={{ getCampaign, issueApproval: async () => postApproval }} campaignId="campaign-1" createIdempotencyKey={() => "approval-consumed"} />);
+    await screen.findByText(payload.title);
+    fireEvent.click(screen.getByRole("checkbox", { name: /reviewed every field/i }));
+    fireEvent.click(screen.getByRole("button", { name: /approve scoped pull request/i }));
+
+    expect(await screen.findByText(/exact proposal is pending/i)).toBeVisible();
+    expect(screen.getByText("Pull request approval consumed")).toBeVisible();
+    expect(screen.queryByRole("button", { name: /approve scoped pull request/i })).not.toBeInTheDocument();
   });
 
   it("refreshes campaign approval availability when the server TTL expires", async () => {
@@ -171,6 +268,21 @@ describe("Campaign approval", () => {
 
     await waitFor(() => { expect(getCampaign).toHaveBeenCalledTimes(2); });
     expect(screen.getByRole("button", { name: /approve scoped pull request/i })).toBeDisabled();
+    vi.useRealTimers();
+  });
+
+  it("immediately refreshes an already-expired active DTO once", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date("2026-08-26T00:10:00Z"));
+    const expired = { id: "approval-expired", action: "create_pr" as const, actionDigest: proposal.actionDigest, status: "approved" as const, issuedAt: "2026-08-26T00:00:00Z", expiresAt: "2026-08-26T00:09:00Z", proposalId: proposal.proposalId, expectedCampaignVersion: 7, isActive: true };
+    let reads = 0;
+    const getCampaign = vi.fn(async () => ({ ...snapshot, approvals: reads++ === 0 ? [expired] : [] }));
+    render(<CampaignPage api={{ getCampaign, issueApproval: async () => expired }} campaignId="campaign-1" />);
+    await screen.findByText(payload.title);
+
+    await vi.advanceTimersByTimeAsync(0);
+    await waitFor(() => { expect(getCampaign).toHaveBeenCalledTimes(2); });
+    expect(screen.queryByRole("button", { name: /scoped proposal approved/i })).not.toBeInTheDocument();
     vi.useRealTimers();
   });
 

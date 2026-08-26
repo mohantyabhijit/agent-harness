@@ -7,7 +7,7 @@ import { campaignIdSchema, campaignNotFound, publicApproval } from "./support.js
 
 const paramsSchema = z.object({ id: campaignIdSchema }).strict();
 const approvalBodySchema = z.object({
-  proposalId: z.string().trim().min(1).max(128),
+  proposalId: campaignIdSchema,
   actionDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/u),
   expectedCampaignVersion: z.number().int().positive(),
 }).strict();
@@ -27,9 +27,9 @@ export function registerApprovalRoutes(app: FastifyInstance, dependencies: Appro
       campaignId: id, proposalId: input.proposalId, actionDigest: input.actionDigest,
       expectedVersion: input.expectedCampaignVersion, approvalId: dependencies.ids.next(), issuedAt, expiresAt, idempotencyKey,
     });
-    const snapshot = await dependencies.store.get(id);
+    const snapshot = await dependencies.store.get(id, issuedAt);
     if (snapshot === undefined) throw campaignNotFound();
-    return reply.code(201).send({ approval: publicApproval(snapshot, approval) });
+    return reply.code(201).send({ approval: publicApproval(snapshot, approval, Date.parse(issuedAt)) });
   });
 }
 

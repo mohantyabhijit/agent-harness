@@ -49,6 +49,12 @@ describe("scoped approvals", () => {
     expect(() => consumeApproval(approval, "sha256:a", "not-a-timestamp")).toThrow(/invalid consumption timestamp/i);
   });
 
+  it("rejects consumption before the approval was issued", () => {
+    const approval = issueApproval({ id: "approval-1", campaignId: "campaign-1", action: "create_pr", actionDigest: "sha256:a", issuedAt: "2026-08-26T00:10:00Z" });
+
+    expect(() => consumeApproval(approval, "sha256:a", "2026-08-26T00:09:59Z")).toThrow(/before.*issued|issued.*after/i);
+  });
+
   it("exposes approval data as immutable value-object fields", () => {
     expect(verifyApprovalIsReadonly).toBeTypeOf("function");
   });

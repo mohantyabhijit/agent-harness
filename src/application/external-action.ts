@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isExactMultilineText, isExactSingleLineText } from "../domain/exact-text.js";
 
 export type ExternalActionPayload =
   | Readonly<{ action: "post_issue_comment"; repository: string; issueNumber: number; body: string }>
@@ -19,15 +20,14 @@ export function externalActionDigest(payload: ExternalActionPayload): string {
 
 export function validateExternalActionPayload(payload: ExternalActionPayload): void {
   if (!/^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/u.test(payload.repository) || !Number.isSafeInteger(payload.issueNumber) || payload.issueNumber < 1) throw new Error("Invalid external action payload");
-  const nonempty = (value: string, maximum = 20_000): boolean => typeof value === "string" && value.trim().length > 0 && value.length <= maximum && !hasControlCharacter(value);
-  const branch = (value: string): boolean => nonempty(value, 255) && /^(?![./])(?!.*(?:\.\.|\/\/|@\{|\\))[A-Za-z0-9._/-]+(?<![./])$/u.test(value);
+  const branch = (value: string): boolean => isExactSingleLineText(value, 255) && /^(?![./])(?!.*(?:\.\.|\/\/|@\{|\\))[A-Za-z0-9._/-]+(?<![./])$/u.test(value);
   const sha = (value: string): boolean => /^[0-9a-f]{40}$/u.test(value);
   switch (payload.action) {
-    case "post_issue_comment": assertKeys(payload, ["action", "repository", "issueNumber", "body"]); if (!nonempty(payload.body)) throw new Error("Invalid external action payload"); break;
+    case "post_issue_comment": assertKeys(payload, ["action", "repository", "issueNumber", "body"]); if (!isExactMultilineText(payload.body, 20_000)) throw new Error("Invalid external action payload"); break;
     case "request_assignment": assertKeys(payload, ["action", "repository", "issueNumber", "assignee"]); if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/u.test(payload.assignee)) throw new Error("Invalid external action payload"); break;
     case "push_branch": assertKeys(payload, ["action", "repository", "issueNumber", "branch", "commitSha"]); if (!branch(payload.branch) || !sha(payload.commitSha)) throw new Error("Invalid external action payload"); break;
-    case "create_pr": assertKeys(payload, ["action", "repository", "issueNumber", "branch", "baseBranch", "commitSha", "title", "body"]); if (!branch(payload.branch) || !branch(payload.baseBranch) || !sha(payload.commitSha) || !nonempty(payload.title, 256) || !nonempty(payload.body)) throw new Error("Invalid external action payload"); break;
-    case "update_pr": assertKeys(payload, ["action", "repository", "issueNumber", "pullRequest", "branch", "commitSha", "body"]); if (!branch(payload.branch) || !sha(payload.commitSha) || !nonempty(payload.body) || payload.pullRequest.length > 2_048 || !isPullRequest(payload.pullRequest, payload.repository)) throw new Error("Invalid external action payload"); break;
+    case "create_pr": assertKeys(payload, ["action", "repository", "issueNumber", "branch", "baseBranch", "commitSha", "title", "body"]); if (!branch(payload.branch) || !branch(payload.baseBranch) || !sha(payload.commitSha) || !isExactSingleLineText(payload.title, 256) || !isExactMultilineText(payload.body, 20_000)) throw new Error("Invalid external action payload"); break;
+    case "update_pr": assertKeys(payload, ["action", "repository", "issueNumber", "pullRequest", "branch", "commitSha", "body"]); if (!branch(payload.branch) || !sha(payload.commitSha) || !isExactMultilineText(payload.body, 20_000) || payload.pullRequest.length > 2_048 || !isPullRequest(payload.pullRequest, payload.repository)) throw new Error("Invalid external action payload"); break;
     default: throw new Error("Invalid external action payload");
   }
 }
@@ -35,14 +35,6 @@ export function validateExternalActionPayload(payload: ExternalActionPayload): v
 function assertKeys(value: object, allowed: readonly string[]): void {
   const keys = Object.keys(value);
   if (keys.length !== allowed.length || keys.some((key) => !allowed.includes(key))) throw new Error("Invalid external action payload");
-}
-
-function hasControlCharacter(value: string): boolean {
-  for (let index = 0; index < value.length; index += 1) {
-    const code = value.charCodeAt(index);
-    if (code < 32 || code === 127) return true;
-  }
-  return false;
 }
 
 export function isPullRequest(value: string, repository: string): boolean {

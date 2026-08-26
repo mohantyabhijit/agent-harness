@@ -55,10 +55,24 @@ describe("public campaign support", () => {
     const response = publicCampaignSnapshot({ ...source, events: [
       proposalEvent,
       { id: "preflight", eventType: "campaign_operation_completed", occurredAt: "2026-08-26T00:01:00Z", sequence: 2, payload: { operation: "preflight", output: { verdict: "quarantine", currentCommitSha: action.commitSha }, secret: "do-not-project" } },
-    ] });
+    ] }, Date.parse("2026-08-26T00:10:00Z"));
     expect(response.events).toEqual([
       expect.objectContaining({ facts: { action: "create_pr", expectedCampaignVersion: 7 } }),
       expect.objectContaining({ facts: { operation: "preflight", "output.verdict": "quarantine", "output.currentCommitSha": action.commitSha } }),
+    ]);
+    expect(JSON.stringify(response.events)).not.toContain("do-not-project");
+  });
+
+  it("projects only validated external reconciliation facts", () => {
+    const source = snapshot();
+    const response = publicCampaignSnapshot({ ...source, events: [
+      { id: "reconciled", eventType: "external_action_reconciled", occurredAt: "2026-08-26T00:01:00Z", sequence: 1, payload: { action: "create_pr", disposition: "confirmed_completed", observedCanonicalHead: "b".repeat(40), claimedCampaignVersion: 7, resultingCampaignVersion: 8, secret: "do-not-project" } },
+      { id: "invalid", eventType: "external_action_reconciled", occurredAt: "2026-08-26T00:02:00Z", sequence: 2, payload: { action: "create_pr", disposition: "operator-says-done", observedCanonicalHead: "not-a-sha", claimedCampaignVersion: 8, resultingCampaignVersion: 8 } },
+    ] }, Date.parse("2026-08-26T00:10:00Z"));
+
+    expect(response.events).toEqual([
+      expect.objectContaining({ facts: expect.objectContaining({ disposition: "confirmed_completed", observedCanonicalHead: "b".repeat(40) }) }),
+      expect.objectContaining({ facts: expect.not.objectContaining({ disposition: expect.anything(), observedCanonicalHead: expect.anything() }) }),
     ]);
     expect(JSON.stringify(response.events)).not.toContain("do-not-project");
   });

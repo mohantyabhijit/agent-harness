@@ -118,15 +118,43 @@ describe("OpenQuest browser API", () => {
   });
 
   it.each([
-    { action: "post_issue_comment", repository: "owner/repo", issueNumber: 1, body: "  exact comment bytes  " },
+    { action: "post_issue_comment", repository: "owner/repo", issueNumber: 1, body: "  exact\tcomment\r\nbytes\n  " },
     { action: "request_assignment", repository: "owner/repo", issueNumber: 1, assignee: "octocat" },
     { action: "push_branch", repository: "owner/repo", issueNumber: 1, branch: "openquest/fix-1", sourceCommitSha: "a".repeat(40), targetCommitSha: "b".repeat(40) },
-    { action: "create_pr", repository: "owner/repo", issueNumber: 1, branch: "openquest/fix-1", baseBranch: "main", commitSha: "b".repeat(40), title: "  exact title bytes  ", body: "  exact PR body bytes  " },
-    { action: "update_pr", repository: "owner/repo", issueNumber: 1, pullRequest: "https://github.com/owner/repo/pull/7", branch: "openquest/fix-1", commitSha: "b".repeat(40), body: "  exact update bytes  " },
+    { action: "create_pr", repository: "owner/repo", issueNumber: 1, branch: "openquest/fix-1", baseBranch: "main", commitSha: "b".repeat(40), title: "  exact title bytes  ", body: "  exact\tPR\r\nbody\nbytes  " },
+    { action: "update_pr", repository: "owner/repo", issueNumber: 1, pullRequest: "https://github.com/owner/repo/pull/7", branch: "openquest/fix-1", commitSha: "b".repeat(40), body: "  exact\tupdate\r\nbytes\n  " },
   ] as const)("preserves every exact $action field at the browser boundary", async (action) => {
     const response = { ...realCampaignSnapshot, version: 7, approvalProposal: { proposalId: "proposal-exact", actionDigest: `sha256:${"b".repeat(64)}`, expectedCampaignVersion: 7, action, brief: { policy: "Policy", approach: "Approach", files: ["src/a.ts"], risks: ["Risk"], tests: ["npm test"], safetyResult: "Pass", qodoStatus: "Clear", aiDisclosure: "AI-assisted" } } };
     const api = createOpenQuestApi({ fetch: async () => new Response(JSON.stringify(response), { status: 200 }) });
     await expect(api.getCampaign(":review.1")).resolves.toMatchObject({ approvalProposal: { action } });
+  });
+
+  it.each([
+    ["multiline title", { action: "create_pr", repository: "owner/repo", issueNumber: 1, branch: "openquest/fix-1", baseBranch: "main", commitSha: "b".repeat(40), title: "line one\nline two", body: "Body" }],
+    ["NUL body", { action: "post_issue_comment", repository: "owner/repo", issueNumber: 1, body: "unsafe\u0000body" }],
+  ] as const)("rejects a proposal with %s", async (_label, action) => {
+    const response = { ...realCampaignSnapshot, version: 7, approvalProposal: { proposalId: "proposal-exact", actionDigest: `sha256:${"b".repeat(64)}`, expectedCampaignVersion: 7, action, brief: { policy: "Policy", approach: "Approach", files: ["src/a.ts"], risks: ["Risk"], tests: ["npm test"], safetyResult: "Pass", qodoStatus: "Clear", aiDisclosure: "AI-assisted" } } };
+    const api = createOpenQuestApi({ fetch: async () => new Response(JSON.stringify(response), { status: 200 }) });
+
+    await expect(api.getCampaign(":review.1")).rejects.toThrow(/campaign/i);
+  });
+
+  it("rejects transformed proposal identifiers instead of trimming them", async () => {
+    const response = { ...realCampaignSnapshot, version: 7, approvalProposal: { proposalId: " proposal-exact ", actionDigest: `sha256:${"b".repeat(64)}`, expectedCampaignVersion: 7, action: { action: "request_assignment", repository: "owner/repo", issueNumber: 1, assignee: "octocat" }, brief: { policy: "Policy", approach: "Approach", files: ["src/a.ts"], risks: ["Risk"], tests: ["npm test"], safetyResult: "Pass", qodoStatus: "Clear", aiDisclosure: "AI-assisted" } } };
+    const api = createOpenQuestApi({ fetch: async () => new Response(JSON.stringify(response), { status: 200 }) });
+
+    await expect(api.getCampaign(":review.1")).rejects.toThrow(/campaign/i);
+  });
+
+  it.each([
+    ["unknown disposition", { action: "create_pr", disposition: "operator-says-done", claimedCampaignVersion: 7, resultingCampaignVersion: 7 }],
+    ["invalid canonical head", { action: "create_pr", disposition: "confirmed_completed", observedCanonicalHead: "not-a-sha", claimedCampaignVersion: 7, resultingCampaignVersion: 8 }],
+    ["secret fact", { action: "create_pr", disposition: "confirmed_completed", claimedCampaignVersion: 7, resultingCampaignVersion: 7, operatorToken: "do-not-render" }],
+  ] as const)("rejects external reconciliation facts with an %s", async (_label, facts) => {
+    const response = { ...realCampaignSnapshot, events: [{ id: "reconciled", eventType: "external_action_reconciled", occurredAt: "2026-08-26T00:00:00Z", sequence: 1, facts }] };
+    const api = createOpenQuestApi({ fetch: async () => new Response(JSON.stringify(response), { status: 200 }) });
+
+    await expect(api.getCampaign(":review.1")).rejects.toThrow(/campaign/i);
   });
 
   it("issues approval for the server-owned proposal identity with the supplied human-confirmation key", async () => {

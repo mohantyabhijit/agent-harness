@@ -168,13 +168,18 @@ export class SqliteCampaignStore implements CampaignStore {
     })();
   }
 
-  async get(id: string): Promise<CampaignSnapshot | undefined> {
-    return this.#database.transaction(() => {
+  async get(id: string, observedAt?: string): Promise<CampaignSnapshot | undefined> {
+    const canonicalObservedAt = observedAt === undefined ? undefined : normalizeTimestamp(observedAt, "approval observation");
+    const read = this.#database.transaction(() => {
+      if (canonicalObservedAt !== undefined) {
+        this.#database.prepare("UPDATE approvals SET active = 0 WHERE campaign_id = ? AND status = 'approved' AND active = 1 AND expires_at IS NOT NULL AND expires_at <= ?").run(id, canonicalObservedAt);
+      }
       const row = this.#database
         .prepare("SELECT * FROM campaigns WHERE id = ?")
         .get(id) as CampaignRow | undefined;
       return row ? this.#snapshot(row) : undefined;
-    })();
+    });
+    return canonicalObservedAt === undefined ? read() : read.immediate();
   }
 
   async findByIssue(repository: string, issueNumber: number): Promise<CampaignSnapshot | undefined> {
@@ -442,7 +447,7 @@ export class SqliteCampaignStore implements CampaignStore {
     if (externalActionDigest(record.payload) !== record.actionDigest) throw new Error("External action payload digest does not match claim");
     if (record.attemptedEvent.eventType !== "external_action_attempted") throw new Error("Invalid external action attempted event");
     assertExternalActionEventVersion(record.attemptedEvent.payload, record.expectedVersion, record.expectedVersion);
-    const claim = this.#database.transaction(() => {
+    const claim = this.#database.transaction((): { readonly rejected: true } | { readonly retired: true } | { readonly claim: ExternalActionClaim } => {
       this.#assertClaim(campaignId, record.expectedVersion, record.expectedStatus);
       this.#assertNoBlockingExternalAction(campaignId);
       const currentCommitSha = this.#currentCommit(campaignId);
@@ -453,6 +458,18 @@ export class SqliteCampaignStore implements CampaignStore {
 
       const approvalRow = this.#database.prepare("SELECT * FROM approvals WHERE id = ? AND active = 1 AND trusted_proposal_authority = 1").get(record.approvalId) as ApprovalRow | undefined;
       const approved = approvalRow === undefined ? undefined : mapApproval(approvalRow);
+      if (approved?.expiresAt !== undefined && Date.parse(approved.expiresAt) <= Date.parse(consumedAt)) {
+        this.#database.prepare("UPDATE approvals SET active = 0 WHERE id = ? AND campaign_id = ? AND status = 'approved'").run(record.approvalId, campaignId);
+        return { retired: true };
+      }
+      if (approved !== undefined) {
+        const campaignRow = this.#database.prepare("SELECT * FROM campaigns WHERE id = ?").get(campaignId) as CampaignRow | undefined;
+        const proposal = campaignRow === undefined ? null : currentApprovalProposal(this.#snapshot(campaignRow));
+        if (!approvalMatchesProposal(approved, proposal)) {
+          this.#database.prepare("UPDATE approvals SET status = 'rejected', active = 0 WHERE id = ? AND campaign_id = ? AND status = 'approved'").run(record.approvalId, campaignId);
+          return { rejected: true };
+        }
+      }
       if (approved === undefined || approved.campaignId !== campaignId || approved.payload === undefined || approved.proposalId === undefined ||
         approved.expectedCampaignVersion !== record.expectedVersion || approved.expectedCampaignStatus !== record.expectedStatus ||
         approved.expectedCurrentCommitSha !== (currentCommitSha ?? null) || approved.actionDigest !== record.actionDigest ||
@@ -480,9 +497,12 @@ export class SqliteCampaignStore implements CampaignStore {
         approved.expectedCampaignVersion, approved.expectedCampaignStatus, consumedAt, leaseStartedAt,
       );
       this.#insertEvent(campaignId, record.attemptedEvent, occurredAt);
-      return this.#requiredExternalActionClaim(campaignId, record.claimId, "active");
+      return { claim: this.#requiredExternalActionClaim(campaignId, record.claimId, "active") };
     });
-    return claim.immediate();
+    const result = claim.immediate();
+    if ("rejected" in result) throw new Error("External action does not match the current approved proposal authority");
+    if ("retired" in result) throw new Error("Approval is not available because it expired");
+    return result.claim;
   }
 
   async completeExternalAction(campaignId: string, record: ExternalActionCompletionRecord): Promise<number> {
@@ -866,6 +886,17 @@ function mapApproval(row: ApprovalRow): Approval {
     active: row.active === 1,
     trustedProposalAuthority: row.trusted_proposal_authority === 1,
   };
+}
+
+function approvalMatchesProposal(approval: Approval, proposal: ReturnType<typeof currentApprovalProposal>): boolean {
+  if (proposal === null || approval.payload === undefined) return false;
+  return approval.proposalId === proposal.proposalId &&
+    approval.action === proposal.payload.action &&
+    approval.actionDigest === proposal.actionDigest &&
+    approval.expectedCampaignVersion === proposal.expectedCampaignVersion &&
+    approval.expectedCampaignStatus === proposal.expectedCampaignStatus &&
+    approval.expectedCurrentCommitSha === (proposal.expectedCurrentCommitSha ?? null) &&
+    canonicalExternalActionJson(approval.payload as ExternalActionPayload) === canonicalExternalActionJson(proposal.payload);
 }
 
 function mapQodoFinding(row: QodoFindingRow): QodoFinding {

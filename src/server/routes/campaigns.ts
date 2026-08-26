@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 
-import type { CreateCampaign } from "../../application/create-campaign.js";
+import type { Clock, CreateCampaign } from "../../application/create-campaign.js";
 import type { CampaignStore } from "../../application/ports/campaign-store.js";
 import type { RunCampaign } from "../../application/run-campaign.js";
 import { boundedUrlSchema, campaignIdSchema, campaignNotFound, issueNumberSchema, publicCampaignSnapshot, repositorySchema } from "./support.js";
@@ -27,6 +27,7 @@ export interface CampaignRouteDependencies {
   readonly createCampaign: CreateCampaign;
   readonly runCampaign: RunCampaign;
   readonly store: CampaignStore;
+  readonly clock: Clock;
 }
 
 export function registerCampaignRoutes(app: FastifyInstance, dependencies: CampaignRouteDependencies): void {
@@ -38,9 +39,10 @@ export function registerCampaignRoutes(app: FastifyInstance, dependencies: Campa
 
   app.get("/api/campaigns/:id", async (request) => {
     const { id } = campaignParamsSchema.parse(request.params);
-    const snapshot = await dependencies.store.get(id);
+    const observedAt = canonicalNow(dependencies.clock.now());
+    const snapshot = await dependencies.store.get(id, observedAt);
     if (snapshot === undefined) throw campaignNotFound();
-    return publicCampaignSnapshot(snapshot);
+    return publicCampaignSnapshot(snapshot, Date.parse(observedAt));
   });
 
   app.post("/api/campaigns/:id/actions/:action", async (request) => {
@@ -48,4 +50,10 @@ export function registerCampaignRoutes(app: FastifyInstance, dependencies: Campa
     emptyBodySchema.parse(request.body ?? {});
     return dependencies.runCampaign.execute(id, action);
   });
+}
+
+function canonicalNow(value: string): string {
+  const instant = Date.parse(value);
+  if (!Number.isFinite(instant)) throw new Error("Campaign clock returned an invalid timestamp");
+  return new Date(instant).toISOString();
 }

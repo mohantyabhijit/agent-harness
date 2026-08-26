@@ -63,6 +63,11 @@ export function consumeApproval(
     throw new Error("Approval is not available");
   }
   const consumedAtInstant = parseTimestamp(consumedAt, "consumption");
+  const issuedAtInstant = parseTimestamp(approval.issuedAt, "issuance");
+
+  if (consumedAtInstant < issuedAtInstant) {
+    throw new Error("Approval cannot be consumed before it was issued");
+  }
 
   if (
     approval.expiresAt &&
@@ -74,7 +79,7 @@ export function consumeApproval(
   return { ...approval, status: "consumed", consumedAt };
 }
 
-function parseTimestamp(timestamp: string, label: "consumption" | "expiry"): number {
+function parseTimestamp(timestamp: string, label: "consumption" | "expiry" | "issuance"): number {
   const match = /^(\d{4})-(\d{2})-(\d{2})T([01]\d|2[0-3]):([0-5]\d):([0-5]\d)(?:\.\d+)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/.exec(timestamp);
   if (!match) {
     throw new Error(`Invalid ${label} timestamp`);
