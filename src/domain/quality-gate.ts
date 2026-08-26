@@ -17,6 +17,10 @@ export function evaluateQualityGate(input: {
   iteration: number;
   findings: readonly QodoFinding[];
 }): QualityGateResult {
+  if (!Number.isInteger(input.iteration) || input.iteration < 0 || input.iteration > 3) {
+    throw new Error("Invalid quality iteration");
+  }
+
   if (!input.testsPassed && input.iteration >= 3) {
     return { outcome: "escalate", reason: "tests_failed" };
   }
@@ -26,11 +30,11 @@ export function evaluateQualityGate(input: {
       finding.status === "open" &&
       (finding.severity === "high" || finding.severity === "medium"),
   );
-  const dismissedFindingsHaveDispositions = input.findings.every(
-    (finding) => finding.status !== "dismissed" || Boolean(finding.disposition),
+  const remainingFindingsHaveDispositions = input.findings.every(
+    (finding) => finding.status === "fixed" || Boolean(finding.disposition?.trim()),
   );
 
-  if (input.testsPassed && !actionable && dismissedFindingsHaveDispositions) {
+  if (input.testsPassed && !actionable && remainingFindingsHaveDispositions) {
     return { outcome: "pass" };
   }
   if (input.iteration >= 3) {

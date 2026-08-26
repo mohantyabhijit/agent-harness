@@ -13,7 +13,16 @@ const campaign: Campaign = {
   version: 1,
 };
 
+function verifyCampaignIsReadonly(immutableCampaign: Campaign): void {
+  // @ts-expect-error Campaign fields are immutable outside domain transitions.
+  immutableCampaign.status = "preflight";
+}
+
 describe("transitionCampaign", () => {
+  it("exposes campaign data as immutable value-object fields", () => {
+    expect(verifyCampaignIsReadonly).toBeTypeOf("function");
+  });
+
   it("allows policy review to advance to preflight", () => {
     expect(transitionCampaign(campaign, "preflight").status).toBe("preflight");
   });

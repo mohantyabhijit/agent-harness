@@ -16,15 +16,15 @@ export type CampaignStatus =
   | "withdrawn";
 
 export interface Campaign {
-  id: string;
-  repository: string;
-  issueNumber: number;
-  issueUrl: string;
-  parentSessionId: string;
-  lane: "easy_win" | "long_term";
-  status: CampaignStatus;
-  qodoIteration: number;
-  version: number;
+  readonly id: string;
+  readonly repository: string;
+  readonly issueNumber: number;
+  readonly issueUrl: string;
+  readonly parentSessionId: string;
+  readonly lane: "easy_win" | "long_term";
+  readonly status: CampaignStatus;
+  readonly qodoIteration: number;
+  readonly version: number;
 }
 
 const allowed: Record<CampaignStatus, readonly CampaignStatus[]> = {
