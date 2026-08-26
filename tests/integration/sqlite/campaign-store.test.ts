@@ -29,6 +29,33 @@ function openMemoryStore(): { database: Database.Database; store: SqliteCampaign
 }
 
 describe("SqliteCampaignStore", () => {
+  it("creates the campaign and initial event in one transaction", async () => {
+    const { store } = openMemoryStore();
+    const initialEvent = {
+      id: "event-created",
+      eventType: "campaign_created",
+      payload: { status: "policy_review" },
+      occurredAt: "2026-08-26T00:00:00Z",
+    };
+
+    await store.create(campaign(), initialEvent);
+    expect((await store.get("campaign-1"))?.events).toEqual([
+      { ...initialEvent, occurredAt: "2026-08-26T00:00:00.000Z" },
+    ]);
+
+    await expect(store.create(
+      campaign({ id: "campaign-2", issueNumber: 43 }),
+      { ...initialEvent, id: "event-invalid", occurredAt: "invalid" },
+    )).rejects.toThrow(/invalid.*occurred/i);
+    expect(await store.get("campaign-2")).toBeUndefined();
+
+    await expect(store.create(
+      campaign({ id: "campaign-3", issueNumber: 44 }),
+      initialEvent,
+    )).rejects.toThrow(/unique constraint/i);
+    expect(await store.get("campaign-3")).toBeUndefined();
+  });
+
   it("never returns evidence from another issue campaign", async () => {
     const { store } = openMemoryStore();
     await store.create(campaign({ id: "campaign-a", issueNumber: 1 }));
@@ -209,7 +236,9 @@ describe("SqliteCampaignStore", () => {
       issuedAt: "2026-08-26T00:00:00Z",
     }));
     await expect(
-      store.consumeApproval("approval-valid", "sha256:valid", "2026-08-26T00:01:00+15:00"),
+      store.consumeApproval(
+        "approval-valid", "sha256:valid", "2026-08-26T00:01:00+15:00", 1, "policy_review",
+      ),
     ).rejects.toThrow(/invalid.*consumed/i);
   });
 
@@ -281,6 +310,31 @@ describe("SqliteCampaignStore", () => {
     expect((await store.get("campaign-1"))?.externalReferences).toEqual([reference]);
   });
 
+  it("upgrades existing external-reference tables to retain commit identity", async () => {
+    const { database, store } = openMemoryStore();
+    await store.create(campaign());
+    await store.setExternalReference("campaign-1", { kind: "branch", value: "openquest/fix" });
+    database.exec(`
+      ALTER TABLE external_references RENAME TO external_references_current;
+      CREATE TABLE external_references (
+        campaign_id TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL CHECK (kind IN ('issue', 'branch', 'pull_request', 'sandbox', 'child_session', 'ci_run')),
+        value TEXT NOT NULL,
+        PRIMARY KEY (campaign_id, kind, value)
+      );
+      INSERT INTO external_references SELECT * FROM external_references_current;
+      DROP TABLE external_references_current;
+    `);
+
+    const migrated = new SqliteCampaignStore(database);
+    await migrated.setExternalReference("campaign-1", { kind: "commit", value: "d".repeat(40) });
+
+    expect((await migrated.get("campaign-1"))?.externalReferences).toEqual([
+      { kind: "branch", value: "openquest/fix" },
+      { kind: "commit", value: "d".repeat(40) },
+    ]);
+  });
+
   it("enforces foreign keys for all child memory", async () => {
     const { store } = openMemoryStore();
 
@@ -296,7 +350,7 @@ describe("SqliteCampaignStore", () => {
     const firstDatabase = new Database(databasePath);
     databases.push(firstDatabase);
     const firstStore = new SqliteCampaignStore(firstDatabase);
-    await firstStore.create(campaign());
+    await firstStore.create(campaign({ status: "contribution_approval" }));
     await firstStore.recordApproval(issueApproval({
       id: "approval-1",
       campaignId: "campaign-1",
@@ -318,6 +372,8 @@ describe("SqliteCampaignStore", () => {
       "approval-1",
       "sha256:exact",
       "2026-08-26T00:30:00Z",
+      1,
+      "contribution_approval",
     );
     expect(consumed).toMatchObject({
       status: "consumed",
@@ -344,7 +400,7 @@ describe("SqliteCampaignStore", () => {
     databases.push(databaseA, databaseB);
     const storeA = new SqliteCampaignStore(databaseA);
     const storeB = new SqliteCampaignStore(databaseB);
-    await storeA.create(campaign());
+    await storeA.create(campaign({ status: "contribution_approval" }));
     await storeA.recordApproval(issueApproval({
       id: "approval-1",
       campaignId: "campaign-1",
@@ -358,8 +414,12 @@ describe("SqliteCampaignStore", () => {
     const staleReadB = (await storeB.get("campaign-1"))?.approvals[0];
     expect(staleReadA).toEqual(staleReadB);
     const results = await Promise.allSettled([
-      storeA.consumeApproval("approval-1", "sha256:payload", "2026-08-26T00:10:00Z"),
-      storeB.consumeApproval("approval-1", "sha256:payload", "2026-08-26T00:10:00Z"),
+      storeA.consumeApproval(
+        "approval-1", "sha256:payload", "2026-08-26T00:10:00Z", 1, "contribution_approval",
+      ),
+      storeB.consumeApproval(
+        "approval-1", "sha256:payload", "2026-08-26T00:10:00Z", 1, "contribution_approval",
+      ),
     ]);
 
     expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
@@ -367,9 +427,56 @@ describe("SqliteCampaignStore", () => {
     expect((await storeB.get("campaign-1"))?.approvals[0]?.status).toBe("consumed");
   });
 
+  it("atomically rejects approval when campaign version or allowed status changed", async () => {
+    const { store } = openMemoryStore();
+    const original = campaign({ status: "contribution_approval", version: 7 });
+    await store.create(original);
+    await store.recordApproval(issueApproval({
+      id: "approval-state-cas",
+      campaignId: original.id,
+      action: "create_pr",
+      actionDigest: "sha256:state-cas",
+      issuedAt: "2026-08-26T00:00:00Z",
+    }));
+    const withdrawn = { ...original, status: "withdrawn" as const, version: 8 };
+    await store.update(withdrawn, 7);
+
+    await expect(store.consumeApproval(
+      "approval-state-cas",
+      "sha256:state-cas",
+      "2026-08-26T00:01:00Z",
+      7,
+      "contribution_approval",
+    )).rejects.toThrow(/version|state/i);
+    expect((await store.get(original.id))?.approvals[0]?.status).toBe("approved");
+
+    const quarantined = campaign({
+      id: "campaign-quarantined",
+      repository: "owner/quarantined",
+      issueNumber: 43,
+      status: "quarantined",
+    });
+    await store.create(quarantined);
+    await store.recordApproval(issueApproval({
+      id: "approval-quarantined",
+      campaignId: quarantined.id,
+      action: "create_pr",
+      actionDigest: "sha256:quarantined",
+      issuedAt: "2026-08-26T00:00:00Z",
+    }));
+    await expect(store.consumeApproval(
+      "approval-quarantined",
+      "sha256:quarantined",
+      "2026-08-26T00:01:00Z",
+      1,
+      "quarantined",
+    )).rejects.toThrow(/state/i);
+    expect((await store.get(quarantined.id))?.approvals[0]?.status).toBe("approved");
+  });
+
   it("rejects a digest mismatch without consuming the approval", async () => {
     const { store } = openMemoryStore();
-    await store.create(campaign());
+    await store.create(campaign({ status: "contribution_approval" }));
     await store.recordApproval(issueApproval({
       id: "approval-1",
       campaignId: "campaign-1",
@@ -379,14 +486,16 @@ describe("SqliteCampaignStore", () => {
     }));
 
     await expect(
-      store.consumeApproval("approval-1", "sha256:different", "2026-08-26T00:01:00Z"),
+      store.consumeApproval(
+        "approval-1", "sha256:different", "2026-08-26T00:01:00Z", 1, "contribution_approval",
+      ),
     ).rejects.toThrow(/does not match/i);
     expect((await store.get("campaign-1"))?.approvals[0]?.status).toBe("approved");
   });
 
   it("rejects an approval at its exact expiry instant", async () => {
     const { store } = openMemoryStore();
-    await store.create(campaign());
+    await store.create(campaign({ status: "contribution_approval" }));
     await store.recordApproval(issueApproval({
       id: "approval-1",
       campaignId: "campaign-1",
@@ -397,7 +506,9 @@ describe("SqliteCampaignStore", () => {
     }));
 
     await expect(
-      store.consumeApproval("approval-1", "sha256:expected", "2026-08-26T00:05:00Z"),
+      store.consumeApproval(
+        "approval-1", "sha256:expected", "2026-08-26T00:05:00Z", 1, "contribution_approval",
+      ),
     ).rejects.toThrow(/expired/i);
     expect((await store.get("campaign-1"))?.approvals[0]?.status).toBe("approved");
   });
@@ -412,7 +523,7 @@ describe("SqliteCampaignStore", () => {
     consumerDatabase.pragma("busy_timeout = 0");
     const lockStore = new SqliteCampaignStore(lockDatabase);
     const consumerStore = new SqliteCampaignStore(consumerDatabase);
-    await lockStore.create(campaign());
+    await lockStore.create(campaign({ status: "contribution_approval" }));
     await lockStore.recordApproval(issueApproval({
       id: "approval-1",
       campaignId: "campaign-1",
@@ -423,13 +534,17 @@ describe("SqliteCampaignStore", () => {
 
     lockDatabase.exec("BEGIN IMMEDIATE");
     await expect(
-      consumerStore.consumeApproval("approval-1", "sha256:busy", "2026-08-26T00:01:00Z"),
+      consumerStore.consumeApproval(
+        "approval-1", "sha256:busy", "2026-08-26T00:01:00Z", 1, "contribution_approval",
+      ),
     ).rejects.toMatchObject({ code: "SQLITE_BUSY" });
     expect((await consumerStore.get("campaign-1"))?.approvals[0]?.status).toBe("approved");
     lockDatabase.exec("ROLLBACK");
 
     await expect(
-      consumerStore.consumeApproval("approval-1", "sha256:busy", "2026-08-26T00:01:00Z"),
+      consumerStore.consumeApproval(
+        "approval-1", "sha256:busy", "2026-08-26T00:01:00Z", 1, "contribution_approval",
+      ),
     ).resolves.toMatchObject({ status: "consumed" });
   });
 

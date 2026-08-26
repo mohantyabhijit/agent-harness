@@ -1,3 +1,5 @@
+import type { CampaignStatus } from "./campaign.js";
+
 export type ApprovalAction =
   | "post_issue_comment"
   | "request_assignment"
@@ -16,6 +18,23 @@ export interface Approval {
   readonly issuedAt: string;
   readonly expiresAt?: string;
   readonly consumedAt?: string;
+}
+
+export const allowedCampaignStatusesForApprovalAction: Readonly<
+  Record<ApprovalAction, readonly CampaignStatus[]>
+> = {
+  post_issue_comment: ["coordination_pending"],
+  request_assignment: ["coordination_pending"],
+  push_branch: ["contribution_approval"],
+  create_pr: ["contribution_approval"],
+  update_pr: ["repair"],
+};
+
+export function isApprovalActionAllowed(
+  action: ApprovalAction,
+  status: CampaignStatus,
+): boolean {
+  return allowedCampaignStatusesForApprovalAction[action].includes(status);
 }
 
 export function issueApproval(input: Omit<Approval, "status">): Approval {

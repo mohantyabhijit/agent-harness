@@ -15,6 +15,7 @@ export interface ExternalReference {
     | "issue"
     | "branch"
     | "pull_request"
+    | "commit"
     | "sandbox"
     | "child_session"
     | "ci_run";
@@ -31,7 +32,7 @@ export interface CampaignSnapshot {
 }
 
 export interface CampaignStore {
-  create(campaign: Campaign): Promise<void>;
+  create(campaign: Campaign, initialEvent?: CampaignEvent): Promise<void>;
   get(id: string): Promise<CampaignSnapshot | undefined>;
   findByIssue(repository: string, issueNumber: number): Promise<CampaignSnapshot | undefined>;
   update(campaign: Campaign, expectedVersion: number): Promise<void>;
@@ -39,7 +40,13 @@ export interface CampaignStore {
   appendEvidence(campaignId: string, evidence: Evidence): Promise<void>;
   appendEvent(campaignId: string, event: CampaignEvent): Promise<void>;
   recordApproval(approval: Approval): Promise<void>;
-  consumeApproval(approvalId: string, actionDigest: string, consumedAt: string): Promise<Approval>;
+  consumeApproval(
+    approvalId: string,
+    actionDigest: string,
+    consumedAt: string,
+    expectedCampaignVersion: number,
+    expectedCampaignStatus: CampaignStatus,
+  ): Promise<Approval>;
   recordQodoFinding(campaignId: string, iteration: number, finding: QodoFinding): Promise<void>;
   setExternalReference(campaignId: string, reference: ExternalReference): Promise<void>;
 }

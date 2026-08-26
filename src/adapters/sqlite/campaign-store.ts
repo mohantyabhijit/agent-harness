@@ -7,7 +7,11 @@ import {
   type CampaignStore,
   type ExternalReference,
 } from "../../application/ports/campaign-store.js";
-import { consumeApproval as consumeDomainApproval, type Approval } from "../../domain/approval.js";
+import {
+  consumeApproval as consumeDomainApproval,
+  isApprovalActionAllowed,
+  type Approval,
+} from "../../domain/approval.js";
 import type { Campaign, CampaignStatus } from "../../domain/campaign.js";
 import type { Evidence } from "../../domain/evidence.js";
 import type { QodoFinding } from "../../domain/quality-gate.js";
@@ -75,12 +79,15 @@ export class SqliteCampaignStore implements CampaignStore {
     migrateCampaignStore(database);
   }
 
-  async create(campaign: Campaign): Promise<void> {
+  async create(campaign: Campaign, initialEvent?: CampaignEvent): Promise<void> {
     assertCampaignQodoIteration(campaign.qodoIteration);
     if (!Number.isInteger(campaign.version) || campaign.version < 1) {
       throw new CampaignVersionConflict(campaign.id, 0);
     }
     const now = new Date().toISOString();
+    const occurredAt = initialEvent === undefined
+      ? undefined
+      : normalizeTimestamp(initialEvent.occurredAt, "event occurredAt");
     this.#database.transaction(() => {
       this.#database.prepare(`
         INSERT INTO campaigns (
@@ -100,6 +107,18 @@ export class SqliteCampaignStore implements CampaignStore {
         now,
         now,
       );
+      if (initialEvent !== undefined && occurredAt !== undefined) {
+        this.#database.prepare(`
+          INSERT INTO campaign_events (id, campaign_id, event_type, payload_json, occurred_at)
+          VALUES (?, ?, ?, ?, ?)
+        `).run(
+          initialEvent.id,
+          campaign.id,
+          initialEvent.eventType,
+          JSON.stringify(initialEvent.payload),
+          occurredAt,
+        );
+      }
     })();
   }
 
@@ -227,14 +246,36 @@ export class SqliteCampaignStore implements CampaignStore {
     })();
   }
 
-  async consumeApproval(approvalId: string, actionDigest: string, consumedAt: string): Promise<Approval> {
+  async consumeApproval(
+    approvalId: string,
+    actionDigest: string,
+    consumedAt: string,
+    expectedCampaignVersion: number,
+    expectedCampaignStatus: CampaignStatus,
+  ): Promise<Approval> {
     const canonicalConsumedAt = normalizeTimestamp(consumedAt, "approval consumedAt");
+    if (!Number.isInteger(expectedCampaignVersion) || expectedCampaignVersion < 1) {
+      throw new CampaignVersionConflict("approval campaign", expectedCampaignVersion);
+    }
     const consume = this.#database.transaction(() => {
       const row = this.#database
         .prepare("SELECT * FROM approvals WHERE id = ?")
         .get(approvalId) as ApprovalRow | undefined;
       if (!row) {
         throw new Error(`Approval ${approvalId} does not exist`);
+      }
+
+      const campaign = this.#database
+        .prepare("SELECT * FROM campaigns WHERE id = ?")
+        .get(row.campaign_id) as CampaignRow | undefined;
+      if (campaign === undefined || campaign.version !== expectedCampaignVersion) {
+        throw new CampaignVersionConflict(row.campaign_id, expectedCampaignVersion);
+      }
+      if (
+        campaign.status !== expectedCampaignStatus ||
+        !isApprovalActionAllowed(row.action, campaign.status)
+      ) {
+        throw new Error("Campaign state does not allow this approval action");
       }
 
       const consumed = consumeDomainApproval(mapApproval(row), actionDigest, canonicalConsumedAt);
@@ -246,7 +287,20 @@ export class SqliteCampaignStore implements CampaignStore {
           AND status = 'approved'
           AND consumed_at IS NULL
           AND (expires_at IS NULL OR expires_at > ?)
-      `).run(canonicalConsumedAt, approvalId, actionDigest, canonicalConsumedAt);
+          AND EXISTS (
+            SELECT 1 FROM campaigns
+            WHERE campaigns.id = approvals.campaign_id
+              AND campaigns.version = ?
+              AND campaigns.status = ?
+          )
+      `).run(
+        canonicalConsumedAt,
+        approvalId,
+        actionDigest,
+        canonicalConsumedAt,
+        expectedCampaignVersion,
+        expectedCampaignStatus,
+      );
       if (result.changes !== 1) {
         throw new Error("Approval is not available");
       }

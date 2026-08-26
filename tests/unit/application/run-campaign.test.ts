@@ -4,9 +4,19 @@ import { describe, expect, it, vi } from "vitest";
 
 import { RunCampaign } from "../../../src/application/run-campaign.js";
 import { issueApproval } from "../../../src/domain/approval.js";
+import { transitionCampaign } from "../../../src/domain/campaign.js";
 import { campaign } from "../../builders.js";
 import { FakeCampaignStore } from "../../fakes/fake-campaign-store.js";
 import { FakeHarness } from "../../fakes/fake-harness.js";
+
+const commitSha = "a".repeat(40);
+const requiredChecks = [
+  "manifest_and_lifecycle_scripts",
+  "suspicious_paths",
+  "credential_and_secret_boundary",
+  "network_behavior",
+  "repository_metadata",
+] as const;
 
 describe("RunCampaign", () => {
   it("cannot request implementation before a passed preflight", async () => {
@@ -17,7 +27,7 @@ describe("RunCampaign", () => {
     expect(harness.operations).not.toContain("implement");
   });
 
-  it("quarantines a lifecycle script using static preflight text without running it", async () => {
+  it("quarantines lifecycle-script text without running fixture code", async () => {
     const packageText = await readFile(
       new URL("../../../fixtures/repositories/quarantined-demo/package.json", import.meta.url),
       "utf8",
@@ -29,11 +39,10 @@ describe("RunCampaign", () => {
     harness.enqueueResult("preflight", {
       summary: "Lifecycle script found by static manifest inspection",
       artifacts: ["artifacts/preflight.json"],
-      output: {
+      output: preflightAttestation({
         verdict: "quarantine",
-        checks: ["package.json contains preinstall network download"],
-        commitSha: "abc123",
-      },
+        quarantineReason: "preinstall performs a network download",
+      }),
     });
 
     const result = await service.execute("campaign-1", "preflight");
@@ -44,7 +53,38 @@ describe("RunCampaign", () => {
     expect(harness.operations).toEqual(["preflight"]);
   });
 
-  it("uses a fresh child session for each legal milestone and records its references", async () => {
+  it.each([
+    ["missing check", preflightAttestation({ checks: requiredChecks.slice(0, 4) })],
+    ["duplicate check", preflightAttestation({ checks: [...requiredChecks.slice(0, 4), requiredChecks[0]] })],
+    ["unknown check", preflightAttestation({ checks: [...requiredChecks.slice(0, 4), "trust_repository_readme"] })],
+    ["noncanonical commit", preflightAttestation({ commitSha: "ABC123" })],
+    ["dependencies installed", preflightAttestation({ dependenciesInstalled: true })],
+    ["scripts executed", preflightAttestation({ repositoryScriptsExecuted: true })],
+    ["contradictory pass", preflightAttestation({ quarantineReason: "unsafe" })],
+    ["reasonless quarantine", preflightAttestation({ verdict: "quarantine" })],
+  ])("rejects an invalid trusted preflight attestation: %s", async (_label, output) => {
+    const { service, store, harness } = fixture();
+    store.seed(campaign({ status: "policy_review" }));
+    harness.enqueueResult("preflight", { summary: "preflight", artifacts: [], output });
+
+    await expect(service.execute("campaign-1", "preflight")).rejects.toThrow(/preflight output/i);
+    expect((await store.get("campaign-1"))?.campaign.status).toBe("preflight");
+  });
+
+  it("does not auto-recover or dispatch a campaign already stranded in preflight", async () => {
+    const { service, store, harness } = fixture();
+    store.seed(campaign({ status: "preflight", version: 2 }));
+
+    const results = await Promise.allSettled([
+      service.execute("campaign-1", "preflight"),
+      service.execute("campaign-1", "preflight"),
+    ]);
+
+    expect(results.every(({ status }) => status === "rejected")).toBe(true);
+    expect(harness.operations).toEqual([]);
+  });
+
+  it("records each child as session and sandbox identity with version-bound artifacts", async () => {
     const { service, store, harness } = fixture();
     store.seed(campaign({ status: "policy_review" }));
 
@@ -54,22 +94,44 @@ describe("RunCampaign", () => {
 
     expect(harness.childSessions).toEqual(["session-1", "session-2", "session-3"]);
     const snapshot = await store.get("campaign-1");
-    expect(snapshot?.externalReferences.filter(({ kind }) => kind === "child_session")).toEqual([
-      { kind: "child_session", value: "session-1" },
-      { kind: "child_session", value: "session-2" },
-      { kind: "child_session", value: "session-3" },
+    expect(snapshot?.externalReferences.filter(({ kind }) => kind === "sandbox")).toEqual([
+      { kind: "sandbox", value: "session-1" },
+      { kind: "sandbox", value: "session-2" },
+      { kind: "sandbox", value: "session-3" },
     ]);
-    expect(snapshot?.externalReferences.filter(({ kind }) => kind === "sandbox")).toHaveLength(3);
-    expect(snapshot?.events.map(({ eventType }) => eventType)).toEqual([
-      "campaign_operation_completed",
-      "campaign_operation_completed",
-      "campaign_operation_completed",
+    expect(snapshot?.events.map(({ payload }) => payload)).toEqual([
+      expect.objectContaining({ claimedCampaignVersion: 2, sandboxSessionId: "session-1" }),
+      expect.objectContaining({ claimedCampaignVersion: 4, sandboxSessionId: "session-2" }),
+      expect.objectContaining({ claimedCampaignVersion: 5, sandboxSessionId: "session-3" }),
     ]);
+  });
+
+  it("requires durable implementation completion for the claimed campaign version", async () => {
+    const { service, store, harness } = fixture();
+    store.seed(campaign({ status: "implementation", version: 4 }));
+
+    await expect(service.execute("campaign-1", "verify")).rejects.toThrow(/implementation.*event/i);
+    expect(harness.operations).toEqual([]);
+  });
+
+  it("blocks unsafe next steps after claim, child, reference, or event failures", async () => {
+    for (const failure of ["claim", "child", "reference", "event"] as const) {
+      const { service, store, harness } = fixture();
+      store.seed(campaign({ status: "baseline", version: 3 }));
+      if (failure === "claim") store.failNextUpdate = true;
+      if (failure === "child") harness.enqueueFailure("implement", new Error("child failed"));
+      if (failure === "reference") store.failNextExternalReference = true;
+      if (failure === "event") store.failNextEvent = true;
+
+      await expect(service.execute("campaign-1", "implement")).rejects.toThrow();
+      await expect(service.execute("campaign-1", "verify")).rejects.toThrow();
+      expect(harness.operations.filter((operation) => operation === "verify")).toEqual([]);
+    }
   });
 
   it("claims a campaign version before dispatch so a concurrent milestone runs once", async () => {
     const { service, store, harness } = fixture();
-    store.seed(campaign({ status: "baseline" }));
+    store.seed(campaign({ status: "baseline", version: 3 }));
 
     const results = await Promise.allSettled([
       service.execute("campaign-1", "implement"),
@@ -77,124 +139,171 @@ describe("RunCampaign", () => {
     ]);
 
     expect(results.filter(({ status }) => status === "fulfilled")).toHaveLength(1);
-    expect(results.filter(({ status }) => status === "rejected")).toHaveLength(1);
     expect(harness.operations).toEqual(["implement"]);
   });
 
-  it("rejects malformed preflight output without advancing to baseline", async () => {
-    const { service, store, harness } = fixture();
-    store.seed(campaign({ status: "policy_review" }));
-    harness.enqueueResult("preflight", {
-      summary: "Ambiguous preflight",
-      artifacts: [],
-      output: { verdict: "pass", checks: [], commitSha: "" },
-    });
-
-    await expect(service.execute("campaign-1", "preflight")).rejects.toThrow(/preflight output/i);
-    const snapshot = await store.get("campaign-1");
-    expect(snapshot?.campaign.status).toBe("preflight");
-    expect(snapshot?.externalReferences).toEqual([
-      { kind: "child_session", value: "session-1" },
-    ]);
-    expect(snapshot?.events[0]?.eventType).toBe("campaign_operation_rejected");
-  });
-
-  it("atomically consumes the exact persisted approval immediately before an external action", async () => {
-    const { service, store, callOrder } = fixture();
-    store.seed(campaign({ status: "contribution_approval" }));
-    await store.recordApproval(
-      issueApproval({
-        id: "approval-1",
-        campaignId: "campaign-1",
-        action: "create_pr",
-        actionDigest: "sha256:expected",
-        issuedAt: "2026-08-26T00:00:00Z",
-      }),
-    );
-    const action = vi.fn(async () => {
-      callOrder.push("external-action");
+  it("consumes exact authorization, records attempt first, and passes a bound descriptor", async () => {
+    const { service, store } = await approvedFixture();
+    const action = vi.fn(async (authorized: unknown) => {
       const snapshot = await store.get("campaign-1");
       expect(snapshot?.approvals[0]?.status).toBe("consumed");
+      expect(snapshot?.events.at(-1)?.eventType).toBe("external_action_attempted");
+      expect(authorized).toEqual({
+        campaignId: "campaign-1",
+        repository: "owner/repo",
+        issueNumber: 42,
+        issueUrl: "https://github.com/owner/repo/issues/42",
+        action: "create_pr",
+        actionDigest: "sha256:expected",
+      });
       return "pull-request-7";
     });
 
-    await expect(
-      service.executeApprovedExternalAction(
-        "campaign-1",
-        { approvalId: "approval-1", action: "create_pr", actionDigest: "sha256:wrong" },
-        action,
-      ),
-    ).rejects.toThrow(/match/i);
-    expect(action).not.toHaveBeenCalled();
+    await expect(service.executeApprovedExternalAction("campaign-1", approvalRequest(), action))
+      .resolves.toBe("pull-request-7");
+    expect((await store.get("campaign-1"))?.events.map(({ eventType }) => eventType)).toEqual([
+      "external_action_attempted",
+      "external_action_completed",
+    ]);
+  });
 
-    await expect(
-      service.executeApprovedExternalAction(
-        "campaign-1",
-        { approvalId: "approval-1", action: "create_pr", actionDigest: "sha256:expected" },
-        action,
-      ),
-    ).resolves.toBe("pull-request-7");
-    expect(callOrder).toEqual(["consume-approval", "external-action"]);
+  it("records fixed outcome-unknown evidence and never reuses approval after callback failure", async () => {
+    const { service, store } = await approvedFixture();
+    const action = vi.fn(async () => {
+      throw new Error("token=top-secret remote payload");
+    });
 
+    const first = service.executeApprovedExternalAction("campaign-1", approvalRequest(), action);
+    await expect(first).rejects.toEqual(new Error("External action outcome is unknown; reconciliation required"));
+    expect(JSON.stringify((await store.get("campaign-1"))?.events)).not.toContain("top-secret");
+    expect((await store.get("campaign-1"))?.events.map(({ eventType }) => eventType)).toEqual([
+      "external_action_attempted",
+      "external_action_outcome_unknown",
+    ]);
     await expect(
-      service.executeApprovedExternalAction(
-        "campaign-1",
-        { approvalId: "approval-1", action: "create_pr", actionDigest: "sha256:expected" },
-        action,
-      ),
+      service.executeApprovedExternalAction("campaign-1", approvalRequest(), action),
     ).rejects.toThrow(/available/i);
     expect(action).toHaveBeenCalledOnce();
   });
 
-  it("allows only one concurrent caller to cross the approval seam", async () => {
-    const { service, store } = fixture();
-    store.seed(campaign({ status: "contribution_approval" }));
-    await store.recordApproval(
-      issueApproval({
+  it("does not call the external action when attempted evidence cannot be persisted", async () => {
+    const { service, store } = await approvedFixture();
+    store.failNextEvent = true;
+    const action = vi.fn(async () => undefined);
+
+    await expect(
+      service.executeApprovedExternalAction("campaign-1", approvalRequest(), action),
+    ).rejects.toEqual(
+      new Error("External action was not attempted; consumed approval reconciliation required"),
+    );
+    expect(action).not.toHaveBeenCalled();
+    expect((await store.get("campaign-1"))?.approvals[0]?.status).toBe("consumed");
+  });
+
+  it("records outcome unknown when completion evidence fails after callback success", async () => {
+    const { service, store } = await approvedFixture();
+    const action = vi.fn(async () => {
+      store.failNextEvent = true;
+      return "pull-request-7";
+    });
+
+    await expect(
+      service.executeApprovedExternalAction("campaign-1", approvalRequest(), action),
+    ).rejects.toEqual(new Error("External action outcome is unknown; reconciliation required"));
+    expect((await store.get("campaign-1"))?.events.map(({ eventType }) => eventType)).toEqual([
+      "external_action_attempted",
+      "external_action_outcome_unknown",
+    ]);
+    expect((await store.get("campaign-1"))?.approvals[0]?.status).toBe("consumed");
+  });
+
+  it.each(["withdrawn", "quarantined"] as const)(
+    "never consumes create_pr approval from %s",
+    async (status) => {
+      const { service, store } = fixture();
+      store.seed(campaign({ status }));
+      await store.recordApproval(issueApproval({
         id: "approval-1",
         campaignId: "campaign-1",
         action: "create_pr",
         actionDigest: "sha256:expected",
         issuedAt: "2026-08-26T00:00:00Z",
-      }),
-    );
-    let actions = 0;
-    const action = async () => {
-      actions += 1;
-      return "pull-request-7";
+      }));
+      const action = vi.fn(async () => undefined);
+
+      await expect(
+        service.executeApprovedExternalAction("campaign-1", approvalRequest(), action),
+      ).rejects.toThrow(/state/i);
+      expect(action).not.toHaveBeenCalled();
+      expect((await store.get("campaign-1"))?.approvals[0]?.status).toBe("approved");
+    },
+  );
+
+  it("loses authorization CAS when campaign is withdrawn after the service snapshot", async () => {
+    const { service, store } = await approvedFixture();
+    store.beforeConsumeApproval = async () => {
+      const current = (await store.get("campaign-1"))?.campaign;
+      if (current === undefined) throw new Error("missing fixture campaign");
+      await store.update(transitionCampaign(current, "withdrawn"), current.version);
     };
-    const request = {
-      approvalId: "approval-1",
-      action: "create_pr" as const,
-      actionDigest: "sha256:expected",
-    };
+    const action = vi.fn(async () => undefined);
+
+    await expect(
+      service.executeApprovedExternalAction("campaign-1", approvalRequest(), action),
+    ).rejects.toThrow(/version|state/i);
+    expect(action).not.toHaveBeenCalled();
+    expect((await store.get("campaign-1"))?.approvals[0]?.status).toBe("approved");
+  });
+
+  it("allows only one concurrent caller to cross the approval seam", async () => {
+    const { service } = await approvedFixture();
+    const action = vi.fn(async () => "pull-request-7");
 
     const results = await Promise.allSettled([
-      service.executeApprovedExternalAction("campaign-1", request, action),
-      service.executeApprovedExternalAction("campaign-1", request, action),
+      service.executeApprovedExternalAction("campaign-1", approvalRequest(), action),
+      service.executeApprovedExternalAction("campaign-1", approvalRequest(), action),
     ]);
 
     expect(results.filter(({ status }) => status === "fulfilled")).toHaveLength(1);
-    expect(results.filter(({ status }) => status === "rejected")).toHaveLength(1);
-    expect(actions).toBe(1);
+    expect(action).toHaveBeenCalledOnce();
   });
 });
 
-function fixture(): {
-  service: RunCampaign;
-  store: FakeCampaignStore;
-  harness: FakeHarness;
-  callOrder: string[];
-} {
+function preflightAttestation(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    verdict: "pass",
+    checks: [...requiredChecks],
+    commitSha,
+    dependenciesInstalled: false,
+    repositoryScriptsExecuted: false,
+    ...overrides,
+  };
+}
+
+function approvalRequest() {
+  return {
+    approvalId: "approval-1",
+    action: "create_pr" as const,
+    actionDigest: "sha256:expected",
+  };
+}
+
+async function approvedFixture() {
+  const result = fixture();
+  result.store.seed(campaign({ status: "contribution_approval", version: 7 }));
+  await result.store.recordApproval(issueApproval({
+    id: "approval-1",
+    campaignId: "campaign-1",
+    action: "create_pr",
+    actionDigest: "sha256:expected",
+    issuedAt: "2026-08-26T00:00:00Z",
+  }));
+  return result;
+}
+
+function fixture(): { service: RunCampaign; store: FakeCampaignStore; harness: FakeHarness } {
   const store = new FakeCampaignStore();
   const harness = new FakeHarness();
-  const callOrder: string[] = [];
-  const originalConsumeApproval = store.consumeApproval.bind(store);
-  store.consumeApproval = async (...args) => {
-    const result = await originalConsumeApproval(...args);
-    callOrder.push("consume-approval");
-    return result;
-  };
   let eventNumber = 0;
   return {
     service: new RunCampaign(
@@ -205,6 +314,5 @@ function fixture(): {
     ),
     store,
     harness,
-    callOrder,
   };
 }

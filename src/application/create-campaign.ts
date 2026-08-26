@@ -39,6 +39,7 @@ export class CreateCampaign {
 
     const campaignId = requiredValue(this.ids.next(), "campaign identifier");
     const createdAt = requiredValue(this.clock.now(), "campaign timestamp");
+    const creationEventId = requiredValue(this.ids.next(), "campaign event identifier");
     const parentSessionId = requiredValue(
       await this.harness.createParentSession(`${input.repository}#${String(input.issueNumber)}`),
       "parent session identifier",
@@ -54,14 +55,20 @@ export class CreateCampaign {
       qodoIteration: 0,
       version: 1,
     };
+    const creationEvent = {
+      id: creationEventId,
+      eventType: "campaign_created",
+      payload: { status: campaign.status, parentSessionId },
+      occurredAt: createdAt,
+    };
 
     try {
-      await this.store.create(campaign);
+      await this.store.create(campaign, creationEvent);
     } catch {
       try {
         await this.harness.deleteSession(parentSessionId);
       } catch {
-        throw new Error("Campaign could not be created and its unused session could not be removed");
+        throw new Error("Campaign creation failed; unused session cleanup required");
       }
       let duplicate = false;
       try {
@@ -76,12 +83,6 @@ export class CreateCampaign {
       throw new Error("Campaign could not be created");
     }
 
-    await this.store.appendEvent(campaign.id, {
-      id: requiredValue(this.ids.next(), "campaign event identifier"),
-      eventType: "campaign_created",
-      payload: { status: campaign.status, parentSessionId },
-      occurredAt: createdAt,
-    });
     return campaign;
   }
 }

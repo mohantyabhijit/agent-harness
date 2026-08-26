@@ -23,6 +23,9 @@ describe("CreateCampaign", () => {
     });
 
     expect(first.parentSessionId).toBe("session-1");
+    expect((await store.get(first.id))?.events).toEqual([
+      expect.objectContaining({ eventType: "campaign_created" }),
+    ]);
     await expect(
       service.execute({
         repository: "owner/repo",
@@ -102,5 +105,81 @@ describe("CreateCampaign", () => {
     await expect(result).rejects.not.toThrow(/secret/u);
     expect(harness.deletedSessions).toEqual(["session-1"]);
     expect(await store.findByIssue("owner/repo", 42)).toBeUndefined();
+  });
+
+  it("atomically rejects campaign and initial event together before compensating", async () => {
+    const store = new FakeCampaignStore();
+    store.failNextCreateEvent = true;
+    const harness = new FakeHarness();
+    const service = new CreateCampaign(
+      store,
+      harness,
+      { now: () => "2026-08-26T00:00:00Z" },
+      { next: () => "campaign-1" },
+    );
+
+    await expect(service.execute({
+      repository: "owner/repo",
+      issueNumber: 42,
+      issueUrl: "https://github.com/owner/repo/issues/42",
+      lane: "easy_win",
+    })).rejects.toThrow(/could not be created/i);
+
+    expect(await store.get("campaign-1")).toBeUndefined();
+    expect(harness.deletedSessions).toEqual(["session-1"]);
+  });
+
+  it("fails closed with cleanup-required evidence and never retries deletion", async () => {
+    class FailingStore extends FakeCampaignStore {
+      override async create(): Promise<void> {
+        throw new Error("persistence failed");
+      }
+    }
+    class CleanupFailingHarness extends FakeHarness {
+      deleteAttempts = 0;
+      override async deleteSession(): Promise<void> {
+        this.deleteAttempts += 1;
+        throw new Error("token=top-secret");
+      }
+    }
+    const store = new FailingStore();
+    const harness = new CleanupFailingHarness();
+    const service = new CreateCampaign(
+      store,
+      harness,
+      { now: () => "2026-08-26T00:00:00Z" },
+      { next: () => "campaign-1" },
+    );
+
+    const result = service.execute({
+      repository: "owner/repo",
+      issueNumber: 42,
+      issueUrl: "https://github.com/owner/repo/issues/42",
+      lane: "easy_win",
+    });
+    await expect(result).rejects.toEqual(
+      new Error("Campaign creation failed; unused session cleanup required"),
+    );
+    await expect(result).rejects.not.toThrow(/top-secret/u);
+    expect(await store.get("campaign-1")).toBeUndefined();
+    expect(harness.deleteAttempts).toBe(1);
+  });
+
+  it("matches SQLite global campaign-event identity semantics", async () => {
+    const store = new FakeCampaignStore();
+    store.seed({
+      id: "campaign-a", repository: "owner/a", issueNumber: 1,
+      issueUrl: "https://github.com/owner/a/issues/1", parentSessionId: "session-a",
+      lane: "easy_win", status: "policy_review", qodoIteration: 0, version: 1,
+    });
+    store.seed({
+      id: "campaign-b", repository: "owner/b", issueNumber: 2,
+      issueUrl: "https://github.com/owner/b/issues/2", parentSessionId: "session-b",
+      lane: "easy_win", status: "policy_review", qodoIteration: 0, version: 1,
+    });
+    const event = { id: "event-global", eventType: "test", payload: {}, occurredAt: "2026-08-26T00:00:00Z" };
+
+    await store.appendEvent("campaign-a", event);
+    await expect(store.appendEvent("campaign-b", event)).rejects.toThrow(/already exists/i);
   });
 });

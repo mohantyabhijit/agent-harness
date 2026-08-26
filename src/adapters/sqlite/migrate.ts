@@ -61,7 +61,7 @@ const schema = `
 
   CREATE TABLE IF NOT EXISTS external_references (
     campaign_id TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
-    kind TEXT NOT NULL CHECK (kind IN ('issue', 'branch', 'pull_request', 'sandbox', 'child_session', 'ci_run')),
+    kind TEXT NOT NULL CHECK (kind IN ('issue', 'branch', 'pull_request', 'commit', 'sandbox', 'child_session', 'ci_run')),
     value TEXT NOT NULL,
     PRIMARY KEY (campaign_id, kind, value)
   );
@@ -78,6 +78,23 @@ export function migrateCampaignStore(database: Database.Database): void {
   }
   database.transaction(() => {
     database.exec(schema);
+    const externalReferencesTable = database.prepare(`
+      SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'external_references'
+    `).get() as { sql: string } | undefined;
+    if (externalReferencesTable !== undefined && !externalReferencesTable.sql.includes("'commit'")) {
+      database.exec(`
+        ALTER TABLE external_references RENAME TO external_references_without_commit;
+        CREATE TABLE external_references (
+          campaign_id TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+          kind TEXT NOT NULL CHECK (kind IN ('issue', 'branch', 'pull_request', 'commit', 'sandbox', 'child_session', 'ci_run')),
+          value TEXT NOT NULL,
+          PRIMARY KEY (campaign_id, kind, value)
+        );
+        INSERT INTO external_references (campaign_id, kind, value)
+        SELECT campaign_id, kind, value FROM external_references_without_commit;
+        DROP TABLE external_references_without_commit;
+      `);
+    }
   })();
 }
 

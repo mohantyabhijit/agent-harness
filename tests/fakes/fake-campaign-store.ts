@@ -6,7 +6,11 @@ import {
   type CampaignStore,
   type ExternalReference,
 } from "../../src/application/ports/campaign-store.js";
-import { consumeApproval as consumeDomainApproval, type Approval } from "../../src/domain/approval.js";
+import {
+  consumeApproval as consumeDomainApproval,
+  isApprovalActionAllowed,
+  type Approval,
+} from "../../src/domain/approval.js";
 import type { Campaign, CampaignStatus } from "../../src/domain/campaign.js";
 import type { Evidence } from "../../src/domain/evidence.js";
 import type { QodoFinding } from "../../src/domain/quality-gate.js";
@@ -23,15 +27,33 @@ interface MutableSnapshot {
 export class FakeCampaignStore implements CampaignStore {
   readonly #snapshots = new Map<string, MutableSnapshot>();
   readonly #findingIterations = new Map<string, number>();
+  readonly #eventIds = new Set<string>();
   createBarrier?: () => Promise<void>;
+  beforeConsumeApproval?: () => Promise<void>;
+  failNextCreateEvent = false;
+  failNextUpdate = false;
+  failNextExternalReference = false;
+  failNextEvent = false;
 
   seed(campaign: Campaign): void {
     this.#insert(campaign);
   }
 
-  async create(campaign: Campaign): Promise<void> {
+  async create(campaign: Campaign, initialEvent?: CampaignEvent): Promise<void> {
     await this.createBarrier?.();
+    const initialEventClone = initialEvent === undefined ? undefined : structuredClone(initialEvent);
+    if (initialEvent !== undefined) {
+      this.#assertEventAvailable(initialEvent.id);
+      if (this.failNextCreateEvent) {
+        this.failNextCreateEvent = false;
+        throw new Error("Initial campaign event could not be persisted");
+      }
+    }
     this.#insert(campaign);
+    if (initialEventClone !== undefined) {
+      this.#required(campaign.id).events.push(initialEventClone);
+      this.#eventIds.add(initialEventClone.id);
+    }
   }
 
   async get(id: string): Promise<CampaignSnapshot | undefined> {
@@ -53,6 +75,10 @@ export class FakeCampaignStore implements CampaignStore {
   }
 
   async update(campaign: Campaign, expectedVersion: number): Promise<void> {
+    if (this.failNextUpdate) {
+      this.failNextUpdate = false;
+      throw new CampaignVersionConflict(campaign.id, expectedVersion);
+    }
     const snapshot = this.#snapshots.get(campaign.id);
     if (
       snapshot === undefined ||
@@ -83,11 +109,14 @@ export class FakeCampaignStore implements CampaignStore {
   }
 
   async appendEvent(campaignId: string, event: CampaignEvent): Promise<void> {
-    const snapshot = this.#required(campaignId);
-    if (snapshot.events.some((candidate) => candidate.id === event.id)) {
-      throw new Error(`Campaign event ${event.id} already exists`);
+    if (this.failNextEvent) {
+      this.failNextEvent = false;
+      throw new Error("Campaign event persistence failed");
     }
+    const snapshot = this.#required(campaignId);
+    this.#assertEventAvailable(event.id);
     snapshot.events.push(structuredClone(event));
+    this.#eventIds.add(event.id);
   }
 
   async recordApproval(approval: Approval): Promise<void> {
@@ -102,13 +131,27 @@ export class FakeCampaignStore implements CampaignStore {
     approvalId: string,
     actionDigest: string,
     consumedAt: string,
+    expectedCampaignVersion: number,
+    expectedCampaignStatus: CampaignStatus,
   ): Promise<Approval> {
+    const beforeConsume = this.beforeConsumeApproval;
+    delete this.beforeConsumeApproval;
+    await beforeConsume?.();
     for (const snapshot of this.#snapshots.values()) {
       const index = snapshot.approvals.findIndex((approval) => approval.id === approvalId);
       if (index !== -1) {
         const approval = snapshot.approvals[index];
         if (approval === undefined) {
           break;
+        }
+        if (snapshot.campaign.version !== expectedCampaignVersion) {
+          throw new CampaignVersionConflict(snapshot.campaign.id, expectedCampaignVersion);
+        }
+        if (
+          snapshot.campaign.status !== expectedCampaignStatus ||
+          !isApprovalActionAllowed(approval.action, snapshot.campaign.status)
+        ) {
+          throw new Error("Campaign state does not allow this approval action");
         }
         const consumed = consumeDomainApproval(approval, actionDigest, consumedAt);
         snapshot.approvals[index] = consumed;
@@ -142,6 +185,10 @@ export class FakeCampaignStore implements CampaignStore {
   }
 
   async setExternalReference(campaignId: string, reference: ExternalReference): Promise<void> {
+    if (this.failNextExternalReference) {
+      this.failNextExternalReference = false;
+      throw new Error("External reference persistence failed");
+    }
     const snapshot = this.#required(campaignId);
     if (
       !snapshot.externalReferences.some(
@@ -191,6 +238,12 @@ export class FakeCampaignStore implements CampaignStore {
       throw new Error(`Campaign ${campaignId} does not exist`);
     }
     return snapshot;
+  }
+
+  #assertEventAvailable(eventId: string): void {
+    if (this.#eventIds.has(eventId)) {
+      throw new Error(`Campaign event ${eventId} already exists`);
+    }
   }
 }
 

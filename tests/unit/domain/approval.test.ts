@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { consumeApproval, issueApproval } from "../../../src/domain/approval.js";
+import {
+  consumeApproval,
+  isApprovalActionAllowed,
+  issueApproval,
+} from "../../../src/domain/approval.js";
 
 function verifyApprovalIsReadonly(approval: ReturnType<typeof issueApproval>): void {
   // @ts-expect-error Approval fields are immutable outside domain transitions.
@@ -7,6 +11,17 @@ function verifyApprovalIsReadonly(approval: ReturnType<typeof issueApproval>): v
 }
 
 describe("scoped approvals", () => {
+  it("allows each write only in its exact campaign phase", () => {
+    expect(isApprovalActionAllowed("post_issue_comment", "coordination_pending")).toBe(true);
+    expect(isApprovalActionAllowed("request_assignment", "coordination_pending")).toBe(true);
+    expect(isApprovalActionAllowed("push_branch", "contribution_approval")).toBe(true);
+    expect(isApprovalActionAllowed("create_pr", "contribution_approval")).toBe(true);
+    expect(isApprovalActionAllowed("update_pr", "repair")).toBe(true);
+    expect(isApprovalActionAllowed("create_pr", "quarantined")).toBe(false);
+    expect(isApprovalActionAllowed("update_pr", "human_escalation")).toBe(false);
+    expect(isApprovalActionAllowed("post_issue_comment", "withdrawn")).toBe(false);
+  });
+
   it("is single-use and bound to the exact action digest", () => {
     const approval = issueApproval({ id: "approval-1", campaignId: "campaign-1", action: "create_pr", actionDigest: "sha256:a", issuedAt: "2026-08-26T00:00:00Z" });
     expect(consumeApproval(approval, "sha256:a").status).toBe("consumed");

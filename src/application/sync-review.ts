@@ -8,6 +8,20 @@ import type { Clock, IdGenerator } from "./create-campaign.js";
 import type { CampaignSnapshot, CampaignStore } from "./ports/campaign-store.js";
 import type { CampaignPacket, HarnessPort, HarnessSessionResult } from "./ports/harness.js";
 
+export interface QodoReviewBatch {
+  readonly campaignId: string;
+  readonly reviewId: string;
+  readonly commitSha: string;
+  readonly testsPassed: boolean;
+  readonly complete: boolean;
+  readonly findings: readonly QodoFinding[];
+}
+
+interface ClaimedReview {
+  readonly campaign: Campaign;
+  readonly gate: QualityGateResult;
+}
+
 export class SyncReview {
   constructor(
     private readonly store: CampaignStore,
@@ -16,101 +30,109 @@ export class SyncReview {
     private readonly ids: IdGenerator,
   ) {}
 
-  async execute(
-    campaignId: string,
-    input: QodoFinding | readonly QodoFinding[],
-    testsPassed = true,
-  ): Promise<Campaign> {
+  async execute(campaignId: string, input: QodoReviewBatch): Promise<Campaign> {
+    const batch = parseReviewBatch(input);
+    if (batch.campaignId !== campaignId) {
+      throw new Error("Qodo review campaign does not match requested campaign");
+    }
     const snapshot = await this.requiredSnapshot(campaignId);
     if (snapshot.campaign.status !== "qodo_review") {
       throw new Error("Campaign is not awaiting Qodo review");
     }
-    if (typeof testsPassed !== "boolean") {
-      throw new Error("Invalid test result for Qodo review");
-    }
-    const candidates: readonly unknown[] = isFindingList(input) ? input : [input];
-    const findings = candidates.map(parseFinding);
+    assertReviewIsCurrent(snapshot, batch);
 
-    const findingIteration = Math.max(1, snapshot.campaign.qodoIteration);
-    for (const finding of findings) {
+    const combinedFindings = mergeFindings(snapshot.qodoFindings, batch.findings);
+    const gate = evaluateQualityGate({
+      testsPassed: batch.testsPassed && batch.complete,
+      iteration: snapshot.campaign.qodoIteration,
+      findings: combinedFindings,
+    });
+    const claimed = claimReview(snapshot.campaign, gate);
+    await this.store.update(claimed.campaign, snapshot.campaign.version);
+    await this.appendReviewEvent(claimed.campaign, "qodo_review_claimed", batch, {
+      outcome: gate.outcome,
+      findings: batch.findings,
+    });
+
+    if (!snapshot.externalReferences.some(({ kind }) => kind === "commit")) {
+      await this.store.setExternalReference(campaignId, { kind: "commit", value: batch.commitSha });
+    }
+    const findingIteration = Math.max(1, claimed.campaign.qodoIteration);
+    for (const finding of batch.findings) {
       await this.store.recordQodoFinding(campaignId, findingIteration, finding);
-      await this.appendEvent(campaignId, "qodo_finding_recorded", {
+      await this.appendReviewEvent(claimed.campaign, "qodo_finding_recorded", batch, {
         iteration: findingIteration,
         finding,
       });
     }
 
-    const combinedFindings = mergeFindings(snapshot.qodoFindings, findings);
-    const gate = evaluateQualityGate({
-      testsPassed,
-      iteration: snapshot.campaign.qodoIteration,
-      findings: combinedFindings,
-    });
-    return this.applyGate(snapshot, gate);
-  }
-
-  private async applyGate(
-    snapshot: CampaignSnapshot,
-    gate: QualityGateResult,
-  ): Promise<Campaign> {
-    const { campaign } = snapshot;
     if (gate.outcome === "pass") {
-      await this.appendEvent(campaign.id, "quality_gate_passed", {
-        iteration: campaign.qodoIteration,
+      await this.appendReviewEvent(claimed.campaign, "quality_gate_passed", batch, {
+        iteration: claimed.campaign.qodoIteration,
       });
-      return campaign;
+      return claimed.campaign;
     }
     if (gate.outcome === "escalate") {
-      const escalated = transitionCampaign(campaign, "human_escalation");
-      await this.store.update(escalated, campaign.version);
-      await this.appendEvent(campaign.id, "quality_gate_escalated", {
-        iteration: campaign.qodoIteration,
+      await this.appendReviewEvent(claimed.campaign, "quality_gate_escalated", batch, {
+        iteration: snapshot.campaign.qodoIteration,
         reason: gate.reason,
+      });
+      return claimed.campaign;
+    }
+
+    await this.appendReviewEvent(claimed.campaign, "quality_gate_repair_requested", batch, {
+      iteration: gate.nextIteration,
+    });
+    let result: HarnessSessionResult;
+    try {
+      result = await this.harness.runChildSession(
+        this.repairPacket(snapshot, claimed.campaign, batch, combinedFindings),
+        "repair",
+      );
+    } catch {
+      const escalated = transitionCampaign(claimed.campaign, "human_escalation");
+      await this.store.update(escalated, claimed.campaign.version);
+      await this.appendReviewEvent(claimed.campaign, "repair_execution_failed", batch, {
+        reason: "repair_child_failed",
       });
       return escalated;
     }
 
-    const repairing = {
-      ...transitionCampaign(campaign, "repair"),
-      qodoIteration: gate.nextIteration,
-    };
-    await this.store.update(repairing, campaign.version);
-    await this.appendEvent(campaign.id, "quality_gate_repair_requested", {
-      iteration: gate.nextIteration,
-    });
-    const result = await this.harness.runChildSession(this.packet(snapshot), "repair");
-    await this.recordRepairSession(campaign.id, result, gate.nextIteration);
-    return repairing;
-  }
-
-  private async recordRepairSession(
-    campaignId: string,
-    result: HarnessSessionResult,
-    iteration: number,
-  ): Promise<void> {
     await this.store.setExternalReference(campaignId, {
       kind: "child_session",
       value: result.sessionId,
     });
-    for (const artifact of result.artifacts) {
-      await this.store.setExternalReference(campaignId, { kind: "sandbox", value: artifact });
-    }
-    await this.appendEvent(campaignId, "campaign_operation_completed", {
+    await this.store.setExternalReference(campaignId, {
+      kind: "sandbox",
+      value: result.sessionId,
+    });
+    await this.appendReviewEvent(claimed.campaign, "campaign_operation_completed", batch, {
       operation: "repair",
-      iteration,
+      iteration: gate.nextIteration,
       childSessionId: result.sessionId,
+      sandboxSessionId: result.sessionId,
       artifacts: result.artifacts,
       summary: result.summary,
       output: result.output,
     });
+    return claimed.campaign;
   }
 
-  private packet(snapshot: CampaignSnapshot): CampaignPacket {
+  private repairPacket(
+    snapshot: CampaignSnapshot,
+    claimedCampaign: Campaign,
+    batch: QodoReviewBatch,
+    findings: readonly QodoFinding[],
+  ): CampaignPacket {
+    const unresolvedFindings = findings.filter(
+      ({ status, disposition }) =>
+        status === "open" || (status !== "fixed" && !disposition?.trim()),
+    );
     return {
       campaignId: snapshot.campaign.id,
       repository: snapshot.campaign.repository,
       issueNumber: snapshot.campaign.issueNumber,
-      goal: "Repair only validated Qodo findings with the smallest safe change",
+      goal: `Repair validated Qodo findings for iteration ${String(claimedCampaign.qodoIteration)}`,
       verifiedEvidence: snapshot.evidence
         .filter(({ kind }) => kind === "direct")
         .map(({ sourceUrl, observation }) => ({ sourceUrl, observation })),
@@ -119,20 +141,44 @@ export class SyncReview {
         digest: actionDigest,
         status,
       })),
+      context: {
+        reviewId: batch.reviewId,
+        commitSha: batch.commitSha,
+        testsPassed: batch.testsPassed,
+        complete: batch.complete,
+        iteration: claimedCampaign.qodoIteration,
+        unresolvedFindings,
+      },
     };
   }
 
-  private async appendEvent(campaignId: string, eventType: string, payload: unknown): Promise<void> {
+  private async appendReviewEvent(
+    claimedCampaign: Campaign,
+    eventType: string,
+    batch: QodoReviewBatch,
+    payload: Readonly<Record<string, unknown>>,
+  ): Promise<void> {
+    await this.store.appendEvent(claimedCampaign.id, {
+      id: this.nextId(),
+      eventType,
+      payload: {
+        reviewId: batch.reviewId,
+        commitSha: batch.commitSha,
+        testsPassed: batch.testsPassed,
+        complete: batch.complete,
+        claimedCampaignVersion: claimedCampaign.version,
+        ...payload,
+      },
+      occurredAt: this.clock.now(),
+    });
+  }
+
+  private nextId(): string {
     const id = this.ids.next();
     if (id.trim().length === 0) {
       throw new Error("Invalid campaign event identifier");
     }
-    await this.store.appendEvent(campaignId, {
-      id,
-      eventType,
-      payload,
-      occurredAt: this.clock.now(),
-    });
+    return id;
   }
 
   private async requiredSnapshot(campaignId: string): Promise<CampaignSnapshot> {
@@ -141,6 +187,45 @@ export class SyncReview {
       throw new Error("Campaign does not exist");
     }
     return snapshot;
+  }
+}
+
+function claimReview(campaign: Campaign, gate: QualityGateResult): ClaimedReview {
+  if (gate.outcome === "repair") {
+    return {
+      campaign: {
+        ...transitionCampaign(campaign, "repair"),
+        qodoIteration: gate.nextIteration,
+      },
+      gate,
+    };
+  }
+  if (gate.outcome === "escalate") {
+    return { campaign: transitionCampaign(campaign, "human_escalation"), gate };
+  }
+  return { campaign: { ...campaign, version: campaign.version + 1 }, gate };
+}
+
+function assertReviewIsCurrent(snapshot: CampaignSnapshot, batch: QodoReviewBatch): void {
+  const commitReferences = snapshot.externalReferences.filter(({ kind }) => kind === "commit");
+  if (commitReferences.some(({ value }) => value !== batch.commitSha)) {
+    throw new Error("Stale Qodo review commit does not match campaign memory");
+  }
+  const pullRequests = snapshot.externalReferences
+    .filter(({ kind }) => kind === "pull_request")
+    .map(({ value }) => value);
+  if (new Set(pullRequests).size > 1) {
+    throw new Error("Qodo review has ambiguous pull-request campaign memory");
+  }
+  if (pullRequests.length === 1 && pullRequests[0] !== batch.reviewId) {
+    throw new Error("Stale Qodo review does not match pull-request campaign memory");
+  }
+  if (snapshot.events.some((event) =>
+    event.eventType === "qodo_review_claimed" &&
+    isRecord(event.payload) &&
+    event.payload.reviewId === batch.reviewId
+  )) {
+    throw new Error("Stale Qodo review batch was already synchronized");
   }
 }
 
@@ -155,39 +240,76 @@ function mergeFindings(
   return [...findings.values()];
 }
 
-function isFindingList(
-  input: QodoFinding | readonly QodoFinding[],
-): input is readonly QodoFinding[] {
-  return Array.isArray(input);
+function parseReviewBatch(input: unknown): QodoReviewBatch {
+  if (!isRecord(input)) {
+    throw new Error("Invalid Qodo review batch");
+  }
+  const allowedKeys = new Set([
+    "campaignId",
+    "reviewId",
+    "commitSha",
+    "testsPassed",
+    "complete",
+    "findings",
+  ]);
+  if (
+    Object.keys(input).some((key) => !allowedKeys.has(key)) ||
+    typeof input.campaignId !== "string" ||
+    input.campaignId.trim().length === 0 ||
+    typeof input.reviewId !== "string" ||
+    input.reviewId.trim().length === 0 ||
+    typeof input.commitSha !== "string" ||
+    !/^[0-9a-f]{40}$/u.test(input.commitSha) ||
+    typeof input.testsPassed !== "boolean" ||
+    typeof input.complete !== "boolean" ||
+    !Array.isArray(input.findings) ||
+    (!input.complete && input.findings.length === 0)
+  ) {
+    throw new Error("Invalid Qodo review batch");
+  }
+  const findings = input.findings.map(parseFinding);
+  return {
+    campaignId: input.campaignId,
+    reviewId: input.reviewId,
+    commitSha: input.commitSha,
+    testsPassed: input.testsPassed,
+    complete: input.complete,
+    findings,
+  };
 }
 
 function parseFinding(finding: unknown): QodoFinding {
-  if (typeof finding !== "object" || finding === null) {
+  if (!isRecord(finding)) {
     throw new Error("Invalid Qodo finding");
   }
-  const value = finding as Record<string, unknown>;
+  const allowedKeys = new Set(["id", "severity", "status", "summary", "sourceUrl", "disposition"]);
   const severities: readonly QodoFinding["severity"][] = ["high", "medium", "low", "suggestion"];
   const statuses: readonly QodoFinding["status"][] = ["open", "fixed", "dismissed"];
   if (
-    typeof value.id !== "string" ||
-    value.id.trim().length === 0 ||
-    !severities.includes(value.severity as QodoFinding["severity"]) ||
-    !statuses.includes(value.status as QodoFinding["status"]) ||
-    typeof value.summary !== "string" ||
-    value.summary.trim().length === 0 ||
-    (value.sourceUrl !== undefined &&
-      (typeof value.sourceUrl !== "string" || value.sourceUrl.trim().length === 0)) ||
-    (value.disposition !== undefined &&
-      (typeof value.disposition !== "string" || value.disposition.trim().length === 0))
+    Object.keys(finding).some((key) => !allowedKeys.has(key)) ||
+    typeof finding.id !== "string" ||
+    finding.id.trim().length === 0 ||
+    !severities.includes(finding.severity as QodoFinding["severity"]) ||
+    !statuses.includes(finding.status as QodoFinding["status"]) ||
+    typeof finding.summary !== "string" ||
+    finding.summary.trim().length === 0 ||
+    (finding.sourceUrl !== undefined &&
+      (typeof finding.sourceUrl !== "string" || finding.sourceUrl.trim().length === 0)) ||
+    (finding.disposition !== undefined &&
+      (typeof finding.disposition !== "string" || finding.disposition.trim().length === 0))
   ) {
     throw new Error("Invalid Qodo finding");
   }
   return {
-    id: value.id,
-    severity: value.severity as QodoFinding["severity"],
-    status: value.status as QodoFinding["status"],
-    summary: value.summary,
-    ...(value.sourceUrl === undefined ? {} : { sourceUrl: value.sourceUrl }),
-    ...(value.disposition === undefined ? {} : { disposition: value.disposition }),
+    id: finding.id,
+    severity: finding.severity as QodoFinding["severity"],
+    status: finding.status as QodoFinding["status"],
+    summary: finding.summary,
+    ...(finding.sourceUrl === undefined ? {} : { sourceUrl: finding.sourceUrl }),
+    ...(finding.disposition === undefined ? {} : { disposition: finding.disposition }),
   };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
