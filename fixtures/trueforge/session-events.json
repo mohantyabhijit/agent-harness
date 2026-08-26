@@ -29,6 +29,7 @@
         "id": "event-final-message",
         "threadId": "main",
         "type": "model.message",
+        "finishReason": "stop",
         "content": "{\"summary\":\"Verified the smallest patch in a fresh sandbox.\",\"artifacts\":[\"artifacts/change-brief.md\"],\"output\":{\"status\":\"verified\"}}"
       }
     }

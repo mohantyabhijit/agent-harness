@@ -51,9 +51,7 @@ describe("OpenQuest registration", () => {
     ).resolves.toMatchObject({
       trustedSkill: { urlAllowed: true, immutableRef: false, ready: false },
     });
-    expect(state.writes.createAgent).not.toHaveBeenCalled();
-    expect(state.writes.updateAgent).not.toHaveBeenCalled();
-    expect(state.writes.upsertSkill).not.toHaveBeenCalled();
+    expectNoWrites(state.writes);
   });
 
   it("reports credentialed or unapproved skill URLs as not ready without echoing them", async () => {
@@ -79,9 +77,69 @@ describe("OpenQuest registration", () => {
         skillRef: trustedRef,
       }),
     ).rejects.toThrow("OpenQuest agent registration is ambiguous");
-    expect(state.writes.createAgent).not.toHaveBeenCalled();
-    expect(state.writes.updateAgent).not.toHaveBeenCalled();
-    expect(state.writes.upsertSkill).not.toHaveBeenCalled();
+    expectNoWrites(state.writes);
+  });
+
+  it("rejects duplicate named skills before any mutation", async () => {
+    const state = fakeClient({
+      skills: [
+        { name: "openquest", manifest: priorSkillManifest },
+        { name: "openquest", manifest: priorSkillManifest },
+      ],
+    });
+
+    await expect(
+      registerOpenQuest(state.client as never, agentManifest, {
+        skillUrl: trustedUrl,
+        skillRef: trustedRef,
+      }),
+    ).rejects.toThrow("OpenQuest skill registration is ambiguous");
+    expectNoWrites(state.writes);
+  });
+
+  it("rejects an invalid existing agent manifest before any mutation", async () => {
+    const state = fakeClient({
+      agents: [{ id: "agent-1", name: "openquest", manifest: {} }],
+    });
+
+    await expect(
+      registerOpenQuest(state.client as never, agentManifest, {
+        skillUrl: trustedUrl,
+        skillRef: trustedRef,
+      }),
+    ).rejects.toThrow("Existing OpenQuest agent manifest is invalid");
+    expectNoWrites(state.writes);
+  });
+
+  it("rejects an invalid existing skill manifest before any mutation", async () => {
+    const state = fakeClient({
+      skills: [{ name: "openquest", manifest: { ...priorSkillManifest, ref: "" } }],
+    });
+
+    await expect(
+      registerOpenQuest(state.client as never, agentManifest, {
+        skillUrl: trustedUrl,
+        skillRef: trustedRef,
+      }),
+    ).rejects.toThrow("Existing OpenQuest skill manifest is invalid");
+    expectNoWrites(state.writes);
+  });
+
+  it("requires a ready Daytona provider in check and mutation paths", async () => {
+    const state = fakeClient({ sandboxProvider: { manifest: { type: "other" }, status: "ready" } });
+
+    await expect(
+      checkRegistration(state.client as never, { skillUrl: trustedUrl, skillRef: trustedRef }),
+    ).resolves.toMatchObject({
+      daytona: { configured: false, status: "ready", ready: false },
+    });
+    await expect(
+      registerOpenQuest(state.client as never, agentManifest, {
+        skillUrl: trustedUrl,
+        skillRef: trustedRef,
+      }),
+    ).rejects.toThrow("TrueForge, GitHub MCP, and Daytona must be ready before registration");
+    expectNoWrites(state.writes);
   });
 
   it("restores the full existing skill manifest when agent replacement fails", async () => {
@@ -114,6 +172,25 @@ describe("OpenQuest registration", () => {
     await expect(result).rejects.not.toThrow(/top-secret/u);
     expect(state.writes.upsertSkill).toHaveBeenCalledOnce();
   });
+
+  it("reports only a fixed error when restoring the previous skill fails", async () => {
+    const state = fakeClient({
+      agents: [configuredAgent("agent-1")],
+      skills: [{ name: "openquest", manifest: priorSkillManifest }],
+      agentMutationError: new Error("agent-token=top-secret"),
+      skillMutationErrors: [undefined, new Error("rollback-token=top-secret")],
+    });
+
+    const result = registerOpenQuest(state.client as never, agentManifest, {
+      skillUrl: trustedUrl,
+      skillRef: trustedRef,
+    });
+    await expect(result).rejects.toThrow(
+      "OpenQuest registration failed and previous skill restoration failed",
+    );
+    await expect(result).rejects.not.toThrow(/top-secret/u);
+    expect(state.writes.upsertSkill).toHaveBeenCalledTimes(2);
+  });
 });
 
 function configuredAgent(id: string): Record<string, unknown> {
@@ -124,10 +201,18 @@ function fakeClient(options: {
   agents?: Record<string, unknown>[];
   skills?: Record<string, unknown>[];
   agentMutationError?: Error;
+  sandboxProvider?: Record<string, unknown>;
+  skillMutationErrors?: readonly (Error | undefined)[];
 } = {}) {
   const agents = [...(options.agents ?? [])];
   const skills = [...(options.skills ?? [])];
+  let skillMutationAttempt = 0;
   const upsertSkill = vi.fn(async ({ manifest }: { manifest: Record<string, unknown> }) => {
+    const mutationError = options.skillMutationErrors?.[skillMutationAttempt];
+    skillMutationAttempt += 1;
+    if (mutationError !== undefined) {
+      throw mutationError;
+    }
     const existingIndex = skills.findIndex((skill) => skill.name === "openquest");
     const configured = { name: "openquest", manifest };
     if (existingIndex === -1) {
@@ -169,10 +254,18 @@ function fakeClient(options: {
         },
         sandboxProviders: {
           get: vi.fn(async () => ({
-            data: { manifest: { type: "daytona" }, status: "ready" },
+            data:
+              options.sandboxProvider ??
+              { manifest: { type: "daytona" }, status: "ready" },
           })),
         },
       },
     },
   };
+}
+
+function expectNoWrites(writes: ReturnType<typeof fakeClient>["writes"]): void {
+  expect(writes.createAgent).not.toHaveBeenCalled();
+  expect(writes.updateAgent).not.toHaveBeenCalled();
+  expect(writes.upsertSkill).not.toHaveBeenCalled();
 }

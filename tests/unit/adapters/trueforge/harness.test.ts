@@ -144,6 +144,22 @@ describe("TrueForgeHarness", () => {
     );
   });
 
+  it.each([
+    ["length", { finishReason: "length" }],
+    ["tool calls", { finishReason: "tool_calls" }],
+    ["content filter", { finishReason: "content_filter" }],
+    ["function call", { finishReason: "function_call" }],
+    ["missing finish reason", { includeFinishReason: false }],
+    ["unknown finish reason", { finishReason: "unexpected" }],
+    ["non-empty terminal tool calls", { toolCalls: [{ id: "call-1" }] }],
+  ])("rejects an incomplete terminal model message: %s", async (_label, options) => {
+    const harness = harnessStreaming([turnCreatedEvent(), turnDoneEvent(options)]);
+
+    await expect(harness.runChildSession(packet, "verify")).rejects.toBeInstanceOf(
+      HarnessOutputInvalid,
+    );
+  });
+
   it("rejects duplicate terminal events after consuming the full stream", async () => {
     const harness = harnessStreaming([turnCreatedEvent(), turnDoneEvent(), turnDoneEvent()]);
 
@@ -264,7 +280,13 @@ function turnCreatedEvent(): Record<string, unknown> {
 }
 
 function turnDoneEvent(
-  options: { artifacts?: readonly string[]; refusal?: string } = {},
+  options: {
+    artifacts?: readonly string[];
+    finishReason?: string;
+    includeFinishReason?: boolean;
+    refusal?: string;
+    toolCalls?: readonly unknown[];
+  } = {},
 ): Record<string, unknown> {
   return {
     createdAt: "2026-08-26T00:00:01Z",
@@ -280,6 +302,10 @@ function turnDoneEvent(
         id: "event-final-message",
         threadId: "main",
         type: "model.message",
+        ...(options.includeFinishReason === false
+          ? {}
+          : { finishReason: options.finishReason ?? "stop" }),
+        ...(options.toolCalls === undefined ? {} : { toolCalls: options.toolCalls }),
         content: JSON.stringify({
           summary: "Verified result",
           artifacts: options.artifacts ?? ["artifacts/change-brief.md"],

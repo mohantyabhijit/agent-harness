@@ -258,6 +258,8 @@ export class TrueForgeHarness implements HarnessPort {
 
   async getSessionEvents(sessionId: string): Promise<readonly unknown[]> {
     try {
+      // The pinned SDK returns core.Page as one AsyncIterable and follows
+      // next_page_token internally; no separate cursor loop is needed here.
       const page = await this.client.sessions.listEvents(sessionId, { limit: 100 });
       const events: unknown[] = [];
       for await (const event of page) {
@@ -293,6 +295,12 @@ function parseCompletedTurn(
     throw new HarnessExecutionFailed();
   }
   if (state.output.refusal !== undefined && state.output.refusal !== null) {
+    throw new HarnessOutputInvalid();
+  }
+  if (
+    state.output.finishReason !== "stop" ||
+    (state.output.toolCalls !== undefined && state.output.toolCalls.length > 0)
+  ) {
     throw new HarnessOutputInvalid();
   }
 

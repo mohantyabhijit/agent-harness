@@ -104,8 +104,7 @@ export async function checkRegistration(
   const github = mcpServers?.data.find((server) => server.name === "github");
   const githubAuthorized =
     github?.authStatus.status === "authenticated" || github?.authStatus.status === "not_required";
-  const daytonaConfigured = sandboxProvider?.data.manifest.type === "daytona";
-  const daytonaStatus = sandboxProvider?.data.status ?? "unknown";
+  const daytona = inspectDaytonaProvider(sandboxProvider?.data);
 
   return {
     trueforge: { reachable: agents !== null || skills !== null || mcpServers !== null },
@@ -114,11 +113,7 @@ export async function checkRegistration(
       authorized: githubAuthorized,
       ready: github !== undefined && githubAuthorized,
     },
-    daytona: {
-      configured: daytonaConfigured,
-      status: daytonaStatus,
-      ready: daytonaConfigured && daytonaStatus === "ready",
-    },
+    daytona,
     openquest: {
       skillRegistered: skills?.data.some((skill) => skill.name === "openquest") ?? false,
       agentRegistered: agents?.data.some((agent) => agent.name === "openquest") ?? false,
@@ -232,17 +227,25 @@ function registrationCheckFromInventory(
       authorized: githubAuthorized,
       ready: github !== undefined && githubAuthorized,
     },
-    daytona: {
-      configured: true,
-      status: inventory.sandboxProvider.status,
-      ready: inventory.sandboxProvider.status === "ready",
-    },
+    daytona: inspectDaytonaProvider(inventory.sandboxProvider),
     openquest: {
       skillRegistered: inventory.skills.some((skill) => skill.name === "openquest"),
       agentRegistered: inventory.agents.some((agent) => agent.name === "openquest"),
     },
     trustedSkill: inspectTrustedSkillPin(options),
   };
+}
+
+type SandboxProviderLike = Pick<TrueForgeApi.ConfiguredSandboxProvider, "status"> & {
+  manifest: { type: string };
+};
+
+function inspectDaytonaProvider(
+  provider: SandboxProviderLike | null | undefined,
+): RegistrationCheck["daytona"] {
+  const status = provider?.status ?? "unknown";
+  const configured = provider?.manifest.type === "daytona";
+  return { configured, status, ready: configured && status === "ready" };
 }
 
 function inspectTrustedSkillPin(options: RegistrationOptions): RegistrationCheck["trustedSkill"] {
