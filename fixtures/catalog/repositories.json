@@ -1,0 +1,113 @@
+[
+  {
+    "fullName": "legacy/famous-dormant",
+    "url": "https://github.com/legacy/famous-dormant",
+    "description": "A well-known but inactive project.",
+    "spaces": ["developer_tools"],
+    "license": "MIT",
+    "isPublic": true,
+    "signals": {
+      "stars": 100000,
+      "recentActivity": 0,
+      "contributionGuide": false,
+      "ciHealthy": false,
+      "externalPrAcceptance": 0,
+      "topicMatch": 1,
+      "maintainerResponse": 0
+    },
+    "evidence": [
+      {
+        "id": "famous-activity",
+        "sourceUrl": "https://github.com/legacy/famous-dormant",
+        "retrievedAt": "2026-08-26T00:00:00Z",
+        "observation": "No recent activity or contribution guidance.",
+        "kind": "direct"
+      }
+    ]
+  },
+  {
+    "fullName": "friendly/healthy-contributor",
+    "url": "https://github.com/friendly/healthy-contributor",
+    "description": "An active project with reviewed external pull requests.",
+    "spaces": ["developer_tools"],
+    "license": "Apache-2.0",
+    "isPublic": true,
+    "signals": {
+      "stars": 8000,
+      "recentActivity": 1,
+      "contributionGuide": true,
+      "ciHealthy": true,
+      "externalPrAcceptance": 0.8,
+      "topicMatch": 1,
+      "maintainerResponse": 0.9
+    },
+    "evidence": [
+      {
+        "id": "healthy-contributing",
+        "sourceUrl": "https://github.com/friendly/healthy-contributor/blob/main/CONTRIBUTING.md",
+        "retrievedAt": "2026-08-26T00:00:00Z",
+        "observation": "Contribution guide is present.",
+        "kind": "direct"
+      },
+      {
+        "id": "healthy-prs",
+        "sourceUrl": "https://github.com/friendly/healthy-contributor/pulls?q=is%3Apr+is%3Aclosed",
+        "retrievedAt": "2026-08-26T00:01:00Z",
+        "observation": "External pull requests receive maintainer review.",
+        "kind": "direct"
+      }
+    ]
+  },
+  {
+    "fullName": "community/same-score",
+    "url": "https://github.com/community/same-score",
+    "description": "An equally ready repository used to prove deterministic ties.",
+    "spaces": ["developer_tools"],
+    "license": "Apache-2.0",
+    "isPublic": true,
+    "signals": {
+      "stars": 8000,
+      "recentActivity": 1,
+      "contributionGuide": true,
+      "ciHealthy": true,
+      "externalPrAcceptance": 0.8,
+      "topicMatch": 1,
+      "maintainerResponse": 0.9
+    },
+    "evidence": [
+      {
+        "id": "same-score-guide",
+        "sourceUrl": "https://github.com/community/same-score/blob/main/CONTRIBUTING.md",
+        "retrievedAt": "2026-08-26T00:00:00Z",
+        "observation": "Contribution guide is present.",
+        "kind": "direct"
+      }
+    ]
+  },
+  {
+    "fullName": "unlicensed/active-project",
+    "url": "https://github.com/unlicensed/active-project",
+    "description": "An active project without an explicit license.",
+    "spaces": ["developer_tools"],
+    "license": null,
+    "isPublic": true,
+    "signals": {
+      "stars": 500,
+      "recentActivity": 1,
+      "contributionGuide": true,
+      "ciHealthy": true,
+      "externalPrAcceptance": 0.7,
+      "topicMatch": 1,
+      "maintainerResponse": 0.8
+    },
+    "evidence": [
+      {
+        "id": "missing-license",
+        "sourceUrl": "https://github.com/unlicensed/active-project",
+        "retrievedAt": "2026-08-26T00:00:00Z",
+        "observation": "No license is declared.",
+        "kind": "direct"
+      }
+    ]
+  }
+]

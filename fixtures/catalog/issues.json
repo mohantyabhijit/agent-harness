@@ -1,0 +1,26 @@
+[
+  {
+    "repository": "friendly/healthy-contributor",
+    "number": 101,
+    "title": "Clarify an error message",
+    "url": "https://github.com/friendly/healthy-contributor/issues/101",
+    "clarity": 0.9,
+    "affectedAreas": 1,
+    "testComplexity": 0.2,
+    "dependencyRisk": 0.1,
+    "estimatedHours": 3,
+    "maintainerSignals": ["Acceptance criteria are documented."]
+  },
+  {
+    "repository": "friendly/healthy-contributor",
+    "number": 102,
+    "title": "Redesign the synchronization pipeline",
+    "url": "https://github.com/friendly/healthy-contributor/issues/102",
+    "clarity": 0.8,
+    "affectedAreas": 4,
+    "testComplexity": 0.9,
+    "dependencyRisk": 0.7,
+    "estimatedHours": 20,
+    "maintainerSignals": ["Maintainer requests a design proposal first."]
+  }
+]
