@@ -11,6 +11,7 @@ import {
   type ExternalActionCompletionRecord,
   type ExternalActionOutcomeUnknownRecord,
   type ExternalActionReconciliationRecord,
+  type ExternalActionStaleRecoveryRecord,
   type ExternalReference,
 } from "../../application/ports/campaign-store.js";
 import {
@@ -94,6 +95,7 @@ interface ExternalActionClaimRow {
   claimed_campaign_status: CampaignStatus;
   status: ExternalActionClaim["status"];
   attempted_at: string;
+  lease_started_at: string;
   closed_at: string | null;
   disposition: NonNullable<ExternalActionClaim["disposition"]> | null;
   observed_canonical_head: string | null;
@@ -275,6 +277,7 @@ export class SqliteCampaignStore implements CampaignStore {
     })();
   }
 
+  /** @deprecated Test/port compatibility only; production orchestration must claim atomically. */
   async consumeApproval(
     approvalId: string,
     actionDigest: string,
@@ -371,7 +374,9 @@ export class SqliteCampaignStore implements CampaignStore {
   async claimExternalAction(campaignId: string, record: ExternalActionClaimRecord): Promise<ExternalActionClaim> {
     validateExternalActionPayload(record.payload);
     const consumedAt = normalizeTimestamp(record.consumedAt, "approval consumedAt");
+    const leaseStartedAt = normalizeTimestamp(record.leaseStartedAt, "external action claim lease");
     const occurredAt = normalizeTimestamp(record.attemptedEvent.occurredAt, "event occurredAt");
+    if (leaseStartedAt !== consumedAt || occurredAt !== leaseStartedAt) throw new Error("External action claim lease is not bound to its attempt");
     if (externalActionDigest(record.payload) !== record.actionDigest) throw new Error("External action payload digest does not match claim");
     if (record.attemptedEvent.eventType !== "external_action_attempted") throw new Error("Invalid external action attempted event");
     assertExternalActionEventVersion(record.attemptedEvent.payload, record.expectedVersion, record.expectedVersion);
@@ -380,7 +385,7 @@ export class SqliteCampaignStore implements CampaignStore {
       this.#assertNoBlockingExternalAction(campaignId);
       const currentCommitSha = this.#currentCommit(campaignId);
       if (currentCommitSha !== record.expectedCurrentCommitSha) throw new CampaignVersionConflict(campaignId, record.expectedVersion);
-      if (record.payload.action === "create_pr" && record.payload.commitSha !== currentCommitSha) throw new Error("External action commit does not match current campaign head");
+      if ((record.payload.action === "create_pr" || record.payload.action === "update_pr") && record.payload.commitSha !== currentCommitSha) throw new Error("External action commit does not match current campaign head");
 
       const approvalRow = this.#database.prepare("SELECT * FROM approvals WHERE id = ?").get(record.approvalId) as ApprovalRow | undefined;
       if (approvalRow === undefined || approvalRow.campaign_id !== campaignId || approvalRow.action !== record.payload.action || approvalRow.action_digest !== record.actionDigest) throw new Error("Approval does not match this external action");
@@ -396,12 +401,12 @@ export class SqliteCampaignStore implements CampaignStore {
       this.#database.prepare(`
         INSERT INTO external_action_claims (
           id, campaign_id, approval_id, action_digest, payload_json, current_commit_sha,
-          claimed_campaign_version, claimed_campaign_status, status, attempted_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)
+          claimed_campaign_version, claimed_campaign_status, status, attempted_at, lease_started_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
       `).run(
         record.claimId, campaignId, record.approvalId, record.actionDigest,
         canonicalExternalActionJson(record.payload), currentCommitSha ?? null,
-        record.expectedVersion, record.expectedStatus, consumedAt,
+        record.expectedVersion, record.expectedStatus, consumedAt, leaseStartedAt,
       );
       this.#database.prepare("INSERT INTO campaign_events (id, campaign_id, event_type, payload_json, occurred_at) VALUES (?, ?, ?, ?, ?)").run(
         record.attemptedEvent.id, campaignId, record.attemptedEvent.eventType,
@@ -455,6 +460,28 @@ export class SqliteCampaignStore implements CampaignStore {
       if (changed.changes !== 1) throw new Error(`External action claim ${record.claimId} is stale`);
     });
     mark.immediate();
+  }
+
+  async recoverStaleExternalActionClaim(campaignId: string, record: ExternalActionStaleRecoveryRecord): Promise<void> {
+    const staleBefore = normalizeTimestamp(record.staleBefore, "stale claim threshold");
+    const recoveredAt = normalizeTimestamp(record.recoveredAt, "stale claim recovery");
+    const occurredAt = normalizeTimestamp(record.event.occurredAt, "event occurredAt");
+    if (recoveredAt !== occurredAt) throw new Error("Stale claim recovery event timestamp does not match recovery");
+    if (record.operatorDisposition.trim().length === 0) throw new Error("Stale claim recovery disposition is required");
+    if (record.event.eventType !== "external_action_stale_recovered") throw new Error("Invalid stale external action recovery event");
+    const recover = this.#database.transaction(() => {
+      const claim = this.#requiredExternalActionClaim(campaignId, record.claimId, "active");
+      assertStaleRecoveryEvent(record.event, claim);
+      this.#assertClaim(campaignId, claim.claimedCampaignVersion, claim.claimedCampaignStatus);
+      if (this.#currentCommit(campaignId) !== claim.currentCommitSha) throw new Error("External action current head changed after claim");
+      if (Date.parse(claim.leaseStartedAt) > Date.parse(staleBefore)) throw new Error("External action claim is not stale");
+      this.#database.prepare("INSERT INTO campaign_events (id, campaign_id, event_type, payload_json, occurred_at) VALUES (?, ?, ?, ?, ?)").run(
+        record.event.id, campaignId, record.event.eventType, JSON.stringify(record.event.payload), occurredAt,
+      );
+      const changed = this.#database.prepare("UPDATE external_action_claims SET status = 'outcome_unknown' WHERE id = ? AND campaign_id = ? AND status = 'active' AND lease_started_at <= ?").run(record.claimId, campaignId, staleBefore);
+      if (changed.changes !== 1) throw new Error(`External action claim ${record.claimId} is not stale or active`);
+    });
+    recover.immediate();
   }
 
   async reconcileExternalAction(campaignId: string, record: ExternalActionReconciliationRecord): Promise<number> {
@@ -689,6 +716,7 @@ function mapExternalActionClaim(row: ExternalActionClaimRow): ExternalActionClai
     claimedCampaignStatus: row.claimed_campaign_status,
     status: row.status,
     attemptedAt: row.attempted_at,
+    leaseStartedAt: row.lease_started_at,
     ...(row.closed_at === null ? {} : { closedAt: row.closed_at }),
     ...(row.disposition === null ? {} : { disposition: row.disposition }),
     ...(row.observed_canonical_head === null ? {} : { observedCanonicalHead: row.observed_canonical_head }),
@@ -719,6 +747,25 @@ function assertExternalActionEventVersion(payload: unknown, expectedVersion: num
     !("claimedCampaignVersion" in payload) || payload.claimedCampaignVersion !== expectedVersion ||
     !("resultingCampaignVersion" in payload) || payload.resultingCampaignVersion !== resultingVersion
   ) throw new Error("External action event is not bound to the campaign version");
+}
+
+function assertStaleRecoveryEvent(event: CampaignEvent, claim: ExternalActionClaim): void {
+  const payload = event.payload;
+  const allowedKeys = new Set([
+    "claimId", "action", "actionDigest", "claimedCampaignVersion", "resultingCampaignVersion",
+    "claimedCampaignStatus", "disposition", "reason",
+  ]);
+  if (
+    typeof payload !== "object" || payload === null || Array.isArray(payload) ||
+    Object.keys(payload).some((key) => !allowedKeys.has(key)) || Object.keys(payload).length !== allowedKeys.size ||
+    !("claimId" in payload) || payload.claimId !== claim.id ||
+    !("action" in payload) || payload.action !== claim.payload.action ||
+    !("actionDigest" in payload) || payload.actionDigest !== claim.actionDigest ||
+    !("claimedCampaignStatus" in payload) || payload.claimedCampaignStatus !== claim.claimedCampaignStatus ||
+    !("disposition" in payload) || payload.disposition !== "operator_declared_claim_stale" ||
+    !("reason" in payload) || payload.reason !== "operator_recovered_stale_active_claim"
+  ) throw new Error("Invalid stale external action recovery evidence");
+  assertExternalActionEventVersion(payload, claim.claimedCampaignVersion, claim.claimedCampaignVersion);
 }
 
 const statusesAllowingIndependentCommitReplacement = new Set<CampaignStatus>([

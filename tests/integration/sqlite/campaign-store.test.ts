@@ -1,15 +1,18 @@
+/* eslint-disable @typescript-eslint/no-deprecated -- legacy consumeApproval port compatibility coverage */
 import Database from "better-sqlite3";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { SqliteCampaignStore } from "../../../src/adapters/sqlite/campaign-store.js";
+import { RunCampaign } from "../../../src/application/run-campaign.js";
 import { CampaignVersionConflict } from "../../../src/application/ports/campaign-store.js";
 import type { ExternalActionClaimRecord } from "../../../src/application/ports/campaign-store.js";
 import { externalActionDigest } from "../../../src/application/external-action.js";
 import { issueApproval } from "../../../src/domain/approval.js";
 import { transitionCampaign } from "../../../src/domain/campaign.js";
 import { campaign, evidence } from "../../builders.js";
+import { FakeHarness } from "../../fakes/fake-harness.js";
 
 const databases: Database.Database[] = [];
 const temporaryDirectories: string[] = [];
@@ -79,6 +82,7 @@ function externalClaimRecord(): ExternalActionClaimRecord {
     expectedVersion: 7,
     expectedStatus: "contribution_approval",
     consumedAt: "2026-08-26T00:01:00Z",
+    leaseStartedAt: "2026-08-26T00:01:00Z",
     attemptedEvent: {
       id: "attempt-1",
       eventType: "external_action_attempted",
@@ -502,6 +506,34 @@ describe("SqliteCampaignStore", () => {
     expect(completed?.campaign.version).toBe(8);
   });
 
+  it("atomically rejects update_pr when its payload commit is not the current head", async () => {
+    const { store, database } = openMemoryStore();
+    const payload = {
+      action: "update_pr" as const,
+      repository: "owner/repo",
+      issueNumber: 42,
+      pullRequest: "https://github.com/owner/repo/pull/7",
+      branch: "openquest/fix-42",
+      commitSha: "b".repeat(40),
+      body: "Publish reviewed repair",
+    };
+    await store.create(campaign({ status: "repair", version: 3, qodoIteration: 1 }));
+    database.prepare("INSERT INTO external_references (campaign_id, kind, value) VALUES (?, 'commit', ?)").run("campaign-1", "a".repeat(40));
+    await store.recordApproval(issueApproval({ id: "approval-update", campaignId: "campaign-1", action: "update_pr", actionDigest: externalActionDigest(payload), issuedAt: "2026-08-26T00:00:00Z" }));
+
+    await expect(store.claimExternalAction("campaign-1", {
+      ...externalClaimRecord(),
+      approvalId: "approval-update",
+      actionDigest: externalActionDigest(payload),
+      payload,
+      expectedVersion: 3,
+      expectedStatus: "repair",
+      expectedCurrentCommitSha: "a".repeat(40),
+      attemptedEvent: { ...externalClaimRecord().attemptedEvent, payload: { claimedCampaignVersion: 3, resultingCampaignVersion: 3 } },
+    })).rejects.toThrow(/current campaign head/i);
+    expect((await store.get("campaign-1"))?.approvals[0]?.status).toBe("approved");
+  });
+
   it("rolls back duplicate multi-connection claims and leaves exactly one consumed approval", async () => {
     const { storeA, storeB, databaseA } = openTwoConnectionStore("openquest-external-duplicate-");
     await seedExternalActionCampaign(storeA, databaseA);
@@ -548,6 +580,59 @@ describe("SqliteCampaignStore", () => {
     expect(reconciled?.externalActionClaims[0]).toMatchObject({ status: "reconciled", disposition: "confirmed_completed", observedCanonicalHead: "b".repeat(40) });
     expect(reconciled?.approvals[0]?.status).toBe("consumed");
     await expect(storeA.claimExternalAction("campaign-1", { ...externalClaimRecord(), claimId: "claim-reuse", expectedVersion: 8, expectedCurrentCommitSha: "b".repeat(40), attemptedEvent: { ...externalClaimRecord().attemptedEvent, id: "attempt-reuse", payload: { claimedCampaignVersion: 8, resultingCampaignVersion: 8 } } })).rejects.toThrow(/approval|unique|current campaign head/i);
+  });
+
+  it("recovers a persisted stale active claim after restart, rejects late completion, and reconciles without restoring approval", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "openquest-stale-claim-restart-"));
+    temporaryDirectories.push(directory);
+    const databasePath = join(directory, "campaigns.sqlite");
+    const firstDatabase = new Database(databasePath);
+    databases.push(firstDatabase);
+    const firstStore = new SqliteCampaignStore(firstDatabase);
+    const nextCommit = "b".repeat(40);
+    const pushPayload = { action: "push_branch" as const, repository: "owner/repo", issueNumber: 42, branch: "openquest/fix-42", commitSha: nextCommit };
+    await firstStore.create(campaign({ status: "contribution_approval", version: 7 }));
+    firstDatabase.prepare("INSERT INTO external_references (campaign_id, kind, value) VALUES (?, 'commit', ?)").run("campaign-1", "a".repeat(40));
+    await firstStore.recordApproval(issueApproval({ id: "approval-push", campaignId: "campaign-1", action: "push_branch", actionDigest: externalActionDigest(pushPayload), issuedAt: "2026-08-26T00:00:00Z" }));
+    await firstStore.claimExternalAction("campaign-1", { ...externalClaimRecord(), approvalId: "approval-push", actionDigest: externalActionDigest(pushPayload), payload: pushPayload });
+    firstDatabase.close();
+
+    const secondDatabase = new Database(databasePath);
+    databases.push(secondDatabase);
+    const secondStore = new SqliteCampaignStore(secondDatabase);
+    let eventNumber = 0;
+    const freshService = (now: string) => new RunCampaign(
+      secondStore,
+      new FakeHarness(),
+      { now: () => now },
+      { next: () => `restart-event-${String(++eventNumber)}` },
+      { externalActionClaimStaleAfterMs: 5 * 60_000 },
+    );
+    await expect(freshService("2026-08-26T00:03:00Z").recoverStaleExternalAction("campaign-1", { claimId: "claim-1", disposition: "operator checked process state" })).rejects.toThrow(/not stale/i);
+    const active = await secondStore.get("campaign-1");
+    expect(active?.externalActionClaims[0]?.status).toBe("active");
+    expect(active?.events.map(({ eventType }) => eventType)).toEqual(["external_action_attempted"]);
+    const restartedService = freshService("2026-08-26T00:10:00Z");
+    await expect(restartedService.recoverStaleExternalAction("campaign-1", { claimId: "claim-1", disposition: "operator confirmed original process is gone" })).resolves.toMatchObject({ status: "contribution_approval" });
+    const unknown = await secondStore.get("campaign-1");
+    expect(unknown?.externalActionClaims[0]).toMatchObject({ status: "outcome_unknown", leaseStartedAt: "2026-08-26T00:01:00.000Z" });
+    expect(unknown?.approvals[0]?.status).toBe("consumed");
+
+    await expect(secondStore.completeExternalAction("campaign-1", {
+      claimId: "claim-1",
+      completedAt: "2026-08-26T00:11:00Z",
+      completedEvent: { id: "late-completion", eventType: "external_action_completed", payload: { claimedCampaignVersion: 7, resultingCampaignVersion: 8 }, occurredAt: "2026-08-26T00:11:00Z" },
+      newCommitSha: nextCommit,
+    })).rejects.toThrow(/not active/i);
+    expect((await secondStore.get("campaign-1"))?.events).toEqual(unknown?.events);
+    expect((await secondStore.get("campaign-1"))?.externalReferences).toContainEqual({ kind: "commit", value: "a".repeat(40) });
+
+    await expect(restartedService.reconcileExternalAction("campaign-1", { claimId: "claim-1", disposition: "confirmed_not_completed" })).resolves.toMatchObject({ status: "contribution_approval" });
+    const reconciled = await secondStore.get("campaign-1");
+    if (reconciled === undefined) throw new Error("missing reconciled campaign");
+    expect(reconciled.externalActionClaims[0]?.status).toBe("reconciled");
+    expect(reconciled.approvals[0]?.status).toBe("consumed");
+    await expect(secondStore.update(transitionCampaign(reconciled.campaign, "pull_request_open"), reconciled.campaign.version)).resolves.toBeUndefined();
   });
 
   it("upgrades existing external-reference tables to retain commit identity", async () => {

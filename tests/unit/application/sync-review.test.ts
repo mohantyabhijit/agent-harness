@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { SyncReview, type QodoReviewBatch } from "../../../src/application/sync-review.js";
 import { RunCampaign } from "../../../src/application/run-campaign.js";
@@ -225,10 +225,59 @@ describe("SyncReview", () => {
     expect((await store.get("campaign-1"))?.externalReferences).toContainEqual({ kind: "commit", value: nextCommit });
   });
 
-  it("preserves iteration two after an approved update completion rotates the exact payload head", async () => {
+  it("rejects an approved update while repair is in flight and allows it only after the matching durable result", async () => {
     const nextCommit = "c".repeat(40);
     const { syncReview, store, harness } = fixture();
     await seedReview(store, campaign({ status: "qodo_review", qodoIteration: 0 }));
+    const payload = {
+      action: "update_pr" as const,
+      repository: "owner/repo",
+      issueNumber: 42,
+      pullRequest: "https://github.com/owner/repo/pull/7",
+      branch: "openquest/fix-42",
+      commitSha: nextCommit,
+      body: "Publish reviewed repair",
+    };
+    await store.recordApproval(issueApproval({
+      id: "approval-update",
+      campaignId: "campaign-1",
+      action: "update_pr",
+      actionDigest: externalActionDigest(payload),
+      issuedAt: "2026-08-26T00:00:00Z",
+    }));
+    let release!: () => void;
+    let entered!: () => void;
+    const paused = new Promise<void>((resolve) => { entered = resolve; });
+    const resume = new Promise<void>((resolve) => { release = resolve; });
+    harness.beforeResult = async (operation) => { if (operation === "repair") { entered(); await resume; } };
+    harness.enqueueResult("repair", { summary: "repair committed", artifacts: [], output: { status: "completed", commitSha: nextCommit } });
+    const repairing = syncReview.execute("campaign-1", reviewBatch({ reviewId: "review-race", findings: [openHighFinding] }));
+    await paused;
+
+    let externalEvent = 0;
+    const runner = new RunCampaign(
+      store,
+      harness,
+      { now: () => "2026-08-26T00:03:00Z" },
+      { next: () => `external-event-${String(++externalEvent)}` },
+      { externalActionClaimStaleAfterMs: 60_000 },
+    );
+    const callback = vi.fn(async () => undefined);
+    await expect(runner.executeApprovedExternalAction("campaign-1", { approvalId: "approval-update", payload }, callback)).rejects.toThrow(/repair|head|completion/i);
+    expect(callback).not.toHaveBeenCalled();
+    expect((await store.get("campaign-1"))?.approvals[0]?.status).toBe("approved");
+
+    release();
+    await expect(repairing).resolves.toMatchObject({ status: "repair", version: 3 });
+    await expect(runner.executeApprovedExternalAction("campaign-1", { approvalId: "approval-update", payload }, callback)).resolves.toBeUndefined();
+    expect(callback).toHaveBeenCalledOnce();
+  });
+
+  it("preserves iteration two after publishing the exact durable repair head", async () => {
+    const nextCommit = "c".repeat(40);
+    const { syncReview, store, harness } = fixture();
+    await seedReview(store, campaign({ status: "qodo_review", qodoIteration: 0 }));
+    harness.enqueueResult("repair", { summary: "repair committed", artifacts: [], output: { status: "completed", commitSha: nextCommit } });
     const repairing = await syncReview.execute("campaign-1", reviewBatch({ reviewId: "review-a", findings: [openHighFinding] }));
     const payload = {
       action: "update_pr" as const,
@@ -246,7 +295,7 @@ describe("SyncReview", () => {
     const publishedSnapshot = await store.get("campaign-1");
     if (publishedSnapshot === undefined) throw new Error("missing published repair campaign");
     const published = publishedSnapshot.campaign;
-    expect(published).toMatchObject({ status: "repair", version: repairing.version + 1 });
+    expect(published).toMatchObject({ status: "repair", version: repairing.version });
     expect((await store.get("campaign-1"))?.externalReferences).toContainEqual({ kind: "commit", value: nextCommit });
     await store.update(transitionCampaign(published, "qodo_review"), published.version);
     const fixed = { ...openHighFinding, status: "fixed" as const, disposition: "Fixed in approved repair commit" };

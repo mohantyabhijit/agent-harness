@@ -47,6 +47,7 @@ export interface ExternalActionClaim {
   readonly claimedCampaignStatus: CampaignStatus;
   readonly status: ExternalActionClaimStatus;
   readonly attemptedAt: string;
+  readonly leaseStartedAt: string;
   readonly closedAt?: string;
   readonly disposition?: ExternalActionDisposition;
   readonly observedCanonicalHead?: string;
@@ -61,6 +62,7 @@ export interface ExternalActionClaimRecord {
   readonly expectedVersion: number;
   readonly expectedStatus: CampaignStatus;
   readonly consumedAt: string;
+  readonly leaseStartedAt: string;
   readonly attemptedEvent: CampaignEvent;
 }
 
@@ -73,6 +75,14 @@ export interface ExternalActionCompletionRecord {
 
 export interface ExternalActionOutcomeUnknownRecord {
   readonly claimId: string;
+  readonly event: CampaignEvent;
+}
+
+export interface ExternalActionStaleRecoveryRecord {
+  readonly claimId: string;
+  readonly staleBefore: string;
+  readonly recoveredAt: string;
+  readonly operatorDisposition: string;
   readonly event: CampaignEvent;
 }
 
@@ -101,6 +111,7 @@ export interface CampaignStore {
   appendEvidence(campaignId: string, evidence: Evidence): Promise<void>;
   appendEvent(campaignId: string, event: CampaignEvent): Promise<void>;
   recordApproval(approval: Approval): Promise<void>;
+  /** @deprecated Production orchestration must use claimExternalAction so approval consumption and the durable claim are atomic. */
   consumeApproval(
     approvalId: string,
     actionDigest: string,
@@ -112,6 +123,7 @@ export interface CampaignStore {
   claimExternalAction(campaignId: string, record: ExternalActionClaimRecord): Promise<ExternalActionClaim>;
   completeExternalAction(campaignId: string, record: ExternalActionCompletionRecord): Promise<number>;
   markExternalActionOutcomeUnknown(campaignId: string, record: ExternalActionOutcomeUnknownRecord): Promise<void>;
+  recoverStaleExternalActionClaim(campaignId: string, record: ExternalActionStaleRecoveryRecord): Promise<void>;
   reconcileExternalAction(campaignId: string, record: ExternalActionReconciliationRecord): Promise<number>;
   replaceCurrentCommit(
     campaignId: string,

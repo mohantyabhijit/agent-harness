@@ -42,6 +42,15 @@ export interface ExternalActionReconciliation {
   readonly observedCanonicalHead?: string;
 }
 
+export interface ExternalActionStaleRecovery {
+  readonly claimId: string;
+  readonly disposition: string;
+}
+
+export interface RunCampaignOptions {
+  readonly externalActionClaimStaleAfterMs?: number;
+}
+
 export const requiredPreflightChecks = [
   "manifest_and_lifecycle_scripts",
   "suspicious_paths",
@@ -67,12 +76,21 @@ interface PreflightEvidence {
 }
 
 export class RunCampaign {
+  readonly #externalActionClaimStaleAfterMs: number;
+
   constructor(
     private readonly store: CampaignStore,
     private readonly harness: HarnessPort,
     private readonly clock: Clock,
     private readonly ids: IdGenerator,
-  ) {}
+    options: RunCampaignOptions = {},
+  ) {
+    const staleAfterMs = options.externalActionClaimStaleAfterMs ?? 5 * 60_000;
+    if (!Number.isSafeInteger(staleAfterMs) || staleAfterMs <= 0) {
+      throw new TypeError("External action claim stale threshold must be a positive integer of milliseconds");
+    }
+    this.#externalActionClaimStaleAfterMs = staleAfterMs;
+  }
 
   async execute(campaignId: string, operation: CampaignOperation): Promise<Campaign> {
     const snapshot = await this.requiredSnapshot(campaignId);
@@ -115,6 +133,7 @@ export class RunCampaign {
     }
 
     const claimId = this.nextId();
+    const claimedAt = canonicalTimestamp(this.clock.now(), "external action claim lease");
     const expectedCurrentCommitSha = campaignCurrentCommit(snapshot);
     const claimed = await this.store.claimExternalAction(campaignId, {
       claimId,
@@ -124,12 +143,13 @@ export class RunCampaign {
       ...(expectedCurrentCommitSha === undefined ? {} : { expectedCurrentCommitSha }),
       expectedVersion: snapshot.campaign.version,
       expectedStatus: snapshot.campaign.status,
-      consumedAt: this.clock.now(),
+      consumedAt: claimedAt,
+      leaseStartedAt: claimedAt,
       attemptedEvent: {
         id: this.nextId(),
         eventType: "external_action_attempted",
         payload: externalActionEvidence(claimId, approval.action, approval.actionDigest, snapshot.campaign.version, snapshot.campaign.version, snapshot.campaign.status),
-        occurredAt: this.clock.now(),
+        occurredAt: claimedAt,
       },
     });
     const authorized: Readonly<AuthorizedExternalAction> = deepFreeze({
@@ -199,6 +219,40 @@ export class RunCampaign {
           reason: "human_external_action_reconciliation",
         },
         occurredAt: this.clock.now(),
+      },
+    });
+    return (await this.requiredSnapshot(campaignId)).campaign;
+  }
+
+  async recoverStaleExternalAction(campaignId: string, input: unknown): Promise<Campaign> {
+    const recovery = parseExternalActionStaleRecovery(input);
+    const snapshot = await this.requiredSnapshot(campaignId);
+    const claim = snapshot.externalActionClaims.find(({ id }) => id === recovery.claimId);
+    if (claim === undefined || claim.status !== "active") throw new Error("External action claim is not active");
+    const recoveredAt = canonicalTimestamp(this.clock.now(), "stale claim recovery");
+    const staleBefore = new Date(Date.parse(recoveredAt) - this.#externalActionClaimStaleAfterMs).toISOString();
+    if (Date.parse(claim.leaseStartedAt) > Date.parse(staleBefore)) {
+      throw new Error("External action claim is not stale");
+    }
+    await this.store.recoverStaleExternalActionClaim(campaignId, {
+      claimId: recovery.claimId,
+      staleBefore,
+      recoveredAt,
+      operatorDisposition: recovery.disposition,
+      event: {
+        id: this.nextId(),
+        eventType: "external_action_stale_recovered",
+        payload: {
+          claimId: recovery.claimId,
+          action: claim.payload.action,
+          actionDigest: claim.actionDigest,
+          claimedCampaignVersion: snapshot.campaign.version,
+          resultingCampaignVersion: snapshot.campaign.version,
+          claimedCampaignStatus: snapshot.campaign.status,
+          disposition: "operator_declared_claim_stale",
+          reason: "operator_recovered_stale_active_claim",
+        },
+        occurredAt: recoveredAt,
       },
     });
     return (await this.requiredSnapshot(campaignId)).campaign;
@@ -380,7 +434,12 @@ export class RunCampaign {
 
   private assertExternalPayloadReferences(snapshot: CampaignSnapshot, payload: ExternalActionPayload): void {
     if (payload.action === "create_pr" && requiredCurrentCommit(snapshot) !== payload.commitSha) throw new Error("External action commit does not match current campaign head");
-    if (payload.action === "update_pr" && !snapshot.externalReferences.some(({ kind, value }) => kind === "pull_request" && value === payload.pullRequest)) throw new Error("External action pull request does not match campaign memory");
+    if (payload.action === "update_pr") {
+      if (requiredCurrentCommit(snapshot) !== payload.commitSha) throw new Error("External action commit does not match current campaign head");
+      const pullRequests = snapshot.externalReferences.filter(({ kind }) => kind === "pull_request");
+      if (pullRequests.length !== 1 || pullRequests[0]?.value !== payload.pullRequest) throw new Error("External action pull request does not match campaign memory");
+      if (!hasRepairCompletion(snapshot, payload)) throw new Error("Campaign lacks a repair completion event for this update");
+    }
   }
 
   private async markOutcomeUnknown(campaignId: string, claimId: string, action: ApprovalAction, actionDigest: string, snapshot: CampaignSnapshot): Promise<void> {
@@ -446,6 +505,21 @@ function hasOperationCompletion(
   });
 }
 
+function hasRepairCompletion(snapshot: CampaignSnapshot, payload: Extract<ExternalActionPayload, { action: "update_pr" }>): boolean {
+  return snapshot.events.some((event) => {
+    if (event.eventType !== "campaign_operation_completed" || !isRecord(event.payload) || !isRecord(event.payload.output)) return false;
+    const repairedFromCommit = event.payload.commitSha;
+    if (typeof repairedFromCommit !== "string" || !/^[0-9a-f]{40}$/u.test(repairedFromCommit)) return false;
+    const expectedClaimedVersion = snapshot.campaign.version - (repairedFromCommit === payload.commitSha ? 0 : 1);
+    return event.payload.operation === "repair" &&
+      event.payload.claimedCampaignVersion === expectedClaimedVersion &&
+      event.payload.resultingCampaignVersion === snapshot.campaign.version &&
+      event.payload.pullRequest === payload.pullRequest &&
+      event.payload.iteration === snapshot.campaign.qodoIteration &&
+      event.payload.output.commitSha === payload.commitSha;
+  });
+}
+
 function currentCommit(snapshot: CampaignSnapshot): string | undefined {
   return snapshot.externalReferences.find(({ kind }) => kind === "commit")?.value;
 }
@@ -488,6 +562,21 @@ function parseExternalActionReconciliation(input: unknown): ExternalActionReconc
     disposition: input.disposition,
     ...(input.observedCanonicalHead === undefined ? {} : { observedCanonicalHead: input.observedCanonicalHead }),
   };
+}
+
+function parseExternalActionStaleRecovery(input: unknown): ExternalActionStaleRecovery {
+  if (!isRecord(input) || Object.keys(input).some((key) => !["claimId", "disposition"].includes(key)) ||
+    typeof input.claimId !== "string" || input.claimId.trim().length === 0 ||
+    typeof input.disposition !== "string" || input.disposition.trim().length === 0) {
+    throw new Error("Invalid stale external action recovery disposition");
+  }
+  return { claimId: input.claimId, disposition: input.disposition.trim() };
+}
+
+function canonicalTimestamp(value: string, label: string): string {
+  const instant = Date.parse(value);
+  if (!Number.isFinite(instant)) throw new TypeError(`Invalid ${label} timestamp`);
+  return new Date(instant).toISOString();
 }
 
 function parsePreflightResult(output: unknown): PreflightResult {

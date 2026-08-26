@@ -78,6 +78,7 @@ const schema = `
     claimed_campaign_status TEXT NOT NULL,
     status TEXT NOT NULL CHECK (status IN ('active', 'outcome_unknown', 'completed', 'reconciled')),
     attempted_at TEXT NOT NULL,
+    lease_started_at TEXT NOT NULL,
     closed_at TEXT,
     disposition TEXT CHECK (disposition IS NULL OR disposition IN ('confirmed_completed', 'confirmed_not_completed')),
     observed_canonical_head TEXT
@@ -113,6 +114,13 @@ export function migrateCampaignStore(database: Database.Database): void {
         INSERT INTO external_references (campaign_id, kind, value)
         SELECT campaign_id, kind, value FROM external_references_without_commit;
         DROP TABLE external_references_without_commit;
+      `);
+    }
+    const externalActionClaimColumns = database.prepare("PRAGMA table_info(external_action_claims)").all() as { name: string }[];
+    if (!externalActionClaimColumns.some(({ name }) => name === "lease_started_at")) {
+      database.exec(`
+        ALTER TABLE external_action_claims ADD COLUMN lease_started_at TEXT;
+        UPDATE external_action_claims SET lease_started_at = attempted_at WHERE lease_started_at IS NULL;
       `);
     }
   })();

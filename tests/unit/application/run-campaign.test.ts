@@ -426,6 +426,150 @@ describe("RunCampaign", () => {
     expect(reconciled.approvals[0]?.status).toBe("consumed");
     await expect(service.executeApprovedExternalAction("campaign-1", approvalRequest(), async () => undefined)).rejects.toThrow(/available|current campaign head/i);
   });
+
+  it.each([
+    ["campaign version", { resultingCampaignVersion: 2 }],
+    ["pull request", { pullRequest: "https://github.com/owner/repo/pull/8" }],
+    ["Qodo iteration", { iteration: 2 }],
+    ["repair commit", { output: { status: "completed", commitSha: "d".repeat(40) } }],
+  ])("requires repair completion bound to the current %s before update_pr", async (_label, eventOverride) => {
+    const nextCommit = "c".repeat(40);
+    const updatePayload = {
+      action: "update_pr" as const,
+      repository: "owner/repo",
+      issueNumber: 42,
+      pullRequest: "https://github.com/owner/repo/pull/7",
+      branch: "openquest/fix-42",
+      commitSha: nextCommit,
+      body: "Publish reviewed repair",
+    };
+    const { service, store } = fixture();
+    store.seed(campaign({ status: "repair", version: 3, qodoIteration: 1 }));
+    store.seedExternalReference("campaign-1", { kind: "commit", value: nextCommit });
+    store.seedExternalReference("campaign-1", { kind: "pull_request", value: updatePayload.pullRequest });
+    await store.appendEvent("campaign-1", {
+      id: "repair-completed",
+      eventType: "campaign_operation_completed",
+      payload: {
+        operation: "repair",
+        pullRequest: updatePayload.pullRequest,
+        commitSha: commitSha,
+        iteration: 1,
+        claimedCampaignVersion: 2,
+        resultingCampaignVersion: 3,
+        output: { status: "completed", commitSha: nextCommit },
+        ...eventOverride,
+      },
+      occurredAt: "2026-08-26T00:00:30Z",
+    });
+    await store.recordApproval(issueApproval({
+      id: "approval-update",
+      campaignId: "campaign-1",
+      action: "update_pr",
+      actionDigest: externalActionDigest(updatePayload),
+      issuedAt: "2026-08-26T00:00:00Z",
+    }));
+    const callback = vi.fn(async () => undefined);
+
+    await expect(service.executeApprovedExternalAction("campaign-1", { approvalId: "approval-update", payload: updatePayload }, callback)).rejects.toThrow(/repair completion/i);
+    expect(callback).not.toHaveBeenCalled();
+    expect((await store.get("campaign-1"))?.approvals[0]?.status).toBe("approved");
+  });
+
+  it("makes the fake claim transaction reject an update_pr payload for a different current head", async () => {
+    const nextCommit = "c".repeat(40);
+    const updatePayload = {
+      action: "update_pr" as const,
+      repository: "owner/repo",
+      issueNumber: 42,
+      pullRequest: "https://github.com/owner/repo/pull/7",
+      branch: "openquest/fix-42",
+      commitSha: nextCommit,
+      body: "Publish reviewed repair",
+    };
+    const store = new FakeCampaignStore();
+    store.seed(campaign({ status: "repair", version: 3, qodoIteration: 1 }));
+    store.seedExternalReference("campaign-1", { kind: "commit", value: commitSha });
+    await store.recordApproval(issueApproval({ id: "approval-update", campaignId: "campaign-1", action: "update_pr", actionDigest: externalActionDigest(updatePayload), issuedAt: "2026-08-26T00:00:00Z" }));
+
+    await expect(store.claimExternalAction("campaign-1", {
+      claimId: "claim-update",
+      approvalId: "approval-update",
+      actionDigest: externalActionDigest(updatePayload),
+      payload: updatePayload,
+      expectedCurrentCommitSha: commitSha,
+      expectedVersion: 3,
+      expectedStatus: "repair",
+      consumedAt: "2026-08-26T00:01:00Z",
+      leaseStartedAt: "2026-08-26T00:01:00Z",
+      attemptedEvent: {
+        id: "attempt-update",
+        eventType: "external_action_attempted",
+        payload: { claimedCampaignVersion: 3, resultingCampaignVersion: 3 },
+        occurredAt: "2026-08-26T00:01:00Z",
+      },
+    })).rejects.toThrow(/current campaign head/i);
+    expect((await store.get("campaign-1"))?.approvals[0]?.status).toBe("approved");
+    expect((await store.get("campaign-1"))?.externalActionClaims).toEqual([]);
+  });
+
+  it("recovers only a stale active claim and fences its late original completion", async () => {
+    const store = new FakeCampaignStore();
+    const harness = new FakeHarness();
+    let now = "2026-08-26T00:01:00Z";
+    let eventNumber = 0;
+    const service = new RunCampaign(
+      store,
+      harness,
+      { now: () => now },
+      { next: () => `recovery-event-${String(++eventNumber)}` },
+      { externalActionClaimStaleAfterMs: 60_000 },
+    );
+    store.seed(campaign({ status: "contribution_approval", version: 7 }));
+    store.seedExternalReference("campaign-1", { kind: "commit", value: commitSha });
+    await store.recordApproval(issueApproval({ id: "approval-1", campaignId: "campaign-1", action: "create_pr", actionDigest: externalActionDigest(externalPayload), issuedAt: "2026-08-26T00:00:00Z" }));
+    let release!: () => void;
+    let entered!: () => void;
+    const paused = new Promise<void>((resolve) => { entered = resolve; });
+    const resume = new Promise<void>((resolve) => { release = resolve; });
+    const action = vi.fn(async () => { entered(); await resume; return "pull-request-7"; });
+    const executing = service.executeApprovedExternalAction("campaign-1", approvalRequest(), action);
+    await paused;
+    const claimId = (await store.get("campaign-1"))?.externalActionClaims[0]?.id;
+    if (claimId === undefined) throw new Error("missing active claim");
+
+    await expect(service.recoverStaleExternalAction("campaign-1", { claimId, disposition: "operator checked process ownership" })).rejects.toThrow(/not stale/i);
+    now = "2026-08-26T00:03:00Z";
+    await expect(service.recoverStaleExternalAction("campaign-1", { claimId, disposition: " " })).rejects.toThrow(/disposition/i);
+    await expect(service.recoverStaleExternalAction("campaign-1", { claimId, disposition: "operator checked process ownership" })).resolves.toMatchObject({ status: "contribution_approval" });
+    const recovered = await store.get("campaign-1");
+    expect(recovered?.externalActionClaims[0]).toMatchObject({ status: "outcome_unknown" });
+    expect(recovered?.approvals[0]?.status).toBe("consumed");
+    expect(recovered?.events.at(-1)).toMatchObject({
+      eventType: "external_action_stale_recovered",
+      payload: { reason: "operator_recovered_stale_active_claim" },
+    });
+    expect(JSON.stringify(recovered?.events)).not.toContain("process ownership");
+
+    release();
+    await expect(executing).rejects.toThrow(/outcome is unknown/i);
+    const afterLateCompletion = await store.get("campaign-1");
+    expect(afterLateCompletion?.events).toEqual(recovered?.events);
+    expect(afterLateCompletion?.externalActionClaims[0]?.status).toBe("outcome_unknown");
+    expect(afterLateCompletion?.externalReferences).toContainEqual({ kind: "commit", value: commitSha });
+  });
+
+  it("rolls back fake reconciliation when event persistence fails", async () => {
+    const { service, store } = await approvedFixture();
+    await expect(service.executeApprovedExternalAction("campaign-1", approvalRequest(), async () => { throw new Error("remote uncertainty"); })).rejects.toThrow(/outcome is unknown/i);
+    const before = await store.get("campaign-1");
+    const claimId = before?.externalActionClaims[0]?.id;
+    if (claimId === undefined) throw new Error("missing uncertain claim");
+    store.failNextEvent = true;
+
+    await expect(service.reconcileExternalAction("campaign-1", { claimId, disposition: "confirmed_completed", observedCanonicalHead: "b".repeat(40) })).rejects.toThrow(/event persistence/i);
+    expect(await store.get("campaign-1")).toEqual(before);
+  });
 });
 
 function preflightAttestation(overrides: Record<string, unknown> = {}): Record<string, unknown> {
