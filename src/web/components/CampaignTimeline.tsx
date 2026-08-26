@@ -20,9 +20,9 @@ const eventLabels: Readonly<Record<string, string>> = {
 
 export function CampaignTimeline({ events, approvals }: CampaignTimelineProps) {
   const entries = [
-    ...events.map((event) => ({ id: `event-${event.id}`, occurredAt: event.occurredAt, label: eventLabels[event.eventType] ?? humanize(event.eventType), facts: event.facts })),
-    ...approvals.map((approval) => ({ id: `approval-${approval.id}`, occurredAt: approval.consumedAt ?? approval.issuedAt, label: `${approvalActionName(approval.action)} approval ${approval.status}`, facts: approval.consumedAt === undefined ? { issuedAt: approval.issuedAt } : { issuedAt: approval.issuedAt, consumedAt: approval.consumedAt } })),
-  ].toSorted((left, right) => left.occurredAt.localeCompare(right.occurredAt) || left.id.localeCompare(right.id));
+    ...events.map((event) => ({ id: `event-${event.id}`, occurredAt: event.occurredAt, sequence: event.sequence, label: eventLabels[event.eventType] ?? humanize(event.eventType), facts: event.facts })),
+    ...approvals.map((approval) => ({ id: `approval-${approval.id}`, occurredAt: approval.consumedAt ?? approval.issuedAt, sequence: Number.MAX_SAFE_INTEGER, label: `${approvalActionName(approval.action)} approval ${approval.status}`, facts: approval.consumedAt === undefined ? { issuedAt: approval.issuedAt } : { issuedAt: approval.issuedAt, consumedAt: approval.consumedAt } })),
+  ].toSorted((left, right) => Date.parse(left.occurredAt) - Date.parse(right.occurredAt) || left.sequence - right.sequence || left.id.localeCompare(right.id));
   return <section aria-labelledby="timeline-heading" className="campaign-panel">
     <div className="panel-heading"><div><p className="eyebrow">Durable history</p><h2 id="timeline-heading">Campaign timeline</h2></div><span className="fact-count">{events.length} events · {approvals.length} approvals</span></div>
     {entries.length === 0 ? <p>No durable campaign events have been recorded yet.</p> : <ol className="campaign-timeline">

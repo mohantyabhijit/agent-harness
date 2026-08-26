@@ -239,14 +239,8 @@ describe("OpenQuest API", () => {
     };
     store.seed(campaign({ status: "contribution_approval", version: 7 }));
     store.seedExternalReference("campaign-1", { kind: "commit", value: head });
-    await store.recordApproval({
-      id: "approval-1",
-      campaignId: "campaign-1",
-      action: "create_pr",
-      actionDigest: externalActionDigest(payload),
-      status: "approved",
-      issuedAt: "2026-08-26T00:00:00Z",
-    });
+    await appendProposal(store, payload, { id: "proposal-redaction", version: 7, status: "contribution_approval", currentHead: head });
+    await store.issueApprovalForProposal({ campaignId: "campaign-1", proposalId: "proposal-redaction", actionDigest: externalActionDigest(payload), expectedVersion: 7, approvalId: "approval-1", issuedAt: "2026-08-26T00:00:00Z", expiresAt: "2026-08-26T01:00:00Z", idempotencyKey: "redaction-key" });
     await store.claimExternalAction("campaign-1", {
       claimId: "claim-1",
       approvalId: "approval-1",
@@ -269,7 +263,7 @@ describe("OpenQuest API", () => {
     expect(response.statusCode).toBe(200);
     expect(response.body).not.toContain("Sensitive approval brief content");
     expect(response.json().externalActionClaims[0]).not.toHaveProperty("payload");
-    expect(response.json().events[0]).not.toHaveProperty("payload");
+    expect(response.body).not.toContain('"payload"');
     await app.close();
   });
 
@@ -284,6 +278,21 @@ describe("OpenQuest API", () => {
     const response = await app.inject({ method: "GET", url: "/api/campaigns/campaign-1" });
 
     expect(response.json().approvalProposal).toEqual({ proposalId: "proposal-1", actionDigest: externalActionDigest(payload), expectedCampaignVersion: 7, action: payload, brief: expect.objectContaining({ safetyResult: "Static preflight passed." }) });
+    await app.close();
+  });
+
+  it("shows and binds both the source and target commit for a branch push", async () => {
+    const { app, store } = buildTestApp();
+    const source = "a".repeat(40);
+    const target = "b".repeat(40);
+    const payload = { action: "push_branch" as const, repository: "owner/repo", issueNumber: 42, branch: "openquest/fix-42", commitSha: target };
+    store.seed(campaign({ status: "contribution_approval", version: 7 }));
+    store.seedExternalReference("campaign-1", { kind: "commit", value: source });
+    await appendProposal(store, payload, { id: "proposal-push", version: 7, status: "contribution_approval", currentHead: source });
+
+    const response = await app.inject({ method: "GET", url: "/api/campaigns/campaign-1" });
+
+    expect(response.json().approvalProposal.action).toEqual({ action: "push_branch", repository: "owner/repo", issueNumber: 42, branch: "openquest/fix-42", sourceCommitSha: source, targetCommitSha: target });
     await app.close();
   });
 
@@ -312,8 +321,21 @@ describe("OpenQuest API", () => {
     store.seed(campaign({ status: "contribution_approval", version: 7 }));
     store.seedExternalReference("campaign-1", { kind: "commit", value: head });
     await appendProposal(store, payload, { id: "proposal-valid", version: 7, status: "contribution_approval", currentHead: head });
-    await store.appendEvent("campaign-1", { id: "proposal-malformed", eventType: "external_action_proposed", occurredAt: "2026-08-26T00:06:00Z", payload: { payload } });
+    await store.appendEvent("campaign-1", { id: "aaa-malformed-newest", eventType: "external_action_proposed", occurredAt: "2026-08-26T00:00:00Z", payload: { payload } });
     expect((await app.inject({ method: "GET", url: "/api/campaigns/campaign-1" })).json().approvalProposal).toBeNull();
+    await app.close();
+  });
+
+  it("projects only event-type-specific public facts and never leaks arbitrary sentinel strings", async () => {
+    const { app, store } = buildTestApp();
+    const sentinel = "SECRET_SENTINEL_DO_NOT_RENDER";
+    store.seed(campaign());
+    await store.appendEvent("campaign-1", { id: "unknown-event", eventType: "provider_debug", occurredAt: "2026-08-26T00:00:00Z", payload: { reason: sentinel, output: { status: sentinel } } });
+
+    const response = await app.inject({ method: "GET", url: "/api/campaigns/campaign-1" });
+
+    expect(response.body).not.toContain(sentinel);
+    expect(response.json().events).toEqual([]);
     await app.close();
   });
 

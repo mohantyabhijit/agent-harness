@@ -22,8 +22,8 @@ const snapshot: CampaignSnapshot = {
   version: 8,
   evidence: [{ id: "policy", sourceUrl: "https://github.com/owner/repo/blob/main/CONTRIBUTING.md", retrievedAt: "2026-08-26T00:00:00Z", observation: "Maintainers require focused pull requests.", kind: "direct" }],
   events: [
-    { id: "created", eventType: "campaign_created", occurredAt: "2026-08-26T00:00:00Z", facts: {} },
-    { id: "verified", eventType: "campaign_operation_completed", occurredAt: "2026-08-26T00:05:00Z", facts: { operation: "verify", testsPassed: true } },
+    { id: "created", eventType: "campaign_created", occurredAt: "2026-08-26T00:00:00Z", sequence: 1, facts: {} },
+    { id: "verified", eventType: "campaign_operation_completed", occurredAt: "2026-08-26T00:05:00Z", sequence: 2, facts: { operation: "verify", testsPassed: true } },
   ],
   approvals: [{ id: "approval-1", action: "create_pr", actionDigest: `sha256:${"b".repeat(64)}`, status: "consumed", issuedAt: "2026-08-26T00:06:00Z", consumedAt: "2026-08-26T00:07:00Z" }],
   qodoFindings: [{ id: "finding-1", severity: "medium", status: "open", summary: "Handle the empty response.", sourceUrl: "https://github.com/owner/repo/pull/7#discussion_r1", disposition: "Repair queued" }],
@@ -34,6 +34,7 @@ const snapshot: CampaignSnapshot = {
   ],
   externalActionClaims: [],
   approvalProposal: null,
+  qualityEscalationReason: null,
 };
 
 function campaignApi(getCampaign: OpenQuestApi["getCampaign"]): Pick<OpenQuestApi, "getCampaign" | "issueApproval"> {
@@ -86,5 +87,23 @@ describe("CampaignPage", () => {
     view.unmount();
 
     expect(retrySignal?.aborted).toBe(true);
+  });
+
+  it("does not resurrect route-scoped state across an A-B-A navigation when promises ignore abort", async () => {
+    const releases = new Map<string, (value: CampaignSnapshot) => void>();
+    const getCampaign = vi.fn((id: string) => new Promise<CampaignSnapshot>((resolve) => { releases.set(`${id}-${String(getCampaign.mock.calls.length)}`, resolve); }));
+    const view = render(<CampaignPage api={campaignApi(getCampaign)} campaignId="campaign-1" />);
+    view.rerender(<CampaignPage api={campaignApi(getCampaign)} campaignId="campaign-2" />);
+    view.rerender(<CampaignPage api={campaignApi(getCampaign)} campaignId="campaign-1" />);
+    releases.get("campaign-1-1")?.({ ...snapshot, parentSessionId: "stale-session" });
+    expect(screen.queryByText("stale-session")).not.toBeInTheDocument();
+    releases.get("campaign-1-3")?.({ ...snapshot, parentSessionId: "fresh-session" });
+    expect(await screen.findByText("TrueForge session fresh-session")).toBeVisible();
+  });
+
+  it("renders the durable typed escalation reason instead of inferring from findings", async () => {
+    render(<CampaignPage api={campaignApi(async () => ({ ...snapshot, status: "human_escalation", qodoIteration: 3, qualityEscalationReason: "tests_failed" }))} campaignId="campaign-1" />);
+    expect(await screen.findByText(/durable quality record says verification tests failed/i)).toBeVisible();
+    expect(screen.queryByText(/repair limit was reached/i)).not.toBeInTheDocument();
   });
 });

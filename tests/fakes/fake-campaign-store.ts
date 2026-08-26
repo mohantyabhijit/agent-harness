@@ -19,7 +19,7 @@ import {
 } from "../../src/application/ports/campaign-store.js";
 import { currentApprovalProposal } from "../../src/application/approval-proposal.js";
 import { issueApproval as issueDomainApproval } from "../../src/domain/approval.js";
-import { externalActionDigest, isPullRequest, validateExternalActionPayload } from "../../src/application/external-action.js";
+import { canonicalExternalActionJson, externalActionDigest, isPullRequest, validateExternalActionPayload } from "../../src/application/external-action.js";
 import {
   consumeApproval as consumeDomainApproval,
   isApprovalActionAllowed,
@@ -72,7 +72,7 @@ export class FakeCampaignStore implements CampaignStore {
     }
     this.#insert(campaign);
     if (initialEventClone !== undefined) {
-      this.#required(campaign.id).events.push(initialEventClone);
+      this.#pushEvent(this.#required(campaign.id), initialEventClone);
       this.#eventIds.add(initialEventClone.id);
     }
   }
@@ -141,7 +141,7 @@ export class FakeCampaignStore implements CampaignStore {
     }
     const snapshot = this.#required(campaignId);
     this.#assertEventAvailable(event.id);
-    snapshot.events.push(structuredClone(event));
+    this.#pushEvent(snapshot, event);
     this.#eventIds.add(event.id);
   }
 
@@ -173,9 +173,21 @@ export class FakeCampaignStore implements CampaignStore {
 
   async issueApprovalForProposal(record: import("../../src/application/ports/campaign-store.js").ProposalApprovalIssuanceRecord): Promise<Approval> {
     const snapshot = this.#required(record.campaignId);
+    const mapKey = `${record.campaignId}\u0000${record.idempotencyKey}`;
+    const replayId = this.#approvalKeys.get(mapKey);
+    if (replayId !== undefined) {
+      const replay = snapshot.approvals.find(({ id }) => id === replayId);
+      if (replay === undefined || replay.proposalId !== record.proposalId || replay.actionDigest !== record.actionDigest || replay.expectedCampaignVersion !== record.expectedVersion) throw new ApprovalIssuanceConflict();
+      return structuredClone(replay);
+    }
     const proposal = currentApprovalProposal(cloneSnapshot(snapshot));
     if (proposal === null || proposal.proposalId !== record.proposalId || proposal.actionDigest !== record.actionDigest || proposal.expectedCampaignVersion !== record.expectedVersion) throw new ApprovalIssuanceConflict();
-    const approval = issueDomainApproval({ id: record.approvalId, campaignId: record.campaignId, action: proposal.payload.action, actionDigest: proposal.actionDigest, issuedAt: record.issuedAt, expiresAt: record.expiresAt });
+    const approval = issueDomainApproval({
+      id: record.approvalId, campaignId: record.campaignId, action: proposal.payload.action, actionDigest: proposal.actionDigest,
+      issuedAt: record.issuedAt, expiresAt: record.expiresAt, proposalId: proposal.proposalId,
+      expectedCampaignVersion: proposal.expectedCampaignVersion, expectedCampaignStatus: proposal.expectedCampaignStatus,
+      expectedCurrentCommitSha: proposal.expectedCurrentCommitSha ?? null, payload: structuredClone(proposal.payload),
+    });
     return this.issueApproval({ approval, idempotencyKey: record.idempotencyKey });
   }
 
@@ -266,15 +278,19 @@ export class FakeCampaignStore implements CampaignStore {
     if (externalActionDigest(record.payload) !== record.actionDigest) throw new Error("External action payload digest does not match claim");
     const approvalIndex = snapshot.approvals.findIndex(({ id }) => id === record.approvalId);
     const approval = snapshot.approvals[approvalIndex];
-    if (approval === undefined || approval.campaignId !== campaignId || approval.action !== record.payload.action || approval.actionDigest !== record.actionDigest) throw new Error("Approval does not match this external action");
-    if (!isApprovalActionAllowed(approval.action, snapshot.campaign.status)) throw new Error("Campaign state does not allow this approval action");
+    if (approval === undefined || approval.campaignId !== campaignId || approval.proposalId === undefined || approval.payload === undefined ||
+      approval.expectedCampaignVersion !== snapshot.campaign.version || approval.expectedCampaignStatus !== snapshot.campaign.status ||
+      approval.expectedCurrentCommitSha !== (currentCommitSha ?? null) || approval.actionDigest !== record.actionDigest ||
+      canonicalExternalActionJson(approval.payload as import("../../src/application/external-action.js").ExternalActionPayload) !== canonicalExternalActionJson(record.payload)) throw new Error("External action does not match the approved proposal authority");
+    validateExternalActionPayload(approval.payload as import("../../src/application/external-action.js").ExternalActionPayload);
+    if (!isApprovalActionAllowed(approval.action, approval.expectedCampaignStatus)) throw new Error("Campaign state does not allow this approval action");
     const consumed = consumeDomainApproval(approval, record.actionDigest, record.consumedAt);
     const claim: ExternalActionClaim = {
       id: record.claimId,
       campaignId,
       approvalId: record.approvalId,
       actionDigest: record.actionDigest,
-      payload: structuredClone(record.payload),
+      payload: structuredClone(approval.payload as import("../../src/application/external-action.js").ExternalActionPayload),
       ...(currentCommitSha === undefined ? {} : { currentCommitSha }),
       claimedCampaignVersion: record.expectedVersion,
       claimedCampaignStatus: record.expectedStatus,
@@ -284,7 +300,7 @@ export class FakeCampaignStore implements CampaignStore {
     };
     snapshot.approvals[approvalIndex] = consumed;
     snapshot.externalActionClaims.push(claim);
-    snapshot.events.push(structuredClone(record.attemptedEvent));
+    this.#pushEvent(snapshot, record.attemptedEvent);
     this.#eventIds.add(record.attemptedEvent.id);
     return structuredClone(claim);
   }
@@ -307,7 +323,7 @@ export class FakeCampaignStore implements CampaignStore {
       snapshot.externalReferences.push({ kind: "commit", value: record.newCommitSha });
       snapshot.campaign = { ...snapshot.campaign, version: resultingVersion };
     }
-    snapshot.events.push(structuredClone(record.completedEvent));
+    this.#pushEvent(snapshot, record.completedEvent);
     this.#eventIds.add(record.completedEvent.id);
     Object.assign(claim, { status: "completed", closedAt: record.completedAt });
     return resultingVersion;
@@ -322,7 +338,7 @@ export class FakeCampaignStore implements CampaignStore {
       this.failNextEvent = false;
       throw new Error("Campaign event persistence failed");
     }
-    snapshot.events.push(structuredClone(record.event));
+    this.#pushEvent(snapshot, record.event);
     this.#eventIds.add(record.event.id);
     Object.assign(claim, { status: "outcome_unknown" });
   }
@@ -345,7 +361,7 @@ export class FakeCampaignStore implements CampaignStore {
       this.failNextEvent = false;
       throw new Error("Campaign event persistence failed");
     }
-    snapshot.events.push(structuredClone(record.event));
+    this.#pushEvent(snapshot, record.event);
     this.#eventIds.add(record.event.id);
     Object.assign(claim, { status: "outcome_unknown" });
   }
@@ -368,7 +384,7 @@ export class FakeCampaignStore implements CampaignStore {
       snapshot.externalReferences.push({ kind: "commit", value: record.observedCanonicalHead });
       snapshot.campaign = { ...snapshot.campaign, version: resultingVersion };
     }
-    snapshot.events.push(structuredClone(record.event));
+    this.#pushEvent(snapshot, record.event);
     this.#eventIds.add(record.event.id);
     Object.assign(claim, {
       status: "reconciled",
@@ -471,7 +487,7 @@ export class FakeCampaignStore implements CampaignStore {
       snapshot.operationResults.push({ ...structuredClone(result), eventId: record.event.id, resultingCampaignVersion: resultingVersion, childSessionId: record.childSessionId });
     } else if (record.operationResult !== undefined) throw new Error("Typed operation authority requires a completed child event");
     snapshot.externalReferences = nextReferences;
-    snapshot.events.push(structuredClone(record.event));
+    this.#pushEvent(snapshot, record.event);
     this.#eventIds.add(record.event.id);
     if (resultingVersion !== record.expectedVersion) snapshot.campaign = { ...snapshot.campaign, version: resultingVersion };
     return resultingVersion;
@@ -545,6 +561,11 @@ export class FakeCampaignStore implements CampaignStore {
     if (this.#eventIds.has(eventId)) {
       throw new Error(`Campaign event ${eventId} already exists`);
     }
+  }
+
+  #pushEvent(snapshot: MutableSnapshot, event: CampaignEvent): void {
+    const sequence = (snapshot.events.at(-1)?.sequence ?? 0) + 1;
+    snapshot.events.push({ ...structuredClone(event), sequence });
   }
 }
 

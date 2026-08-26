@@ -5,8 +5,14 @@ import type { ApprovalActionSummary, ApprovalConfirmation, ApprovalProposal } fr
 interface ChangeBriefProps { readonly proposal: ApprovalProposal; readonly onApprove: (confirmation: ApprovalConfirmation) => void; readonly submitting?: boolean; readonly approved?: boolean; }
 
 export function ChangeBrief({ proposal, onApprove, submitting = false, approved = false }: ChangeBriefProps) {
-  const [reviewedDigest, setReviewedDigest] = useState<string>();
-  const reviewed = reviewedDigest === proposal.actionDigest;
+  const authority = `${proposal.proposalId}:${proposal.actionDigest}:${String(proposal.expectedCampaignVersion)}`;
+  const [reviewedAuthority, setReviewedAuthority] = useState<string>();
+  const [observedAuthority, setObservedAuthority] = useState(authority);
+  if (observedAuthority !== authority) {
+    setObservedAuthority(authority);
+    setReviewedAuthority(undefined);
+  }
+  const reviewed = reviewedAuthority === authority;
   const { action, brief } = proposal;
   return <section aria-labelledby="change-brief-heading" className="campaign-panel change-brief">
     <div className="panel-heading"><div><p className="eyebrow">Human approval boundary</p><h2 id="change-brief-heading">Exact external action</h2></div><span className="status-pill">{actionName(action.action)}</span></div>
@@ -22,7 +28,7 @@ export function ChangeBrief({ proposal, onApprove, submitting = false, approved 
       <Fact label="Qodo status" value={brief.qodoStatus} />
       {"branch" in action ? <Fact label="Branch" value={action.branch} /> : null}
       {"commitSha" in action ? <Fact label="Commit" value={action.commitSha} mono /> : null}
-      {action.action === "push_branch" ? <Fact label="Target commit" value={action.targetCommitSha} mono /> : null}
+      {action.action === "push_branch" ? <><Fact label="Source commit" value={action.sourceCommitSha} mono /><Fact label="Target commit" value={action.targetCommitSha} mono /></> : null}
       {action.action === "create_pr" ? <><Fact label="Base branch" value={action.baseBranch} /><Fact label="Pull request title" value={action.title} /><Fact label="Pull request body" value={action.body} /></> : null}
       {action.action === "update_pr" ? <><Fact label="Pull request" value={action.pullRequest} /><Fact label="Updated body" value={action.body} /></> : null}
       {action.action === "post_issue_comment" ? <Fact label="Issue comment" value={action.body} /> : null}
@@ -30,7 +36,7 @@ export function ChangeBrief({ proposal, onApprove, submitting = false, approved 
       <Fact label="AI disclosure" value={brief.aiDisclosure} />
       <Fact label="Action digest" value={proposal.actionDigest} mono />
     </dl>
-    <label className="approval-confirmation"><input checked={reviewed} disabled={submitting || approved} onChange={(event) => { setReviewedDigest(event.target.checked ? proposal.actionDigest : undefined); }} type="checkbox" />I reviewed every field in this exact payload.</label>
+    <label className="approval-confirmation"><input checked={reviewed} disabled={submitting || approved} onChange={(event) => { setReviewedAuthority(event.target.checked ? authority : undefined); }} type="checkbox" />I reviewed every field in this exact payload.</label>
     <button className="primary-action approval-action" disabled={!reviewed || submitting || approved} onClick={() => { onApprove({ proposalId: proposal.proposalId, actionDigest: proposal.actionDigest, expectedCampaignVersion: proposal.expectedCampaignVersion }); }} type="button">{approved ? "Scoped proposal approved" : submitting ? "Issuing scoped approval…" : approvalButton(action.action)}</button>
   </section>;
 }

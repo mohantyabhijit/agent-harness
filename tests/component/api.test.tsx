@@ -22,12 +22,13 @@ const realCampaignResponse = {
 const realCampaignSnapshot: CampaignSnapshot = {
   ...realCampaignResponse,
   evidence: [],
-  events: [{ id: "created", eventType: "campaign_created", occurredAt: "2026-08-26T00:00:00Z", facts: {} }],
+  events: [{ id: "created", eventType: "campaign_created", occurredAt: "2026-08-26T00:00:00Z", sequence: 1, facts: {} }],
   approvals: [],
   qodoFindings: [],
   externalReferences: [],
   externalActionClaims: [],
   approvalProposal: null,
+  qualityEscalationReason: null,
 };
 const canonicalEvidence = {
   id: "guide",

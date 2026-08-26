@@ -18,6 +18,12 @@ export interface Approval {
   readonly issuedAt: string;
   readonly expiresAt?: string;
   readonly consumedAt?: string;
+  /** Durable server-owned proposal authority. Absent only on legacy/non-proposal records. */
+  readonly proposalId?: string;
+  readonly expectedCampaignVersion?: number;
+  readonly expectedCampaignStatus?: CampaignStatus;
+  readonly expectedCurrentCommitSha?: string | null;
+  readonly payload?: unknown;
 }
 
 export const allowedCampaignStatusesForApprovalAction: Readonly<

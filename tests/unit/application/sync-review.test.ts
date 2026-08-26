@@ -259,6 +259,7 @@ describe("SyncReview", () => {
       action: "update_pr",
       actionDigest: externalActionDigest(payload),
       issuedAt: "2026-08-26T00:00:00Z",
+      expiresAt: "2026-08-26T00:02:00Z",
     }));
     let release!: () => void;
     let entered!: () => void;
@@ -284,7 +285,9 @@ describe("SyncReview", () => {
 
     release();
     await expect(repairing).resolves.toMatchObject({ status: "repair", version: 3 });
-    await expect(runner.executeApprovedExternalAction("campaign-1", { approvalId: "approval-update", payload }, callback)).resolves.toBeUndefined();
+    await expect(runner.executeApprovedExternalAction("campaign-1", { approvalId: "approval-update", payload }, callback)).rejects.toThrow(/approved proposal|approval/i);
+    await issueUpdateProposal(store, "approval-update-fresh", payload, 3);
+    await expect(runner.executeApprovedExternalAction("campaign-1", { approvalId: "approval-update-fresh", payload }, callback)).resolves.toBeUndefined();
     expect(callback).toHaveBeenCalledOnce();
   });
 
@@ -303,7 +306,7 @@ describe("SyncReview", () => {
       commitSha: nextCommit,
       body: "Publish reviewed repair",
     };
-    await store.recordApproval(issueApproval({ id: "approval-update", campaignId: "campaign-1", action: "update_pr", actionDigest: externalActionDigest(payload), issuedAt: "2026-08-26T00:00:00Z" }));
+    await issueUpdateProposal(store, "approval-update", payload, repairing.version);
     let externalEvent = 0;
     const runner = new RunCampaign(store, harness, { now: () => "2026-08-26T00:03:00Z" }, { next: () => `external-event-${String(++externalEvent)}` });
     await runner.executeApprovedExternalAction("campaign-1", { approvalId: "approval-update", payload }, async () => undefined);
@@ -335,6 +338,16 @@ async function seedReview(store: FakeCampaignStore, value: ReturnType<typeof cam
   store.seed(value);
   store.seedExternalReference(value.id, { kind: "commit", value: commitSha });
   store.seedExternalReference(value.id, { kind: "pull_request", value: "https://github.com/owner/repo/pull/7" });
+}
+
+async function issueUpdateProposal(store: FakeCampaignStore, approvalId: string, payload: Extract<import("../../../src/application/external-action.js").ExternalActionPayload, { action: "update_pr" }>, version: number): Promise<void> {
+  const proposalId = `proposal-${approvalId}`;
+  const actionDigest = externalActionDigest(payload);
+  await store.appendEvent("campaign-1", { id: proposalId, eventType: "external_action_proposed", occurredAt: "2026-08-26T00:02:30Z", payload: {
+    proposalId, payload, actionDigest, expectedCampaignVersion: version, expectedCampaignStatus: "repair", expectedCurrentCommitSha: payload.commitSha,
+    brief: { policy: "Policy", approach: "Approach", files: ["src/a.ts"], risks: ["Risk"], tests: ["npm test"], safetyResult: "Passed", qodoStatus: "Review pending", aiDisclosure: "AI-assisted" },
+  } });
+  await store.issueApprovalForProposal({ campaignId: "campaign-1", proposalId, actionDigest, expectedVersion: version, approvalId, issuedAt: "2026-08-26T00:02:30Z", expiresAt: "2026-08-26T01:02:30Z", idempotencyKey: `key-${approvalId}` });
 }
 
 function fixture(): { syncReview: SyncReview; store: FakeCampaignStore; harness: FakeHarness } {

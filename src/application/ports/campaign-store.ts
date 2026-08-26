@@ -9,6 +9,7 @@ export interface CampaignEvent {
   readonly eventType: string;
   readonly payload: unknown;
   readonly occurredAt: string;
+  readonly sequence?: number;
 }
 
 export interface ExternalReference {

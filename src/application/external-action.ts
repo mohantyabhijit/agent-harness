@@ -18,16 +18,16 @@ export function externalActionDigest(payload: ExternalActionPayload): string {
 }
 
 export function validateExternalActionPayload(payload: ExternalActionPayload): void {
-  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(payload.repository) || !Number.isSafeInteger(payload.issueNumber) || payload.issueNumber < 1) throw new Error("Invalid external action payload");
-  const nonempty = (value: string): boolean => typeof value === "string" && value.trim().length > 0 && !hasControlCharacter(value);
-  const branch = (value: string): boolean => nonempty(value) && /^(?![./])(?!.*(?:\.\.|\/\/|@\{|\\))[A-Za-z0-9._/-]+(?<![./])$/u.test(value);
+  if (!/^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/u.test(payload.repository) || !Number.isSafeInteger(payload.issueNumber) || payload.issueNumber < 1) throw new Error("Invalid external action payload");
+  const nonempty = (value: string, maximum = 20_000): boolean => typeof value === "string" && value.trim().length > 0 && value.length <= maximum && !hasControlCharacter(value);
+  const branch = (value: string): boolean => nonempty(value, 255) && /^(?![./])(?!.*(?:\.\.|\/\/|@\{|\\))[A-Za-z0-9._/-]+(?<![./])$/u.test(value);
   const sha = (value: string): boolean => /^[0-9a-f]{40}$/u.test(value);
   switch (payload.action) {
     case "post_issue_comment": assertKeys(payload, ["action", "repository", "issueNumber", "body"]); if (!nonempty(payload.body)) throw new Error("Invalid external action payload"); break;
     case "request_assignment": assertKeys(payload, ["action", "repository", "issueNumber", "assignee"]); if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/u.test(payload.assignee)) throw new Error("Invalid external action payload"); break;
     case "push_branch": assertKeys(payload, ["action", "repository", "issueNumber", "branch", "commitSha"]); if (!branch(payload.branch) || !sha(payload.commitSha)) throw new Error("Invalid external action payload"); break;
-    case "create_pr": assertKeys(payload, ["action", "repository", "issueNumber", "branch", "baseBranch", "commitSha", "title", "body"]); if (!branch(payload.branch) || !branch(payload.baseBranch) || !sha(payload.commitSha) || !nonempty(payload.title) || !nonempty(payload.body)) throw new Error("Invalid external action payload"); break;
-    case "update_pr": assertKeys(payload, ["action", "repository", "issueNumber", "pullRequest", "branch", "commitSha", "body"]); if (!branch(payload.branch) || !sha(payload.commitSha) || !nonempty(payload.body) || !isPullRequest(payload.pullRequest, payload.repository)) throw new Error("Invalid external action payload"); break;
+    case "create_pr": assertKeys(payload, ["action", "repository", "issueNumber", "branch", "baseBranch", "commitSha", "title", "body"]); if (!branch(payload.branch) || !branch(payload.baseBranch) || !sha(payload.commitSha) || !nonempty(payload.title, 256) || !nonempty(payload.body)) throw new Error("Invalid external action payload"); break;
+    case "update_pr": assertKeys(payload, ["action", "repository", "issueNumber", "pullRequest", "branch", "commitSha", "body"]); if (!branch(payload.branch) || !sha(payload.commitSha) || !nonempty(payload.body) || payload.pullRequest.length > 2_048 || !isPullRequest(payload.pullRequest, payload.repository)) throw new Error("Invalid external action payload"); break;
     default: throw new Error("Invalid external action payload");
   }
 }

@@ -36,7 +36,12 @@ const schema = `
     issued_at TEXT NOT NULL,
     expires_at TEXT,
     consumed_at TEXT,
-    active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1))
+    active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+    proposal_id TEXT,
+    expected_campaign_version INTEGER,
+    expected_campaign_status TEXT,
+    expected_current_commit_sha TEXT,
+    payload_json TEXT
   );
 
   CREATE TABLE IF NOT EXISTS approval_issuance_keys (
@@ -51,7 +56,8 @@ const schema = `
     campaign_id TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
     event_type TEXT NOT NULL,
     payload_json TEXT NOT NULL,
-    occurred_at TEXT NOT NULL
+    occurred_at TEXT NOT NULL,
+    sequence INTEGER
   );
 
   CREATE TABLE IF NOT EXISTS qodo_findings (
@@ -148,11 +154,35 @@ export function migrateCampaignStore(database: Database.Database): void {
     if (!approvalColumns.some(({ name }) => name === "active")) {
       database.exec("ALTER TABLE approvals ADD COLUMN active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)); UPDATE approvals SET active = 0 WHERE status <> 'approved';");
     }
+    for (const [name, declaration] of [
+      ["proposal_id", "TEXT"],
+      ["expected_campaign_version", "INTEGER"],
+      ["expected_campaign_status", "TEXT"],
+      ["expected_current_commit_sha", "TEXT"],
+      ["payload_json", "TEXT"],
+    ] as const) {
+      if (!approvalColumns.some((column) => column.name === name)) database.exec(`ALTER TABLE approvals ADD COLUMN ${name} ${declaration}`);
+    }
+    const eventColumns = database.prepare("PRAGMA table_info(campaign_events)").all() as { name: string }[];
+    if (!eventColumns.some(({ name }) => name === "sequence")) database.exec("ALTER TABLE campaign_events ADD COLUMN sequence INTEGER");
+    database.exec(`
+      WITH ranked AS (
+        SELECT rowid, ROW_NUMBER() OVER (PARTITION BY campaign_id ORDER BY occurred_at, rowid) AS assigned
+        FROM campaign_events
+      )
+      UPDATE campaign_events SET sequence = (SELECT assigned FROM ranked WHERE ranked.rowid = campaign_events.rowid)
+      WHERE sequence IS NULL;
+      DROP INDEX IF EXISTS campaign_events_order_idx;
+      CREATE UNIQUE INDEX IF NOT EXISTS campaign_events_sequence_idx ON campaign_events(campaign_id, sequence);
+      CREATE INDEX campaign_events_order_idx ON campaign_events(campaign_id, sequence);
+    `);
     const duplicateLiveApproval = database.prepare(`
       SELECT 1 FROM approvals WHERE status = 'approved' AND active = 1
       GROUP BY campaign_id, action_digest HAVING COUNT(*) > 1 LIMIT 1
     `).get();
     if (duplicateLiveApproval !== undefined) throw new CampaignMigrationConflict();
+    // A legacy approval has no immutable proposal authority and must never authorize a write.
+    database.exec("UPDATE approvals SET active = 0 WHERE status = 'approved' AND (proposal_id IS NULL OR expected_campaign_version IS NULL OR expected_campaign_status IS NULL OR payload_json IS NULL)");
     database.exec(`
       DROP INDEX IF EXISTS approvals_one_approved_digest_idx;
       CREATE UNIQUE INDEX approvals_one_approved_digest_idx

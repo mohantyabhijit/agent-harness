@@ -31,7 +31,7 @@ export interface DurableApprovalProposal {
 }
 
 const proposalSchema = z.object({
-  proposalId: z.string().trim().min(1).max(128),
+  proposalId: z.string().trim().min(1).max(128).regex(/^[A-Za-z0-9._:-]+$/u),
   payload: z.custom<ExternalActionPayload>((value) => { try { validateExternalActionPayload(value as ExternalActionPayload); return true; } catch { return false; } }),
   actionDigest: digest,
   expectedCampaignVersion: z.number().int().positive(),
@@ -45,7 +45,9 @@ const proposalSchema = z.object({
 
 export function currentApprovalProposal(snapshot: CampaignSnapshot): DurableApprovalProposal | null {
   if (snapshot.externalActionClaims.some(({ status }) => status === "active" || status === "outcome_unknown")) return null;
-  const newest = snapshot.events.toReversed().find(({ eventType }) => eventType === "external_action_proposed");
+  const newest = snapshot.events
+    .filter(({ eventType }) => eventType === "external_action_proposed")
+    .toSorted((left, right) => (right.sequence ?? 0) - (left.sequence ?? 0))[0];
   if (newest === undefined) return null;
   const parsed = proposalSchema.safeParse(newest.payload);
   if (!parsed.success || parsed.data.proposalId !== newest.id) return null;
@@ -70,12 +72,12 @@ function singleton(snapshot: CampaignSnapshot, kind: "commit" | "pull_request"):
   return values.length === 1 ? values[0]?.value : undefined;
 }
 
-export function proposalActionSummary(payload: ExternalActionPayload): Readonly<Record<string, unknown>> {
+export function proposalActionSummary(payload: ExternalActionPayload, sourceCommitSha?: string): Readonly<Record<string, unknown>> {
   const common = { action: payload.action, repository: payload.repository, issueNumber: payload.issueNumber };
   switch (payload.action) {
     case "post_issue_comment": return { ...common, body: payload.body };
     case "request_assignment": return { ...common, assignee: payload.assignee };
-    case "push_branch": return { ...common, branch: payload.branch, targetCommitSha: payload.commitSha };
+    case "push_branch": return { ...common, branch: payload.branch, sourceCommitSha, targetCommitSha: payload.commitSha };
     case "create_pr": return { ...common, branch: payload.branch, baseBranch: payload.baseBranch, commitSha: payload.commitSha, title: payload.title, body: payload.body };
     case "update_pr": return { ...common, pullRequest: payload.pullRequest, branch: payload.branch, commitSha: payload.commitSha, body: payload.body };
   }

@@ -239,6 +239,7 @@ describe("RunCampaign", () => {
     await expect(service.executeApprovedExternalAction("campaign-1", approvalRequest(), action))
       .resolves.toBe("pull-request-7");
     expect((await store.get("campaign-1"))?.events.map(({ eventType }) => eventType)).toEqual([
+      "external_action_proposed",
       "external_action_attempted",
       "external_action_completed",
     ]);
@@ -254,6 +255,7 @@ describe("RunCampaign", () => {
     await expect(first).rejects.toEqual(new Error("External action outcome is unknown; reconciliation required"));
     expect(JSON.stringify((await store.get("campaign-1"))?.events)).not.toContain("top-secret");
     expect((await store.get("campaign-1"))?.events.map(({ eventType }) => eventType)).toEqual([
+      "external_action_proposed",
       "external_action_attempted",
       "external_action_outcome_unknown",
     ]);
@@ -287,6 +289,7 @@ describe("RunCampaign", () => {
       service.executeApprovedExternalAction("campaign-1", approvalRequest(), action),
     ).rejects.toEqual(new Error("External action outcome is unknown; reconciliation required"));
     expect((await store.get("campaign-1"))?.events.map(({ eventType }) => eventType)).toEqual([
+      "external_action_proposed",
       "external_action_attempted",
       "external_action_outcome_unknown",
     ]);
@@ -340,6 +343,21 @@ describe("RunCampaign", () => {
     const action = vi.fn(async () => undefined);
 
     await expect(service.executeApprovedExternalAction("campaign-1", approvalRequest(), action)).rejects.toThrow(/version/i);
+    expect(action).not.toHaveBeenCalled();
+    expect((await store.get("campaign-1"))?.approvals[0]?.status).toBe("approved");
+  });
+
+  it("never reuses an A-to-B approval after the durable head and version advance to C", async () => {
+    const { service, store } = fixture();
+    const push = { action: "push_branch" as const, repository: "owner/repo", issueNumber: 42, branch: "openquest/fix-42", commitSha: "b".repeat(40) };
+    store.seed(campaign({ status: "contribution_approval", version: 7 }));
+    store.seedExternalReference("campaign-1", { kind: "commit", value: commitSha });
+    await issueProposalApproval(store, { id: "approval-push-stale", payload: push, version: 7, status: "contribution_approval", currentHead: commitSha });
+    await store.replaceCurrentCommit("campaign-1", "c".repeat(40), 7, "contribution_approval");
+    const action = vi.fn(async () => undefined);
+
+    await expect(service.executeApprovedExternalAction("campaign-1", { approvalId: "approval-push-stale", payload: push }, action)).rejects.toThrow(/approved proposal|version|head/i);
+
     expect(action).not.toHaveBeenCalled();
     expect((await store.get("campaign-1"))?.approvals[0]?.status).toBe("approved");
   });
@@ -398,7 +416,7 @@ describe("RunCampaign", () => {
     const { service, store } = fixture();
     store.seed(campaign({ status: "contribution_approval", version: 7 }));
     store.seedExternalReference("campaign-1", { kind: "commit", value: commitSha });
-    await store.recordApproval(issueApproval({ id: "approval-push", campaignId: "campaign-1", action: "push_branch", actionDigest: externalActionDigest(pushPayload), issuedAt: "2026-08-26T00:00:00Z" }));
+    await issueProposalApproval(store, { id: "approval-push", payload: pushPayload, version: 7, status: "contribution_approval", currentHead: commitSha });
 
     await expect(service.executeApprovedExternalAction("campaign-1", { approvalId: "approval-push", payload: pushPayload }, async () => "pushed")).resolves.toBe("pushed");
     const completed = await store.get("campaign-1");
@@ -586,7 +604,7 @@ describe("RunCampaign", () => {
     );
     store.seed(campaign({ status: "contribution_approval", version: 7 }));
     store.seedExternalReference("campaign-1", { kind: "commit", value: commitSha });
-    await store.recordApproval(issueApproval({ id: "approval-1", campaignId: "campaign-1", action: "create_pr", actionDigest: externalActionDigest(externalPayload), issuedAt: "2026-08-26T00:00:00Z" }));
+    await issueProposalApproval(store, { id: "approval-1", payload: externalPayload, version: 7, status: "contribution_approval", currentHead: commitSha });
     let release!: () => void;
     let entered!: () => void;
     const paused = new Promise<void>((resolve) => { entered = resolve; });
@@ -659,14 +677,19 @@ async function approvedFixture() {
   const result = fixture();
   result.store.seed(campaign({ status: "contribution_approval", version: 7 }));
   result.store.seedExternalReference("campaign-1", { kind: "commit", value: commitSha });
-  await result.store.recordApproval(issueApproval({
-    id: "approval-1",
-    campaignId: "campaign-1",
-    action: "create_pr",
-    actionDigest: externalActionDigest(externalPayload),
-    issuedAt: "2026-08-26T00:00:00Z",
-  }));
+  await issueProposalApproval(result.store, { id: "approval-1", payload: externalPayload, version: 7, status: "contribution_approval", currentHead: commitSha });
   return result;
+}
+
+async function issueProposalApproval(store: FakeCampaignStore, input: { id: string; payload: import("../../../src/application/external-action.js").ExternalActionPayload; version: number; status: "contribution_approval" | "repair"; currentHead?: string }): Promise<void> {
+  const proposalId = `proposal-${input.id}`;
+  const actionDigest = externalActionDigest(input.payload);
+  await store.appendEvent("campaign-1", { id: proposalId, eventType: "external_action_proposed", occurredAt: "2026-08-26T00:00:00Z", payload: {
+    proposalId, payload: input.payload, actionDigest, expectedCampaignVersion: input.version, expectedCampaignStatus: input.status,
+    ...(input.currentHead === undefined ? {} : { expectedCurrentCommitSha: input.currentHead }),
+    brief: { policy: "Policy", approach: "Approach", files: ["src/a.ts"], risks: ["Risk"], tests: ["npm test"], safetyResult: "Passed", qodoStatus: "Clear", aiDisclosure: "AI-assisted" },
+  } });
+  await store.issueApprovalForProposal({ campaignId: "campaign-1", proposalId, actionDigest, expectedVersion: input.version, approvalId: input.id, issuedAt: "2026-08-26T00:00:00Z", expiresAt: "2026-08-26T01:00:00Z", idempotencyKey: `key-${input.id}` });
 }
 
 function fixture(): { service: RunCampaign; store: FakeCampaignStore; harness: FakeHarness } {
