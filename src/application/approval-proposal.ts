@@ -44,10 +44,11 @@ const proposalSchema = z.object({
 }).strict();
 
 export function currentApprovalProposal(snapshot: CampaignSnapshot): DurableApprovalProposal | null {
+  if (!hasValidEventSequence(snapshot)) return null;
   if (snapshot.externalActionClaims.some(({ status }) => status === "active" || status === "outcome_unknown")) return null;
   const newest = snapshot.events
     .filter(({ eventType }) => eventType === "external_action_proposed")
-    .toSorted((left, right) => (right.sequence ?? 0) - (left.sequence ?? 0))[0];
+    .toSorted((left, right) => right.sequence - left.sequence)[0];
   if (newest === undefined) return null;
   const parsed = proposalSchema.safeParse(newest.payload);
   if (!parsed.success || parsed.data.proposalId !== newest.id) return null;
@@ -60,11 +61,21 @@ export function currentApprovalProposal(snapshot: CampaignSnapshot): DurableAppr
     proposal.expectedCampaignStatus !== snapshot.campaign.status ||
     payload.repository !== snapshot.campaign.repository || payload.issueNumber !== snapshot.campaign.issueNumber ||
     !isApprovalActionAllowed(payload.action, snapshot.campaign.status) ||
-    proposal.expectedCurrentCommitSha !== currentCommit
+    proposal.expectedCurrentCommitSha !== currentCommit ||
+    (payload.action === "push_branch" && currentCommit === undefined)
   ) return null;
   if ((payload.action === "create_pr" || payload.action === "update_pr") && payload.commitSha !== currentCommit) return null;
   if (payload.action === "update_pr" && singleton(snapshot, "pull_request") !== payload.pullRequest) return null;
   return proposal;
+}
+
+function hasValidEventSequence(snapshot: CampaignSnapshot): boolean {
+  const seen = new Set<number>();
+  for (const event of snapshot.events) {
+    if (!Number.isSafeInteger(event.sequence) || event.sequence < 1 || seen.has(event.sequence)) return false;
+    seen.add(event.sequence);
+  }
+  return true;
 }
 
 function singleton(snapshot: CampaignSnapshot, kind: "commit" | "pull_request"): string | undefined {

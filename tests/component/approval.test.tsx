@@ -103,7 +103,7 @@ describe("Campaign approval", () => {
     const pending = new Promise<void>((resolve) => { release = resolve; });
     const issueApproval = vi.fn<OpenQuestApi["issueApproval"]>(async () => {
       await pending;
-      return { id: "approval-1", action: "create_pr", actionDigest: proposal.actionDigest, status: "approved", issuedAt: "2026-08-26T00:10:00Z" };
+      return { id: "approval-1", action: "create_pr", actionDigest: proposal.actionDigest, status: "approved", issuedAt: "2026-08-26T00:10:00Z", proposalId: proposal.proposalId, expectedCampaignVersion: 7, isActive: true };
     });
     const getCampaign = vi.fn(async () => snapshot);
     const api = { getCampaign, issueApproval };
@@ -144,7 +144,7 @@ describe("Campaign approval", () => {
 
   it("renders the refreshed durable approval after issuance", async () => {
     let reads = 0;
-    const approved = { id: "approval-1", action: "create_pr" as const, actionDigest: proposal.actionDigest, status: "approved" as const, issuedAt: "2026-08-26T00:10:00Z", expiresAt: "2099-08-26T00:20:00Z" };
+    const approved = { id: "approval-1", action: "create_pr" as const, actionDigest: proposal.actionDigest, status: "approved" as const, issuedAt: "2026-08-26T00:10:00Z", expiresAt: "2099-08-26T00:20:00Z", proposalId: proposal.proposalId, expectedCampaignVersion: 7, isActive: true };
     const api: Pick<OpenQuestApi, "getCampaign" | "issueApproval"> = {
       getCampaign: async () => ({ ...snapshot, approvals: reads++ === 0 ? [] : [approved] }),
       issueApproval: async () => approved,
@@ -160,7 +160,7 @@ describe("Campaign approval", () => {
   it("refreshes campaign approval availability when the server TTL expires", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     vi.setSystemTime(new Date("2026-08-26T00:00:00Z"));
-    const expiring = { id: "approval-expiring", action: "create_pr" as const, actionDigest: proposal.actionDigest, status: "approved" as const, issuedAt: "2026-08-25T23:59:00Z", expiresAt: "2026-08-26T00:00:01Z" };
+    const expiring = { id: "approval-expiring", action: "create_pr" as const, actionDigest: proposal.actionDigest, status: "approved" as const, issuedAt: "2026-08-25T23:59:00Z", expiresAt: "2026-08-26T00:00:01Z", proposalId: proposal.proposalId, expectedCampaignVersion: 7, isActive: true };
     let reads = 0;
     const getCampaign = vi.fn(async () => ({ ...snapshot, approvals: reads++ === 0 ? [expiring] : [] }));
     render(<CampaignPage api={{ getCampaign, issueApproval: async () => expiring }} campaignId="campaign-1" />);
@@ -171,6 +171,29 @@ describe("Campaign approval", () => {
 
     await waitFor(() => { expect(getCampaign).toHaveBeenCalledTimes(2); });
     expect(screen.getByRole("button", { name: /approve scoped pull request/i })).toBeDisabled();
+    vi.useRealTimers();
+  });
+
+  it("pauses an expiry refresh during approval and reconciles without invalidating the successful POST", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date("2026-08-26T00:00:00Z"));
+    let release!: (value: Awaited<ReturnType<OpenQuestApi["issueApproval"]>>) => void;
+    const pending = new Promise<Awaited<ReturnType<OpenQuestApi["issueApproval"]>>>((resolve) => { release = resolve; });
+    const old = { id: "approval-old", action: "create_pr" as const, actionDigest: `sha256:${"c".repeat(64)}`, status: "approved" as const, issuedAt: "2026-08-25T23:59:00Z", expiresAt: "2026-08-26T00:00:01Z", proposalId: "proposal-old", expectedCampaignVersion: 6, isActive: true };
+    const fresh = { ...old, id: "approval-fresh", actionDigest: proposal.actionDigest, proposalId: proposal.proposalId, expectedCampaignVersion: 7, issuedAt: "2026-08-26T00:00:01Z", expiresAt: "2026-08-26T00:10:01Z" };
+    let reads = 0;
+    const getCampaign = vi.fn(async () => ({ ...snapshot, approvals: reads++ === 0 ? [old] : [fresh] }));
+    const issueApproval = vi.fn(async () => pending);
+    render(<CampaignPage api={{ getCampaign, issueApproval }} campaignId="campaign-1" createIdempotencyKey={() => "approval-overlap"} />);
+    await screen.findByText(payload.title);
+    fireEvent.click(screen.getByRole("checkbox", { name: /reviewed every field/i }));
+    fireEvent.click(screen.getByRole("button", { name: /approve scoped pull request/i }));
+
+    await vi.advanceTimersByTimeAsync(1_001);
+    expect(getCampaign).toHaveBeenCalledTimes(1);
+    release(fresh);
+    await waitFor(() => { expect(getCampaign.mock.calls.length).toBeGreaterThanOrEqual(2); });
+    expect(await screen.findByRole("button", { name: /scoped proposal approved/i })).toBeDisabled();
     vi.useRealTimers();
   });
 });

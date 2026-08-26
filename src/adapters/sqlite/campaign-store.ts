@@ -7,6 +7,7 @@ import {
   type ApprovalIssuanceRecord,
   type ProposalApprovalIssuanceRecord,
   type CampaignEvent,
+  type CampaignEventInput,
   type ChildResultRecord,
   type CampaignSnapshot,
   type CampaignStore,
@@ -64,7 +65,7 @@ interface EventRow {
   event_type: string;
   payload_json: string;
   occurred_at: string;
-  sequence: number;
+  sequence: number | null;
 }
 
 interface ApprovalRow {
@@ -81,6 +82,8 @@ interface ApprovalRow {
   expected_campaign_status: CampaignStatus | null;
   expected_current_commit_sha: string | null;
   payload_json: string | null;
+  active: 0 | 1;
+  trusted_proposal_authority: 0 | 1;
 }
 
 interface QodoFindingRow {
@@ -122,7 +125,7 @@ export class SqliteCampaignStore implements CampaignStore {
     migrateCampaignStore(database);
   }
 
-  async create(campaign: Campaign, initialEvent?: CampaignEvent): Promise<void> {
+  async create(campaign: Campaign, initialEvent?: CampaignEventInput): Promise<void> {
     assertCampaignQodoIteration(campaign.qodoIteration);
     if (!Number.isInteger(campaign.version) || campaign.version < 1) {
       throw new CampaignVersionConflict(campaign.id, 0);
@@ -256,7 +259,7 @@ export class SqliteCampaignStore implements CampaignStore {
     })();
   }
 
-  async appendEvent(campaignId: string, event: CampaignEvent): Promise<void> {
+  async appendEvent(campaignId: string, event: CampaignEventInput): Promise<void> {
     if (reservedCampaignEventTypes.has(event.eventType)) throw new Error("Authoritative campaign event requires its guarded store operation");
     const occurredAt = normalizeTimestamp(event.occurredAt, "event occurredAt");
     this.#database.transaction(() => { this.#insertEvent(campaignId, event, occurredAt); }).immediate();
@@ -264,7 +267,7 @@ export class SqliteCampaignStore implements CampaignStore {
 
   async recordApproval(approval: Approval): Promise<void> {
     this.#database.transaction(() => {
-      this.#insertApproval(approval);
+      this.#insertApproval({ ...approval, active: false, trustedProposalAuthority: false });
     })();
   }
 
@@ -284,9 +287,10 @@ export class SqliteCampaignStore implements CampaignStore {
       }
       const existing = this.#database.prepare("SELECT id FROM approvals WHERE campaign_id = ? AND action_digest = ? AND status = 'approved' AND active = 1").get(record.approval.campaignId, record.approval.actionDigest) as { id: string } | undefined;
       if (existing !== undefined) throw new ApprovalIssuanceConflict();
-      this.#insertApproval(record.approval);
+      const inactive = { ...record.approval, active: false, trustedProposalAuthority: false } as const;
+      this.#insertApproval(inactive);
       this.#database.prepare("INSERT INTO approval_issuance_keys (campaign_id, idempotency_key, approval_id) VALUES (?, ?, ?)").run(record.approval.campaignId, key, record.approval.id);
-      return record.approval;
+      return inactive;
     });
     try { return issue.immediate(); } catch (error) {
       if (error instanceof ApprovalIssuanceConflict) throw error;
@@ -317,7 +321,11 @@ export class SqliteCampaignStore implements CampaignStore {
         issuedAt: record.issuedAt, expiresAt: record.expiresAt, proposalId: proposal.proposalId,
         expectedCampaignVersion: proposal.expectedCampaignVersion, expectedCampaignStatus: proposal.expectedCampaignStatus,
         expectedCurrentCommitSha: proposal.expectedCurrentCommitSha ?? null, payload: structuredClone(proposal.payload),
+        trustedProposalAuthority: true, active: true,
       });
+      this.#database.prepare(`UPDATE approvals SET active = 0 WHERE campaign_id = ? AND status = 'approved' AND active = 1 AND
+        (proposal_id IS NULL OR proposal_id <> ? OR expected_campaign_version <> ? OR trusted_proposal_authority <> 1)`)
+        .run(record.campaignId, proposal.proposalId, proposal.expectedCampaignVersion);
       const existing = this.#database.prepare("SELECT id FROM approvals WHERE campaign_id = ? AND action_digest = ? AND status = 'approved' AND active = 1").get(record.campaignId, approval.actionDigest) as { id: string } | undefined;
       if (existing !== undefined) throw new ApprovalIssuanceConflict();
       this.#insertApproval(approval);
@@ -439,10 +447,11 @@ export class SqliteCampaignStore implements CampaignStore {
       this.#assertNoBlockingExternalAction(campaignId);
       const currentCommitSha = this.#currentCommit(campaignId);
       if (currentCommitSha !== record.expectedCurrentCommitSha) throw new CampaignVersionConflict(campaignId, record.expectedVersion);
+      if (record.payload.action === "push_branch" && currentCommitSha === undefined) throw new Error("Branch push requires a current campaign head");
       if ((record.payload.action === "create_pr" || record.payload.action === "update_pr") && record.payload.commitSha !== currentCommitSha) throw new Error("External action commit does not match current campaign head");
       if (record.payload.action === "update_pr") this.#assertUpdatePullRequestIdentity(campaignId, record.payload);
 
-      const approvalRow = this.#database.prepare("SELECT * FROM approvals WHERE id = ?").get(record.approvalId) as ApprovalRow | undefined;
+      const approvalRow = this.#database.prepare("SELECT * FROM approvals WHERE id = ? AND active = 1 AND trusted_proposal_authority = 1").get(record.approvalId) as ApprovalRow | undefined;
       const approved = approvalRow === undefined ? undefined : mapApproval(approvalRow);
       if (approved === undefined || approved.campaignId !== campaignId || approved.payload === undefined || approved.proposalId === undefined ||
         approved.expectedCampaignVersion !== record.expectedVersion || approved.expectedCampaignStatus !== record.expectedStatus ||
@@ -719,14 +728,17 @@ export class SqliteCampaignStore implements CampaignStore {
     const payloadJson = approval.payload === undefined ? null : canonicalExternalActionJson(approval.payload as ExternalActionPayload);
     this.#database.prepare(`INSERT INTO approvals (
       id, campaign_id, action, action_digest, status, issued_at, expires_at, consumed_at, active,
-      proposal_id, expected_campaign_version, expected_campaign_status, expected_current_commit_sha, payload_json
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      proposal_id, expected_campaign_version, expected_campaign_status, expected_current_commit_sha, payload_json,
+      trusted_proposal_authority
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(approval.id, approval.campaignId, approval.action, approval.actionDigest, approval.status, issuedAt, expiresAt, consumedAt,
-        approval.status === "approved" ? 1 : 0, approval.proposalId ?? null, approval.expectedCampaignVersion ?? null,
-        approval.expectedCampaignStatus ?? null, approval.expectedCurrentCommitSha ?? null, payloadJson);
+        approval.status === "approved" && approval.active === true && approval.trustedProposalAuthority === true ? 1 : 0,
+        approval.proposalId ?? null, approval.expectedCampaignVersion ?? null,
+        approval.expectedCampaignStatus ?? null, approval.expectedCurrentCommitSha ?? null, payloadJson,
+        approval.trustedProposalAuthority === true ? 1 : 0);
   }
 
-  #insertEvent(campaignId: string, event: CampaignEvent, occurredAt: string): void {
+  #insertEvent(campaignId: string, event: CampaignEventInput, occurredAt: string): void {
     const next = this.#database.prepare("SELECT COALESCE(MAX(sequence), 0) + 1 AS next FROM campaign_events WHERE campaign_id = ?").get(campaignId) as { next: number };
     this.#database.prepare("INSERT INTO campaign_events (id, campaign_id, event_type, payload_json, occurred_at, sequence) VALUES (?, ?, ?, ?, ?, ?)")
       .run(event.id, campaignId, event.eventType, JSON.stringify(event.payload), occurredAt, next.next);
@@ -773,11 +785,13 @@ export class SqliteCampaignStore implements CampaignStore {
     const externalActionClaims = this.#database.prepare(`
       SELECT * FROM external_action_claims WHERE campaign_id = ? ORDER BY attempted_at, id
     `).all(row.id) as ExternalActionClaimRow[];
+    const mappedEvents = events.map(mapEvent);
+    assertValidStoredEventSequence(mappedEvents);
 
     return {
       campaign: mapCampaign(row),
       evidence: evidence.map(mapEvidence),
-      events: events.map(mapEvent),
+      events: mappedEvents,
       approvals: approvals.map(mapApproval),
       qodoFindings: qodoFindings.map(mapQodoFinding),
       externalReferences,
@@ -811,13 +825,22 @@ function mapEvidence(row: EvidenceRow): Evidence {
 }
 
 function mapEvent(row: EventRow): CampaignEvent {
+  if (!Number.isSafeInteger(row.sequence) || (row.sequence ?? 0) < 1) throw new Error(`Invalid sequence for campaign event ${row.id}`);
   let payload: unknown;
   try {
     payload = JSON.parse(row.payload_json) as unknown;
   } catch (error) {
     throw new Error(`Invalid payload JSON for campaign event ${row.id}`, { cause: error });
   }
-  return { id: row.id, eventType: row.event_type, payload, occurredAt: row.occurred_at, sequence: row.sequence };
+  return { id: row.id, eventType: row.event_type, payload, occurredAt: row.occurred_at, sequence: row.sequence as number };
+}
+
+function assertValidStoredEventSequence(events: readonly CampaignEvent[]): void {
+  const seen = new Set<number>();
+  for (const event of events) {
+    if (!Number.isSafeInteger(event.sequence) || event.sequence < 1 || seen.has(event.sequence)) throw new Error("Campaign event sequence is invalid");
+    seen.add(event.sequence);
+  }
 }
 
 function mapApproval(row: ApprovalRow): Approval {
@@ -840,6 +863,8 @@ function mapApproval(row: ApprovalRow): Approval {
     ...(row.expected_campaign_status === null ? {} : { expectedCampaignStatus: row.expected_campaign_status }),
     ...(row.proposal_id === null ? {} : { expectedCurrentCommitSha: row.expected_current_commit_sha }),
     ...(payload === undefined ? {} : { payload }),
+    active: row.active === 1,
+    trustedProposalAuthority: row.trusted_proposal_authority === 1,
   };
 }
 
@@ -906,7 +931,7 @@ function assertExternalActionEventVersion(payload: unknown, expectedVersion: num
   ) throw new Error("External action event is not bound to the campaign version");
 }
 
-function assertStaleRecoveryEvent(event: CampaignEvent, claim: ExternalActionClaim): void {
+function assertStaleRecoveryEvent(event: CampaignEventInput, claim: ExternalActionClaim): void {
   const payload = event.payload;
   const allowedKeys = new Set([
     "claimId", "action", "actionDigest", "claimedCampaignVersion", "resultingCampaignVersion",

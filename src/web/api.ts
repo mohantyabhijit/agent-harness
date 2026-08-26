@@ -16,7 +16,7 @@ export type ApprovalActionSummary =
   | Readonly<{ action: "update_pr"; repository: string; issueNumber: number; pullRequest: string; branch: string; commitSha: string; body: string }>;
 export interface ApprovalProposal { readonly proposalId: string; readonly actionDigest: string; readonly expectedCampaignVersion: number; readonly action: ApprovalActionSummary; readonly brief: ApprovalBrief; }
 export interface ApprovalConfirmation { readonly proposalId: string; readonly actionDigest: string; readonly expectedCampaignVersion: number; }
-export interface PublicApproval { readonly id: string; readonly action: ApprovalAction; readonly actionDigest: string; readonly status: "pending" | "approved" | "rejected" | "consumed"; readonly issuedAt: string; readonly expiresAt?: string; readonly consumedAt?: string; }
+export interface PublicApproval { readonly id: string; readonly action: ApprovalAction; readonly actionDigest: string; readonly status: "pending" | "approved" | "rejected" | "consumed"; readonly issuedAt: string; readonly expiresAt?: string; readonly consumedAt?: string; readonly proposalId?: string; readonly expectedCampaignVersion?: number; readonly isActive: boolean; }
 export interface CampaignSnapshot extends Campaign {
   readonly evidence: readonly { readonly id: string; readonly sourceUrl: string; readonly retrievedAt: string; readonly observation: string; readonly kind: "direct" | "inference" }[];
   readonly events: readonly { readonly id: string; readonly eventType: string; readonly occurredAt: string; readonly sequence: number; readonly facts: Readonly<Record<string, string | number | boolean>> }[];
@@ -44,8 +44,10 @@ const metadata: Readonly<Record<Space, Omit<SpaceOption, "id">>> = {
 };
 const finite = z.number();
 const rate = finite.min(0).max(1);
-const text = z.string().trim().min(1).max(2_000);
-const longText = z.string().trim().min(1).max(20_000);
+const text = z.string().min(1).max(2_000).refine((value) => value.trim().length > 0);
+const longText = z.string().min(1).max(20_000).refine((value) => value.trim().length > 0);
+const actionText = longText.refine((value) => !hasControlCharacter(value));
+const actionTitle = z.string().min(1).max(256).refine((value) => value.trim().length > 0 && !hasControlCharacter(value));
 const identifier = z.string().trim().min(1).max(200).regex(/^[A-Za-z0-9._:-]+$/u);
 const repositoryName = z.string().regex(/^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/u);
 const githubUrl = z.url().max(2_048).refine(github, "github HTTPS URL");
@@ -63,7 +65,7 @@ const branch = z.string().min(1).max(255).regex(/^(?![./])(?!.*(?:\.\.|\/\/|@\{|
 const commitSha = z.string().regex(/^[0-9a-f]{40}$/u);
 const baseAction = { repository: repositoryName, issueNumber: finite.int().positive().max(Number.MAX_SAFE_INTEGER) };
 const approvalActionSummary = z.discriminatedUnion("action", [
-  z.object({ action: z.literal("post_issue_comment"), ...baseAction, body: longText }).strict(), z.object({ action: z.literal("request_assignment"), ...baseAction, assignee: z.string().min(1).max(39).regex(/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/u) }).strict(), z.object({ action: z.literal("push_branch"), ...baseAction, branch, sourceCommitSha: commitSha, targetCommitSha: commitSha }).strict(), z.object({ action: z.literal("create_pr"), ...baseAction, branch, baseBranch: branch, commitSha, title: z.string().trim().min(1).max(256), body: longText }).strict(), z.object({ action: z.literal("update_pr"), ...baseAction, pullRequest: githubUrl, branch, commitSha, body: longText }).strict(),
+  z.object({ action: z.literal("post_issue_comment"), ...baseAction, body: actionText }).strict(), z.object({ action: z.literal("request_assignment"), ...baseAction, assignee: z.string().min(1).max(39).regex(/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/u) }).strict(), z.object({ action: z.literal("push_branch"), ...baseAction, branch, sourceCommitSha: commitSha, targetCommitSha: commitSha }).strict(), z.object({ action: z.literal("create_pr"), ...baseAction, branch, baseBranch: branch, commitSha, title: actionTitle, body: actionText }).strict(), z.object({ action: z.literal("update_pr"), ...baseAction, pullRequest: githubUrl, branch, commitSha, body: actionText }).strict(),
 ]);
 const campaignCore = z.object({ id: campaignId, repository: repositoryName, issueNumber: finite.int().positive().max(Number.MAX_SAFE_INTEGER), issueUrl: githubUrl, parentSessionId: z.string().trim().min(1).max(512), lane: z.enum(["easy_win", "long_term"]), status: campaignStatus, qodoIteration: finite.int().nonnegative().max(3), version: finite.int().positive() }).strict();
 type CampaignIdentity = { issueUrl: string; repository: string; issueNumber: number };
@@ -71,8 +73,8 @@ function validateCampaignIdentity(value: CampaignIdentity, context: z.core.$Refi
 const campaignResponse = campaignCore.superRefine(validateCampaignIdentity);
 const approvalBrief = z.object({ policy: longText, approach: longText, files: z.array(longText).min(1).max(200), risks: z.array(longText).min(1).max(200), tests: z.array(longText).min(1).max(200), safetyResult: longText, qodoStatus: longText, aiDisclosure: longText }).strict();
 const approvalProposal = z.object({ proposalId: identifier, actionDigest: digest, expectedCampaignVersion: finite.int().positive(), action: approvalActionSummary, brief: approvalBrief }).strict();
-const publicApproval = z.object({ id: identifier, action: approvalAction, actionDigest: digest, status: z.enum(["pending", "approved", "rejected", "consumed"]), issuedAt: timestamp, expiresAt: timestamp.optional(), consumedAt: timestamp.optional() }).strict();
-const qodoFinding = z.object({ id: identifier, severity: z.enum(["high", "medium", "low", "suggestion"]), status: z.enum(["open", "fixed", "dismissed"]), summary: text, sourceUrl: z.url().max(2_048).refine(githubReviewUrl, "GitHub review URL").optional(), disposition: text.optional() }).strict();
+const publicApproval = z.object({ id: identifier, action: approvalAction, actionDigest: digest, status: z.enum(["pending", "approved", "rejected", "consumed"]), issuedAt: timestamp, expiresAt: timestamp.optional(), consumedAt: timestamp.optional(), proposalId: identifier.optional(), expectedCampaignVersion: finite.int().positive().optional(), isActive: z.boolean() }).strict();
+const qodoFinding = z.object({ id: z.string().trim().min(1).max(128), severity: z.enum(["high", "medium", "low", "suggestion"]), status: z.enum(["open", "fixed", "dismissed"]), summary: text, sourceUrl: z.url().max(2_048).refine(githubReviewUrl, "GitHub review URL").optional(), disposition: text.optional() }).strict();
 const externalReference = z.object({ kind: z.enum(["issue", "branch", "pull_request", "commit", "sandbox", "child_session", "ci_run"]), value: z.string().trim().min(1).max(2_048) }).strict();
 const externalActionClaim = z.object({ id: identifier, approvalId: identifier, action: approvalAction, actionDigest: digest, claimedCampaignVersion: finite.int().positive(), claimedCampaignStatus: campaignStatus, status: z.enum(["active", "outcome_unknown", "completed", "reconciled"]), attemptedAt: timestamp, leaseStartedAt: timestamp, closedAt: timestamp.optional(), disposition: z.enum(["confirmed_completed", "confirmed_not_completed"]).optional() }).strict();
 const publicEventType = z.enum(["campaign_created", "campaign_operation_completed", "campaign_operation_rejected", "external_action_proposed", "external_action_attempted", "external_action_completed", "external_action_outcome_unknown", "external_action_reconciled", "external_action_stale_recovered", "interrupted_operation_recovered", "preflight_execution_failed", "implementation_execution_failed", "verification_execution_failed", "qodo_review_claimed", "qodo_finding_recorded", "quality_gate_passed", "quality_gate_escalated", "quality_gate_repair_requested", "repair_execution_failed"]);
@@ -106,3 +108,4 @@ function githubReviewUrl(value: string): boolean { try { const url = new URL(val
 function repoUrl(value: string, name: string): boolean { try { return new URL(value).pathname === `/${name}`; } catch { return false; } }
 function repoEvidence(value: string, name: string): boolean { try { return new URL(value).pathname.split("/").slice(1, 3).join("/") === name; } catch { return false; } }
 function issueUrl(value: string, name: string, number: number): boolean { try { return new URL(value).pathname === `/${name}/issues/${String(number)}`; } catch { return false; } }
+function hasControlCharacter(value: string): boolean { for (let index = 0; index < value.length; index += 1) { const code = value.charCodeAt(index); if (code < 32 || code === 127) return true; } return false; }

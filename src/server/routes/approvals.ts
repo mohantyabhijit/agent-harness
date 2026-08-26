@@ -3,7 +3,7 @@ import { z } from "zod";
 
 import type { Clock, IdGenerator } from "../../application/create-campaign.js";
 import type { CampaignStore } from "../../application/ports/campaign-store.js";
-import { campaignIdSchema } from "./support.js";
+import { campaignIdSchema, campaignNotFound, publicApproval } from "./support.js";
 
 const paramsSchema = z.object({ id: campaignIdSchema }).strict();
 const approvalBodySchema = z.object({
@@ -27,7 +27,9 @@ export function registerApprovalRoutes(app: FastifyInstance, dependencies: Appro
       campaignId: id, proposalId: input.proposalId, actionDigest: input.actionDigest,
       expectedVersion: input.expectedCampaignVersion, approvalId: dependencies.ids.next(), issuedAt, expiresAt, idempotencyKey,
     });
-    return reply.code(201).send({ approval });
+    const snapshot = await dependencies.store.get(id);
+    if (snapshot === undefined) throw campaignNotFound();
+    return reply.code(201).send({ approval: publicApproval(snapshot, approval) });
   });
 }
 

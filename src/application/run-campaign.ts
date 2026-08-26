@@ -4,7 +4,7 @@ import {
 } from "../domain/approval.js";
 import { transitionCampaign, type Campaign } from "../domain/campaign.js";
 import type { Clock, IdGenerator } from "./create-campaign.js";
-import type { CampaignEvent, CampaignSnapshot, CampaignStore } from "./ports/campaign-store.js";
+import type { CampaignEventInput, CampaignSnapshot, CampaignStore } from "./ports/campaign-store.js";
 import type { ExternalActionDisposition } from "./ports/campaign-store.js";
 import type {
   CampaignPacket,
@@ -393,7 +393,7 @@ export class RunCampaign {
     operation: HarnessOperation,
     result: HarnessSessionResult,
     output: unknown,
-  ): CampaignEvent {
+  ): CampaignEventInput {
     return {
       id: this.nextId(),
       eventType,

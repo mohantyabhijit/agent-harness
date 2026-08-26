@@ -9,8 +9,10 @@ export interface CampaignEvent {
   readonly eventType: string;
   readonly payload: unknown;
   readonly occurredAt: string;
-  readonly sequence?: number;
+  readonly sequence: number;
 }
+
+export type CampaignEventInput = Omit<CampaignEvent, "sequence">;
 
 export interface ExternalReference {
   readonly kind:
@@ -64,19 +66,19 @@ export interface ExternalActionClaimRecord {
   readonly expectedStatus: CampaignStatus;
   readonly consumedAt: string;
   readonly leaseStartedAt: string;
-  readonly attemptedEvent: CampaignEvent;
+  readonly attemptedEvent: CampaignEventInput;
 }
 
 export interface ExternalActionCompletionRecord {
   readonly claimId: string;
   readonly completedAt: string;
-  readonly completedEvent: CampaignEvent;
+  readonly completedEvent: CampaignEventInput;
   readonly newCommitSha?: string;
 }
 
 export interface ExternalActionOutcomeUnknownRecord {
   readonly claimId: string;
-  readonly event: CampaignEvent;
+  readonly event: CampaignEventInput;
 }
 
 export interface ExternalActionStaleRecoveryRecord {
@@ -84,7 +86,7 @@ export interface ExternalActionStaleRecoveryRecord {
   readonly staleBefore: string;
   readonly recoveredAt: string;
   readonly operatorDisposition: string;
-  readonly event: CampaignEvent;
+  readonly event: CampaignEventInput;
 }
 
 export interface ExternalActionReconciliationRecord {
@@ -92,14 +94,14 @@ export interface ExternalActionReconciliationRecord {
   readonly disposition: ExternalActionDisposition;
   readonly observedCanonicalHead?: string;
   readonly reconciledAt: string;
-  readonly event: CampaignEvent;
+  readonly event: CampaignEventInput;
 }
 
 export interface ChildResultRecord {
   readonly expectedVersion: number;
   readonly expectedStatus: CampaignStatus;
   readonly childSessionId: string;
-  readonly event: CampaignEvent;
+  readonly event: CampaignEventInput;
   readonly newCommitSha?: string;
   readonly operationResult?: CampaignOperationResult;
 }
@@ -128,13 +130,13 @@ export interface ProposalApprovalIssuanceRecord {
 }
 
 export interface CampaignStore {
-  create(campaign: Campaign, initialEvent?: CampaignEvent): Promise<void>;
+  create(campaign: Campaign, initialEvent?: CampaignEventInput): Promise<void>;
   get(id: string): Promise<CampaignSnapshot | undefined>;
   findByIssue(repository: string, issueNumber: number): Promise<CampaignSnapshot | undefined>;
   update(campaign: Campaign, expectedVersion: number): Promise<void>;
   listByStatus(status: CampaignStatus): Promise<readonly CampaignSnapshot[]>;
   appendEvidence(campaignId: string, evidence: Evidence): Promise<void>;
-  appendEvent(campaignId: string, event: CampaignEvent): Promise<void>;
+  appendEvent(campaignId: string, event: CampaignEventInput): Promise<void>;
   recordApproval(approval: Approval): Promise<void>;
   issueApproval(record: ApprovalIssuanceRecord): Promise<Approval>;
   issueApprovalForProposal(record: ProposalApprovalIssuanceRecord): Promise<Approval>;

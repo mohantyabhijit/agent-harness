@@ -52,7 +52,7 @@ export function App({ api, operatorCapability }: AppProps) {
   const disconnect = () => { setEnteredCapability(""); setConnected(false); navigate("/"); };
   if (path === "/discover" && selectedSpaces.length > 0) return <><button className="disconnect" onClick={disconnect} type="button">Disconnect</button><DiscoverPage api={client} navigate={navigate} spaces={selectedSpaces} /></>;
   const campaignId = campaignIdFromPath(path);
-  if (campaignId !== undefined) return <><button className="disconnect" onClick={disconnect} type="button">Disconnect</button><CampaignPage api={client} campaignId={campaignId} /></>;
+  if (campaignId !== undefined) return <><button className="disconnect" onClick={disconnect} type="button">Disconnect</button><CampaignPage api={client} campaignId={campaignId} key={campaignId} /></>;
   return <><button className="disconnect" onClick={() => { setEnteredCapability(""); setConnected(false); }} type="button">Disconnect</button>{path === "/discover" ? <p className="state-card" role="status">Choose spaces before discovering repositories.</p> : null}<OnboardingPage api={client} navigate={navigate} /></>;
 }
 

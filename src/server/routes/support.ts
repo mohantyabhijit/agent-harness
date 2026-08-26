@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import { currentApprovalProposal, proposalActionSummary } from "../../application/approval-proposal.js";
 import type { CampaignSnapshot } from "../../application/ports/campaign-store.js";
+import type { Approval } from "../../domain/approval.js";
 
 export const campaignIdSchema = z.string().trim().min(1).max(128).regex(/^[A-Za-z0-9._:-]+$/u);
 export const repositoryPartSchema = z.string().min(1).max(100).regex(/^[A-Za-z0-9_.-]+$/u);
@@ -25,19 +26,13 @@ export function campaignNotFound(): ApiProblem {
 }
 
 export function publicCampaignSnapshot(snapshot: CampaignSnapshot): Readonly<Record<string, unknown>> {
+  assertValidEventSequence(snapshot);
+  const proposal = currentApprovalProposal(snapshot);
   return {
     ...snapshot.campaign,
     evidence: snapshot.evidence,
     events: snapshot.events.filter(({ eventType, sequence }) => publicEventTypes.has(eventType) && typeof sequence === "number" && Number.isSafeInteger(sequence) && sequence > 0).map(({ id, eventType, occurredAt, sequence, payload }) => ({ id, eventType, occurredAt, sequence, facts: safeEventFacts(eventType, payload) })),
-    approvals: snapshot.approvals.map(({ id, action, actionDigest, status, issuedAt, expiresAt, consumedAt }) => ({
-      id,
-      action,
-      actionDigest,
-      status,
-      issuedAt,
-      ...(expiresAt === undefined ? {} : { expiresAt }),
-      ...(consumedAt === undefined ? {} : { consumedAt }),
-    })),
+    approvals: snapshot.approvals.map((approval) => publicApprovalWithProposal(approval, proposal, Date.now())),
     qodoFindings: snapshot.qodoFindings.map(({ sourceUrl, ...finding }) => ({ ...finding, ...(sourceUrl !== undefined && validQodoUrl(sourceUrl) ? { sourceUrl } : {}) })),
     externalReferences: snapshot.externalReferences.filter(({ value }) => value.length <= 2_048),
     externalActionClaims: snapshot.externalActionClaims.map((claim) => ({
@@ -53,14 +48,42 @@ export function publicCampaignSnapshot(snapshot: CampaignSnapshot): Readonly<Rec
       ...(claim.closedAt === undefined ? {} : { closedAt: claim.closedAt }),
       ...(claim.disposition === undefined ? {} : { disposition: claim.disposition }),
     })),
-    approvalProposal: publicApprovalProposal(snapshot),
+    approvalProposal: proposal === null ? null : publicApprovalProposal(proposal),
     qualityEscalationReason: qualityEscalationReason(snapshot),
+  };
+}
+
+export function publicApproval(snapshot: CampaignSnapshot, approval: Approval, now = Date.now()): Readonly<Record<string, unknown>> {
+  return publicApprovalWithProposal(approval, currentApprovalProposal(snapshot), now);
+}
+
+function publicApprovalWithProposal(approval: Approval, proposal: ReturnType<typeof currentApprovalProposal>, now: number): Readonly<Record<string, unknown>> {
+  const isActive = approval.status === "approved" && approval.active === true && approval.trustedProposalAuthority === true &&
+    proposal !== null && approval.proposalId === proposal.proposalId && approval.actionDigest === proposal.actionDigest &&
+    approval.expectedCampaignVersion === proposal.expectedCampaignVersion &&
+    (approval.expiresAt === undefined || Date.parse(approval.expiresAt) > now);
+  return {
+    id: approval.id, action: approval.action, actionDigest: approval.actionDigest, status: approval.status,
+    issuedAt: approval.issuedAt, isActive,
+    ...(approval.expiresAt === undefined ? {} : { expiresAt: approval.expiresAt }),
+    ...(approval.consumedAt === undefined ? {} : { consumedAt: approval.consumedAt }),
+    ...(approval.proposalId === undefined ? {} : { proposalId: approval.proposalId }),
+    ...(approval.expectedCampaignVersion === undefined ? {} : { expectedCampaignVersion: approval.expectedCampaignVersion }),
   };
 }
 
 function safeEventFacts(eventType: string, payload: unknown): Readonly<Record<string, string | number | boolean>> {
   if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return {};
   const source = payload as Record<string, unknown>;
+  if (eventType === "external_action_proposed") {
+    const actionPayload = source.payload;
+    const action = typeof actionPayload === "object" && actionPayload !== null && !Array.isArray(actionPayload)
+      ? (actionPayload as Record<string, unknown>).action : undefined;
+    return {
+      ...(validFact("action", action) ? { action } : {}),
+      ...(validFact("expectedCampaignVersion", source.expectedCampaignVersion) ? { expectedCampaignVersion: source.expectedCampaignVersion } : {}),
+    };
+  }
   const allowedByType: Readonly<Record<string, readonly string[]>> = {
     campaign_created: ["status"], campaign_operation_completed: ["operation", "status", "claimedCampaignVersion", "resultingCampaignVersion", "iteration", "testsPassed", "childSessionId", "sandboxSessionId", "currentCommitSha", "commitSha", "pullRequest"],
     campaign_operation_rejected: ["operation", "reason", "claimedCampaignVersion", "resultingCampaignVersion"],
@@ -86,7 +109,7 @@ function safeEventFacts(eventType: string, payload: unknown): Readonly<Record<st
 const factEnums: Readonly<Record<string, readonly string[]>> = {
   operation: ["preflight", "implement", "verify", "repair"], action: ["post_issue_comment", "request_assignment", "push_branch", "create_pr", "update_pr"],
   status: ["policy_review", "coordination_pending", "preflight", "quarantined", "baseline", "implementation", "verification", "contribution_approval", "pull_request_open", "qodo_review", "repair", "human_escalation", "merged", "closed", "withdrawn", "completed", "failed"],
-  targetStatus: ["quarantined", "human_escalation"], outcome: ["pass", "repair", "escalate"], verdict: ["safe", "unsafe"],
+  targetStatus: ["quarantined", "human_escalation"], outcome: ["pass", "repair", "escalate"], verdict: ["pass", "quarantine"],
   reason: ["maximum_qodo_iterations", "tests_failed", "repair_child_failed", "invalid_preflight_output", "operation_result_not_safely_recorded", "external_action_result_unknown", "human_external_action_reconciliation", "operator_recovered_stale_active_claim", "operator_recovered_interrupted_operation"],
 };
 const publicEventTypes = new Set(["campaign_created", "campaign_operation_completed", "campaign_operation_rejected", "external_action_proposed", "external_action_attempted", "external_action_completed", "external_action_outcome_unknown", "external_action_reconciled", "external_action_stale_recovered", "interrupted_operation_recovered", "preflight_execution_failed", "implementation_execution_failed", "verification_execution_failed", "qodo_review_claimed", "qodo_finding_recorded", "quality_gate_passed", "quality_gate_escalated", "quality_gate_repair_requested", "repair_execution_failed"]);
@@ -101,9 +124,8 @@ function validFact(key: string, value: unknown): value is string | number | bool
   return values === undefined ? /^[A-Za-z0-9._:-]+$/u.test(value) : values.includes(value);
 }
 
-function publicApprovalProposal(snapshot: CampaignSnapshot): Readonly<Record<string, unknown>> | null {
-  const proposal = currentApprovalProposal(snapshot);
-  return proposal === null ? null : {
+function publicApprovalProposal(proposal: NonNullable<ReturnType<typeof currentApprovalProposal>>): Readonly<Record<string, unknown>> {
+  return {
     proposalId: proposal.proposalId,
     actionDigest: proposal.actionDigest,
     expectedCampaignVersion: proposal.expectedCampaignVersion,
@@ -130,4 +152,12 @@ function validQodoUrl(value: string): boolean {
     const url = new URL(value);
     return url.protocol === "https:" && url.hostname === "github.com" && url.username === "" && url.password === "" && url.port === "" && url.search === "" && /^\/[^/]+\/[^/]+\/pull\/[1-9][0-9]*(?:\/files)?$/u.test(url.pathname) && (url.hash === "" || /^#(?:discussion_r|r)[1-9][0-9]*$/u.test(url.hash));
   } catch { return false; }
+}
+
+function assertValidEventSequence(snapshot: CampaignSnapshot): void {
+  const seen = new Set<number>();
+  for (const event of snapshot.events) {
+    if (!Number.isSafeInteger(event.sequence) || event.sequence < 1 || seen.has(event.sequence)) throw new Error("Campaign event sequence is invalid");
+    seen.add(event.sequence);
+  }
 }

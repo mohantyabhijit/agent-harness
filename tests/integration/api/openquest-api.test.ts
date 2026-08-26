@@ -7,6 +7,7 @@ import type { GithubCatalogPort } from "../../../src/application/ports/github-ca
 import type { QodoReviewBatch } from "../../../src/application/sync-review.js";
 import { SyncReview } from "../../../src/application/sync-review.js";
 import { buildApp, type AppDependencies } from "../../../src/server/app.js";
+import { createOpenQuestApi, type FetchLike } from "../../../src/web/api.js";
 import { parseConfig } from "../../../src/server/config.js";
 import { bearerAuthorizationPolicy } from "../../../src/server/authorization.js";
 import {
@@ -82,6 +83,34 @@ describe("OpenQuest API", () => {
     expect(replay.json().approval.id).toBe(first.json().approval.id);
     expect((await store.get("campaign-1"))?.approvals).toHaveLength(1);
     expect(replay.body).not.toContain("human-confirmation-001");
+    await app.close();
+  });
+
+  it("round-trips the exact sanitized approval DTO through Fastify and the production browser client", async () => {
+    const { app, store } = buildTestApp();
+    const head = "a".repeat(40);
+    const payload = { action: "create_pr" as const, repository: "owner/repo", issueNumber: 42, branch: "openquest/fix-42", baseBranch: "main", commitSha: head, title: "  Preserve exact title  ", body: "  Exact body bytes stay intact.  " };
+    store.seed(campaign({ status: "contribution_approval", version: 7 }));
+    store.seedExternalReference("campaign-1", { kind: "commit", value: head });
+    await appendProposal(store, payload, { id: "proposal-roundtrip", version: 7, status: "contribution_approval", currentHead: head });
+    const fetcher: FetchLike = async (input, init) => {
+      const method = init?.method === "POST" ? "POST" : "GET";
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      const injected = await app.inject({ method, url, headers: Object.fromEntries(new Headers(init?.headers).entries()), ...(typeof init?.body === "string" ? { payload: init.body } : {}) });
+      return new Response(injected.body, { status: injected.statusCode, headers: new Headers(injected.headers as Record<string, string>) });
+    };
+    const api = createOpenQuestApi({ fetch: fetcher, operatorCapability: () => "runtime-only" });
+    const confirmation = { proposalId: "proposal-roundtrip", actionDigest: externalActionDigest(payload), expectedCampaignVersion: 7 };
+
+    const approval = await api.issueApproval("campaign-1", confirmation, "roundtrip-confirmation");
+    const snapshot = await api.getCampaign("campaign-1");
+
+    expect(Object.keys(approval).sort()).toEqual(["action", "actionDigest", "expectedCampaignVersion", "expiresAt", "id", "isActive", "issuedAt", "proposalId", "status"]);
+    expect(approval).toEqual(snapshot.approvals[0]);
+    expect(approval).toMatchObject({ proposalId: confirmation.proposalId, expectedCampaignVersion: 7, actionDigest: confirmation.actionDigest, isActive: false });
+    expect(approval).not.toHaveProperty("payload");
+    expect(approval).not.toHaveProperty("expectedCampaignStatus");
+    expect(approval).not.toHaveProperty("expectedCurrentCommitSha");
     await app.close();
   });
 

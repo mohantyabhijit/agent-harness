@@ -25,7 +25,7 @@ const snapshot: CampaignSnapshot = {
     { id: "created", eventType: "campaign_created", occurredAt: "2026-08-26T00:00:00Z", sequence: 1, facts: {} },
     { id: "verified", eventType: "campaign_operation_completed", occurredAt: "2026-08-26T00:05:00Z", sequence: 2, facts: { operation: "verify", testsPassed: true } },
   ],
-  approvals: [{ id: "approval-1", action: "create_pr", actionDigest: `sha256:${"b".repeat(64)}`, status: "consumed", issuedAt: "2026-08-26T00:06:00Z", consumedAt: "2026-08-26T00:07:00Z" }],
+  approvals: [{ id: "approval-1", action: "create_pr", actionDigest: `sha256:${"b".repeat(64)}`, status: "consumed", issuedAt: "2026-08-26T00:06:00Z", consumedAt: "2026-08-26T00:07:00Z", isActive: false }],
   qodoFindings: [{ id: "finding-1", severity: "medium", status: "open", summary: "Handle the empty response.", sourceUrl: "https://github.com/owner/repo/pull/7#discussion_r1", disposition: "Repair queued" }],
   externalReferences: [
     { kind: "commit", value: "a".repeat(40) },
@@ -105,5 +105,16 @@ describe("CampaignPage", () => {
     render(<CampaignPage api={campaignApi(async () => ({ ...snapshot, status: "human_escalation", qodoIteration: 3, qualityEscalationReason: "tests_failed" }))} campaignId="campaign-1" />);
     expect(await screen.findByText(/durable quality record says verification tests failed/i)).toBeVisible();
     expect(screen.queryByText(/repair limit was reached/i)).not.toBeInTheDocument();
+  });
+
+  it("uses durable sequence, not descending timestamps, for event causality", async () => {
+    render(<CampaignPage api={campaignApi(async () => ({ ...snapshot, approvals: [], events: [
+      { id: "first", eventType: "campaign_created", occurredAt: "2026-08-26T00:10:00Z", sequence: 1, facts: {} },
+      { id: "second", eventType: "campaign_operation_completed", occurredAt: "2026-08-26T00:00:00Z", sequence: 2, facts: { operation: "verify" } },
+    ] }))} campaignId="campaign-1" />);
+    await screen.findByTestId("agent-thread");
+    const entries = screen.getAllByRole("listitem");
+    expect(entries[0]).toHaveTextContent("Campaign created");
+    expect(entries[1]).toHaveTextContent("Campaign operation completed");
   });
 });

@@ -5,7 +5,7 @@ import {
   type QualityGateResult,
 } from "../domain/quality-gate.js";
 import type { Clock, IdGenerator } from "./create-campaign.js";
-import type { CampaignEvent, CampaignSnapshot, CampaignStore } from "./ports/campaign-store.js";
+import type { CampaignEventInput, CampaignSnapshot, CampaignStore } from "./ports/campaign-store.js";
 import type { CampaignPacket, HarnessPort } from "./ports/harness.js";
 import { isPullRequest } from "./external-action.js";
 import { parseQodoReviewBatch, type QodoReviewBatch } from "./qodo-review-batch.js";
@@ -175,7 +175,7 @@ export class SyncReview {
     eventType: string,
     batch: QodoReviewBatch,
     payload: Readonly<Record<string, unknown>>,
-  ): CampaignEvent {
+  ): CampaignEventInput {
     return {
       id: this.nextId(),
       eventType,

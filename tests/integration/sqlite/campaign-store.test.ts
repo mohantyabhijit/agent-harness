@@ -128,7 +128,7 @@ function insertRepairAuthority(database: Database.Database, input: { eventId: st
 }
 
 describe("SqliteCampaignStore", () => {
-  it("fails migration with a fixed non-secret conflict when duplicate live approvals predate the unique index", async () => {
+  it("retires duplicate untrusted legacy approvals before enforcing live-authority uniqueness", async () => {
     const { database, store } = openMemoryStore();
     await store.create(campaign({ status: "contribution_approval" }));
     database.exec("DROP INDEX approvals_one_approved_digest_idx");
@@ -136,10 +136,8 @@ describe("SqliteCampaignStore", () => {
     database.prepare("INSERT INTO approvals (id, campaign_id, action, action_digest, status, issued_at) VALUES (?, 'campaign-1', 'create_pr', ?, 'approved', '2026-08-26T00:00:00Z')").run("legacy-a", secretDigest);
     database.prepare("INSERT INTO approvals (id, campaign_id, action, action_digest, status, issued_at) VALUES (?, 'campaign-1', 'create_pr', ?, 'approved', '2026-08-26T00:00:00Z')").run("legacy-b", secretDigest);
 
-    let migrationError: unknown;
-    try { new SqliteCampaignStore(database); } catch (error) { migrationError = error; }
-    expect(migrationError).toMatchObject({ name: "CampaignMigrationConflict", code: "duplicate_live_approvals" });
-    expect(String(migrationError)).not.toContain(secretDigest);
+    expect(() => new SqliteCampaignStore(database)).not.toThrow();
+    expect(database.prepare("SELECT active FROM approvals ORDER BY id").all()).toEqual([{ active: 0 }, { active: 0 }]);
   });
 
   it("fail-closes a single legacy live approval that has no durable proposal authority", async () => {
@@ -166,7 +164,7 @@ describe("SqliteCampaignStore", () => {
     expect((await store.get("campaign-1"))?.events).toHaveLength(0);
   });
 
-  it("issues approvals idempotently and permits a fresh confirmation only after consumption", async () => {
+  it("keeps generic approval issuance idempotent but permanently non-executable", async () => {
     const { store, database } = openMemoryStore();
     await store.create(campaign({ status: "contribution_approval", version: 7 }));
     database.prepare("INSERT INTO external_references (campaign_id, kind, value) VALUES (?, 'commit', ?)").run("campaign-1", "a".repeat(40));
@@ -177,13 +175,13 @@ describe("SqliteCampaignStore", () => {
       store.issueApproval({ approval: { ...first, id: "approval-idem-2" }, idempotencyKey: "confirmation-002" }),
       store.issueApproval({ approval: { ...first, id: "approval-idem-3" }, idempotencyKey: "confirmation-003" }),
     ]);
-    expect(concurrent.every(({ status }) => status === "rejected")).toBe(true);
+    expect(concurrent.every(({ status }) => status === "fulfilled")).toBe(true);
     await store.consumeApproval(first.id, first.actionDigest, "2026-08-26T00:01:00Z", 7, "contribution_approval");
     expect((await store.issueApproval({ approval: { ...first, id: "ignored-replay" }, idempotencyKey: "confirmation-001" })).status).toBe("consumed");
     await expect(store.issueApproval({ approval: { ...first, id: "approval-idem-fresh" }, idempotencyKey: "confirmation-004" })).resolves.toMatchObject({ id: "approval-idem-fresh", status: "approved" });
   });
 
-  it("allows only one approved digest across concurrent confirmation keys and connections", async () => {
+  it("does not treat concurrent generic approval seeds as live authority", async () => {
     const { storeA, storeB } = openTwoConnectionStore("openquest-approval-issuance-");
     await storeA.create(campaign({ status: "contribution_approval" }));
     const base = issueApproval({ id: "approval-a", campaignId: "campaign-1", action: "create_pr", actionDigest: "sha256:same-action", issuedAt: "2026-08-26T00:00:00Z" });
@@ -191,9 +189,8 @@ describe("SqliteCampaignStore", () => {
       storeA.issueApproval({ approval: base, idempotencyKey: "confirmation-A" }),
       storeB.issueApproval({ approval: { ...base, id: "approval-b" }, idempotencyKey: "confirmation-B" }),
     ]);
-    expect(results.filter(({ status }) => status === "fulfilled")).toHaveLength(1);
-    expect(results.filter(({ status }) => status === "rejected")).toHaveLength(1);
-    expect((await storeA.get("campaign-1"))?.approvals.filter(({ status }) => status === "approved")).toHaveLength(1);
+    expect(results.filter(({ status }) => status === "fulfilled")).toHaveLength(2);
+    expect((await storeA.get("campaign-1"))?.approvals.filter(({ active }) => active === true)).toHaveLength(0);
   });
 
   it("atomically issues only the newest server-owned proposal and rejects digest substitution", async () => {
@@ -255,6 +252,59 @@ describe("SqliteCampaignStore", () => {
   it.each([
     ["SQLite", () => openMemoryStore().store as CampaignStore],
     ["fake", () => new FakeCampaignStore() as CampaignStore],
+  ])("cannot fabricate executable proposal authority through generic %s store methods", async (_label, factory) => {
+    const store = factory();
+    if (store instanceof FakeCampaignStore) {
+      store.seed(campaign({ status: "contribution_approval", version: 6 }));
+    } else {
+      await store.create(campaign({ status: "contribution_approval", version: 6 }));
+    }
+    await store.replaceCurrentCommit("campaign-1", externalPayload.commitSha, 6, "contribution_approval");
+    await store.recordApproval(issueApproval({
+      id: "forged-authority", campaignId: "campaign-1", action: "create_pr", actionDigest: externalActionDigest(externalPayload),
+      issuedAt: "2026-08-26T00:00:00Z", proposalId: "forged-proposal", expectedCampaignVersion: 7,
+      expectedCampaignStatus: "contribution_approval", expectedCurrentCommitSha: externalPayload.commitSha,
+      payload: externalPayload, trustedProposalAuthority: true, active: true,
+    }));
+    await expect(store.claimExternalAction("campaign-1", { ...externalClaimRecord(), approvalId: "forged-authority" })).rejects.toThrow(/approved proposal authority/i);
+    expect((await store.get("campaign-1"))?.approvals[0]).toMatchObject({ active: false, trustedProposalAuthority: false, status: "approved" });
+  });
+
+  it.each([
+    ["SQLite", () => openMemoryStore().store as CampaignStore],
+    ["fake", () => new FakeCampaignStore() as CampaignStore],
+  ])("rejects a sourceless branch push proposal in the %s store", async (_label, factory) => {
+    const store = factory();
+    if (store instanceof FakeCampaignStore) store.seed(campaign({ status: "contribution_approval", version: 7 }));
+    else await store.create(campaign({ status: "contribution_approval", version: 7 }));
+    const payload = { action: "push_branch" as const, repository: "owner/repo", issueNumber: 42, branch: "openquest/fix-42", commitSha: "b".repeat(40) };
+    const digest = externalActionDigest(payload);
+    await store.appendEvent("campaign-1", { id: "sourceless-push", eventType: "external_action_proposed", occurredAt: "2026-08-26T00:00:00Z", payload: {
+      proposalId: "sourceless-push", payload, actionDigest: digest, expectedCampaignVersion: 7, expectedCampaignStatus: "contribution_approval",
+      brief: { policy: "Policy", approach: "Approach", files: ["src/a.ts"], risks: ["Risk"], tests: ["npm test"], safetyResult: "Passed", qodoStatus: "Clear", aiDisclosure: "AI-assisted" },
+    } });
+    await expect(store.issueApprovalForProposal({ campaignId: "campaign-1", proposalId: "sourceless-push", actionDigest: digest, expectedVersion: 7, approvalId: "approval-push", issuedAt: "2026-08-26T00:00:00Z", expiresAt: "2026-08-26T00:10:00Z", idempotencyKey: "sourceless-key" })).rejects.toThrow(/conflict/i);
+  });
+
+  it.each([
+    ["SQLite", () => openMemoryStore().store as CampaignStore],
+    ["fake", () => new FakeCampaignStore() as CampaignStore],
+  ])("retires stale same-digest authority before issuing a fresh %s proposal", async (_label, factory) => {
+    const store = factory();
+    if (store instanceof FakeCampaignStore) store.seed(campaign({ status: "contribution_approval", version: 6 }));
+    else await store.create(campaign({ status: "contribution_approval", version: 6 }));
+    await store.replaceCurrentCommit("campaign-1", externalPayload.commitSha, 6, "contribution_approval");
+    await appendApprovalProposal(store, "proposal-old");
+    const digest = externalActionDigest(externalPayload);
+    await store.issueApprovalForProposal({ campaignId: "campaign-1", proposalId: "proposal-old", actionDigest: digest, expectedVersion: 7, approvalId: "approval-old", issuedAt: "2026-08-26T00:00:00Z", expiresAt: "2026-08-26T00:10:00Z", idempotencyKey: "old-proposal-key" });
+    await appendApprovalProposal(store, "proposal-fresh");
+    await expect(store.issueApprovalForProposal({ campaignId: "campaign-1", proposalId: "proposal-fresh", actionDigest: digest, expectedVersion: 7, approvalId: "approval-fresh", issuedAt: "2026-08-26T00:01:00Z", expiresAt: "2026-08-26T00:11:00Z", idempotencyKey: "fresh-proposal-key" })).resolves.toMatchObject({ id: "approval-fresh", active: true });
+    expect((await store.get("campaign-1"))?.approvals.map(({ id, active }) => ({ id, active }))).toEqual([{ id: "approval-old", active: false }, { id: "approval-fresh", active: true }]);
+  });
+
+  it.each([
+    ["SQLite", () => openMemoryStore().store as CampaignStore],
+    ["fake", () => new FakeCampaignStore() as CampaignStore],
   ])("assigns a monotonic campaign sequence even when event timestamps tie in the %s store", async (_label, factory) => {
     const store = factory();
     if (store instanceof FakeCampaignStore) store.seed(campaign());
@@ -264,6 +314,19 @@ describe("SqliteCampaignStore", () => {
     expect((await store.get("campaign-1"))?.events.map(({ id, sequence }) => ({ id, sequence }))).toEqual([
       { id: "z-first", sequence: 1 }, { id: "a-newest", sequence: 2 },
     ]);
+  });
+
+  it.each([
+    ["missing", null, 2],
+    ["non-positive", 0, 2],
+    ["duplicate", 1, 1],
+  ] as const)("fails closed on a %s persisted event sequence", async (_label, badSequence, firstSequence) => {
+    const { store, database } = openMemoryStore();
+    await store.create(campaign());
+    database.exec("DROP INDEX campaign_events_sequence_idx");
+    database.prepare("INSERT INTO campaign_events (id, campaign_id, event_type, payload_json, occurred_at, sequence) VALUES ('first', 'campaign-1', 'campaign_created', '{}', '2026-08-26T00:00:00Z', ?)").run(firstSequence);
+    database.prepare("INSERT INTO campaign_events (id, campaign_id, event_type, payload_json, occurred_at, sequence) VALUES ('bad', 'campaign-1', 'campaign_created', '{}', '2026-08-26T00:00:00Z', ?)").run(badSequence);
+    await expect(store.get("campaign-1")).rejects.toThrow(/event sequence|invalid sequence/i);
   });
 
   it.each([
@@ -697,6 +760,21 @@ describe("SqliteCampaignStore", () => {
     await expect(storeA.claimExternalAction("campaign-1", externalClaimRecord())).rejects.toThrow(/attempt rejected/i);
     const snapshot = await storeA.get("campaign-1");
     expect(snapshot?.approvals[0]?.status).toBe("approved");
+    expect(snapshot?.externalActionClaims).toEqual([]);
+    expect(snapshot?.events.map(({ eventType }) => eventType)).toEqual(["external_action_proposed"]);
+  });
+
+  it("keeps fake claim state rollback-atomic when attempted-event persistence fails", async () => {
+    const store = new FakeCampaignStore();
+    store.seed(campaign({ status: "contribution_approval", version: 7 }));
+    store.seedExternalReference("campaign-1", { kind: "commit", value: externalPayload.commitSha });
+    await issueBoundApproval(store, { id: "approval-1", payload: externalPayload, version: 7, status: "contribution_approval", currentCommitSha: externalPayload.commitSha });
+    store.failNextEvent = true;
+
+    await expect(store.claimExternalAction("campaign-1", externalClaimRecord())).rejects.toThrow(/event persistence/i);
+
+    const snapshot = await store.get("campaign-1");
+    expect(snapshot?.approvals[0]).toMatchObject({ status: "approved", active: true });
     expect(snapshot?.externalActionClaims).toEqual([]);
     expect(snapshot?.events.map(({ eventType }) => eventType)).toEqual(["external_action_proposed"]);
   });

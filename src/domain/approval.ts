@@ -24,6 +24,10 @@ export interface Approval {
   readonly expectedCampaignStatus?: CampaignStatus;
   readonly expectedCurrentCommitSha?: string | null;
   readonly payload?: unknown;
+  /** Set only by the atomic durable-proposal issuance path. */
+  readonly trustedProposalAuthority?: boolean;
+  /** Store-owned executability marker. Generic/test-seeded approvals are inactive. */
+  readonly active?: boolean;
 }
 
 export const allowedCampaignStatusesForApprovalAction: Readonly<

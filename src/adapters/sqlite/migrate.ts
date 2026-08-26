@@ -41,7 +41,8 @@ const schema = `
     expected_campaign_version INTEGER,
     expected_campaign_status TEXT,
     expected_current_commit_sha TEXT,
-    payload_json TEXT
+    payload_json TEXT,
+    trusted_proposal_authority INTEGER NOT NULL DEFAULT 0 CHECK (trusted_proposal_authority IN (0, 1))
   );
 
   CREATE TABLE IF NOT EXISTS approval_issuance_keys (
@@ -160,6 +161,7 @@ export function migrateCampaignStore(database: Database.Database): void {
       ["expected_campaign_status", "TEXT"],
       ["expected_current_commit_sha", "TEXT"],
       ["payload_json", "TEXT"],
+      ["trusted_proposal_authority", "INTEGER NOT NULL DEFAULT 0 CHECK (trusted_proposal_authority IN (0, 1))"],
     ] as const) {
       if (!approvalColumns.some((column) => column.name === name)) database.exec(`ALTER TABLE approvals ADD COLUMN ${name} ${declaration}`);
     }
@@ -176,13 +178,13 @@ export function migrateCampaignStore(database: Database.Database): void {
       CREATE UNIQUE INDEX IF NOT EXISTS campaign_events_sequence_idx ON campaign_events(campaign_id, sequence);
       CREATE INDEX campaign_events_order_idx ON campaign_events(campaign_id, sequence);
     `);
+    // Incomplete or untrusted rows are immutable audit history, not authority.
+    database.exec("UPDATE approvals SET active = 0 WHERE status = 'approved' AND (trusted_proposal_authority <> 1 OR proposal_id IS NULL OR expected_campaign_version IS NULL OR expected_campaign_status IS NULL OR payload_json IS NULL)");
     const duplicateLiveApproval = database.prepare(`
       SELECT 1 FROM approvals WHERE status = 'approved' AND active = 1
       GROUP BY campaign_id, action_digest HAVING COUNT(*) > 1 LIMIT 1
     `).get();
     if (duplicateLiveApproval !== undefined) throw new CampaignMigrationConflict();
-    // A legacy approval has no immutable proposal authority and must never authorize a write.
-    database.exec("UPDATE approvals SET active = 0 WHERE status = 'approved' AND (proposal_id IS NULL OR expected_campaign_version IS NULL OR expected_campaign_status IS NULL OR payload_json IS NULL)");
     database.exec(`
       DROP INDEX IF EXISTS approvals_one_approved_digest_idx;
       CREATE UNIQUE INDEX approvals_one_approved_digest_idx

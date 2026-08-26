@@ -117,9 +117,21 @@ describe("OpenQuest browser API", () => {
     await expect(api.getCampaign(":review.1")).resolves.toMatchObject({ qodoFindings: [{ sourceUrl }] });
   });
 
+  it.each([
+    { action: "post_issue_comment", repository: "owner/repo", issueNumber: 1, body: "  exact comment bytes  " },
+    { action: "request_assignment", repository: "owner/repo", issueNumber: 1, assignee: "octocat" },
+    { action: "push_branch", repository: "owner/repo", issueNumber: 1, branch: "openquest/fix-1", sourceCommitSha: "a".repeat(40), targetCommitSha: "b".repeat(40) },
+    { action: "create_pr", repository: "owner/repo", issueNumber: 1, branch: "openquest/fix-1", baseBranch: "main", commitSha: "b".repeat(40), title: "  exact title bytes  ", body: "  exact PR body bytes  " },
+    { action: "update_pr", repository: "owner/repo", issueNumber: 1, pullRequest: "https://github.com/owner/repo/pull/7", branch: "openquest/fix-1", commitSha: "b".repeat(40), body: "  exact update bytes  " },
+  ] as const)("preserves every exact $action field at the browser boundary", async (action) => {
+    const response = { ...realCampaignSnapshot, version: 7, approvalProposal: { proposalId: "proposal-exact", actionDigest: `sha256:${"b".repeat(64)}`, expectedCampaignVersion: 7, action, brief: { policy: "Policy", approach: "Approach", files: ["src/a.ts"], risks: ["Risk"], tests: ["npm test"], safetyResult: "Pass", qodoStatus: "Clear", aiDisclosure: "AI-assisted" } } };
+    const api = createOpenQuestApi({ fetch: async () => new Response(JSON.stringify(response), { status: 200 }) });
+    await expect(api.getCampaign(":review.1")).resolves.toMatchObject({ approvalProposal: { action } });
+  });
+
   it("issues approval for the server-owned proposal identity with the supplied human-confirmation key", async () => {
     const confirmation = { proposalId: "proposal-1", actionDigest: `sha256:${"b".repeat(64)}`, expectedCampaignVersion: 7 };
-    const approval = { id: "approval-1", action: "create_pr", actionDigest: `sha256:${"b".repeat(64)}`, status: "approved", issuedAt: "2026-08-26T00:00:00Z" } as const;
+    const approval = { id: "approval-1", action: "create_pr", actionDigest: `sha256:${"b".repeat(64)}`, status: "approved", issuedAt: "2026-08-26T00:00:00Z", proposalId: "proposal-1", expectedCampaignVersion: 7, isActive: true } as const;
     const fetcher = vi.fn<FetchLike>(async () => new Response(JSON.stringify({ approval }), { status: 201 }));
     const api = createOpenQuestApi({ fetch: fetcher, operatorCapability: () => "runtime-only" });
 
