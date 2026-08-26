@@ -176,6 +176,32 @@ describe("DiscoverPage", () => {
     expect(destinations).toEqual(["/campaigns/campaign-1"]);
   });
 
+  it("aborts campaign creation and ignores a late result after unmount", async () => {
+    const campaign = deferred<{ id: string }>();
+    const destinations: string[] = [];
+    let campaignSignal: AbortSignal | undefined;
+    const api = {
+      discoverRepositories: async () => [healthyRepository],
+      getIssues: async () => [easyIssue],
+      createCampaign: async (_input: unknown, signal?: AbortSignal) => {
+        campaignSignal = signal;
+        return campaign.promise;
+      },
+    };
+    const { unmount } = render(<DiscoverPage api={api} spaces={["developer_tools"]} navigate={(destination) => destinations.push(destination)} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /start.*clarify an error message/i }));
+    expect(campaignSignal?.aborted).toBe(false);
+
+    unmount();
+    await act(async () => {
+      campaign.resolve({ id: "late-campaign" });
+    });
+
+    expect(campaignSignal?.aborted).toBe(true);
+    expect(destinations).toEqual([]);
+  });
+
   it("keeps partial issue cards visible while other issue requests are loading", async () => {
     const firstIssues = deferred<readonly [typeof easyIssue]>();
     const secondIssues = deferred<readonly []>();

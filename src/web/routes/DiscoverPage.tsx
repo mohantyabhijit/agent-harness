@@ -87,6 +87,9 @@ export function DiscoverPage({ api, spaces, navigate }: DiscoverPageProps) {
       window.clearTimeout(task);
       discoveryController.current?.abort();
       for (const controller of controllers.values()) controller.abort();
+      const controller = campaignController.current;
+      controller?.abort();
+      if (campaignController.current === controller) campaignController.current = undefined;
     };
   }, [loadDiscovery]);
 
