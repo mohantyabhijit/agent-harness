@@ -1,65 +1,135 @@
-# IncidentForge
+# OpenQuest
 
-IncidentForge is a human-in-the-loop production incident investigator built for the Agent Harness Hackathon. It uses TrueForge to collect operational evidence, delegate independent investigations, analyze data in a sandbox, preserve incident context, and stop for approval before any state-changing action.
+OpenQuest is a human-in-the-loop agent harness for responsible open-source contribution campaigns. A user chooses an open-source space, reviews evidence-ranked public repositories and issues, and creates one durable campaign per issue. TrueForge coordinates isolated work; SQLite preserves campaign facts; exact, single-use approvals protect external actions; and a bounded Qodo gate can request at most three repair iterations.
 
-The product scope and acceptance criteria live in [GitHub issue #1](https://github.com/mohantyabhijit/agent-harness/issues/1).
-
-## Why this exists
-
-Most AI incident tools explain what an engineer should inspect. IncidentForge is designed to perform the investigation: query connected systems, test hypotheses, assemble an evidence timeline, and propose a defensible next action while keeping an engineer in control.
+This repository is an honest MVP, not an unattended pull-request bot. The current production composition supports live GitHub discovery through TrueForge, campaign creation, static preflight, implementation and verification child sessions, durable timelines, and approval issuance. GitHub writes are not exposed by an HTTP route, and the default Qodo authority and independent repair verifier are deliberately unavailable. See [Current limitations](#current-limitations).
 
 ## Prerequisites
 
-- Node.js 22 or newer
-- npm 10 or newer
-- API credentials for a model provider supported by TrueForge
-- Optional: MCP integrations for GitHub and observability data
-- Optional: a Daytona account for sandboxed execution
+- Node.js 22 or newer and npm
+- A local TrueForge service (the default URL is `http://127.0.0.1:8790`)
+- A TrueForge-supported model configured outside this repository
+- A GitHub MCP server configured and authorized in TrueForge
+- A ready Daytona sandbox provider in TrueForge
+- An immutable, pushed commit containing `skills/openquest/SKILL.md`
+- For Qodo readiness, an authenticated review authority and independent repair verifier implementation; these are not included in the default container
 
-The repository pins TrueForge to the version recorded in `package-lock.json` so every contributor starts from the same runtime.
+Credentials belong in provider credential stores or the current shell, never in committed files, screenshots, evidence, command output, URLs, or sandbox artifacts.
 
-## Start locally
+## Install and configure
 
-```bash
+Install exactly the locked dependency graph:
+
+```sh
 npm ci
+```
+
+Create two distinct, high-entropy capability tokens in your shell. Do not paste their values into documentation or evidence:
+
+```sh
+export OPERATOR_BEARER_TOKEN="$(openssl rand -hex 32)"
+export REVIEW_PROVIDER_BEARER_TOKEN="$(openssl rand -hex 32)"
+export QODO_BOT_IDENTITIES="the-verified-qodo-bot-login[bot]"
+```
+
+Optional server settings are `PORT` (default `8788`), `DATABASE_PATH` (default `openquest.sqlite`), `TRUEFORGE_BASE_URL` (default `http://localhost:8790`), `QODO_POLL_INTERVAL_MS` (default `60000`), and `QODO_SHUTDOWN_TIMEOUT_MS` (default `5000`). The browser stores the operator capability only in React memory: reload, close, or **Disconnect** clears it. It is never persisted to local or session storage.
+
+Register the trusted OpenQuest skill and agent only after GitHub MCP and Daytona are ready. The skill ref must be a full immutable commit SHA available from the allowlisted repository:
+
+```sh
+export OPENQUEST_SKILL_GIT_REF="$(git rev-parse HEAD)"
+npm exec -- tsx scripts/register-openquest-agent.ts --check
+npm exec -- tsx scripts/register-openquest-agent.ts
+```
+
+The registration command uses TrueForge inventory and settings APIs. It does not configure provider credentials. `TRUEFORGE_URL` and optional `TRUEFORGE_TOKEN` configure this registration client; they are separate from the server's `TRUEFORGE_BASE_URL` setting.
+
+## Run locally
+
+Start TrueForge, the API, and the web application together:
+
+```sh
 npm run dev
 ```
 
-Open [http://localhost:8790](http://localhost:8790).
+Open `http://127.0.0.1:5173/`. The API listens on `http://127.0.0.1:8788/`; TrueForge normally listens on `http://127.0.0.1:8790/`.
 
-TrueForge local mode runs as a single process backed by SQLite. Keep it bound to localhost; it is intended for personal development, not direct internet exposure.
+The UI asks for the operator capability before authenticated discovery. GitHub access in the embedded OpenQuest chat is read-only: the agent manifest enables only `@read-only` GitHub MCP tools. The campaign approval button issues time-limited authority for one exact server-owned proposal; it does not execute that action or write to GitHub.
 
-## Configure TrueForge
+## Repeatable demo preflight
 
-In the TrueForge UI:
+Run the non-secret, read-only preflight before a demo:
 
-1. Open **Settings → Models** and add a model provider.
-2. Open **Settings → Connectors** and add only the MCP servers needed for the current demo.
-3. Open **Settings → Skills** and import [`skills/incident-forge/SKILL.md`](skills/incident-forge/SKILL.md) from this repository.
-4. Open **Settings → Sandbox providers** and add Daytona if sandboxed analysis is required.
-5. In chat, enable the connectors, IncidentForge skill, dynamic subagents, and sandbox.
-6. Save the working configuration as a reusable agent named **IncidentForge**.
+```sh
+npm exec -- tsx scripts/demo.ts
+```
 
-Never commit provider tokens or connector credentials. Enter them through the relevant provider UI.
+It reports the web and API ports, liveness/readiness, TrueForge reachability, GitHub MCP authorization, Daytona state, agent and skill registration, trusted skill pin, Qodo readiness, and the exact browser URL. It performs HTTP `GET` requests and TrueForge inventory reads only. It does not create a campaign, run a sandbox, or call a GitHub write tool. Missing TrueForge or Qodo providers are reported as unavailable instead of being represented as passing.
 
-## Initial demo target
+Use `--strict` when the command should exit non-zero unless every reported dependency is ready:
 
-The first vertical slice will ingest a synthetic failed-deployment incident, delegate repository and telemetry investigation to focused subagents, parse evidence in a Daytona sandbox, and produce a sourced incident report. A remediation proposal must remain blocked until the user explicitly approves it.
+```sh
+npm exec -- tsx scripts/demo.ts --strict
+```
+
+OpenQuest currently has no runtime fixture mode. `fixtures/` supports existing automated tests; it is never silently substituted for live GitHub, TrueForge, Daytona, or Qodo evidence. Full presentation steps and evidence checkpoints are in [docs/demo-script.md](docs/demo-script.md).
+
+## Campaign flow
+
+1. Choose one or more curated spaces.
+2. TrueForge uses GitHub read tools to return source-linked public repository and issue evidence.
+3. Starting an issue creates a SQLite campaign and one parent TrueForge session in `policy_review`.
+4. Each `preflight`, `implement`, or `verify` operation creates a fresh child session. The OpenQuest agent configuration gives that session a Daytona sandbox.
+5. Static preflight must return all five required checks, a commit SHA, and proof that dependencies and repository scripts were not executed. Invalid or uncertain output quarantines the campaign.
+6. Durable evidence, child/sandbox references, campaign events, approvals, commits, Qodo findings, and escalation reasons remain isolated by campaign.
+7. A valid external-action proposal may be approved only for its exact payload digest and current campaign version. Approval expires after ten minutes and is single-use.
+8. After a real pull request exists, authenticated Qodo evidence may pass the gate, request a fresh isolated repair, or escalate. There is no fourth automatic repair iteration.
+
+The HTTP action routes currently cover `preflight`, `implement`, and `verify`; the product UI displays the parent TrueForge session and durable record but does not expose buttons for those action routes. API `POST` requests require the operator bearer capability except review synchronization, which requires the distinct review-provider capability. `GET` and `HEAD` routes return sanitized, read-only projections without a bearer token.
+
+## Health and readiness
+
+- `GET /api/healthz` always answers as a liveness endpoint and reports either `ok` or sanitized review degradation.
+- `GET /api/readyz` returns `200` only when the configured review job is ready. It returns `503 not_ready` when authenticated Qodo review resolution, repair verification, the scheduler, or recent store health is unavailable.
+
+In the default container, readiness is expected to be `503`: `UnavailableQodoReviewAuthority` is injected and `repairVerifierReady` is false. That is an explicit release limitation, not a successful Qodo configuration.
+
+## Verification
+
+CI and local release verification use the existing project commands:
+
+```sh
+npm run typecheck
+npm run lint
+npm run build
+npm test
+```
+
+The repository also defines targeted integration and Playwright commands, but Task 11 does not add or alter tests. The quality workflow installs with `npm ci` and runs type-check, lint, build, and the existing test suite on pushes and pull requests with read-only repository permissions.
 
 ## Repository map
 
 ```text
-.
-├── docs/architecture.md
-├── skills/incident-forge/SKILL.md
-├── package.json
-└── package-lock.json
+config/agents/       trusted TrueForge agent manifest
+skills/openquest/    contribution safety and execution skill
+src/domain/          campaign, approval, discovery, and quality rules
+src/application/     use cases and provider ports
+src/adapters/        SQLite, TrueForge, GitHub-catalog, and Qodo adapters
+src/server/          Fastify composition, routes, auth, and review scheduler
+src/web/             React campaign experience and embedded TrueForge UI
+scripts/             registration and read-only demo preflight
+docs/                architecture, threat model, Qodo, and demo guidance
+evidence/            non-secret evidence contract and capture checklist
 ```
 
-## Development workflow
+## Current limitations
 
-Work in focused pull requests and run each through Qodo, as required by the hackathon guide. Treat review findings as evidence: address meaningful issues and record the resulting changes in the pull request.
+- There is no fixture-backed application or `OPENQUEST_DEMO_MODE`; fixtures are test-only.
+- The default Qodo review authority is unavailable, no production repair verifier is injected, and readiness therefore fails closed.
+- No server route or production adapter executes approved GitHub comments, assignment requests, branch pushes, pull-request creation, or pull-request updates. Approval issuance alone causes no external write.
+- The browser has no controls for the API's `preflight`, `implement`, and `verify` action routes; those operations currently require an authenticated API client.
+- The chat surface uses the parent TrueForge session but enables only GitHub read tools. It cannot publish contributions.
+- The SQLite store is local-process persistence. There is no multi-user identity model, distributed scheduler, backup workflow, or hosted deployment configuration.
+- Sandbox isolation and lifecycle enforcement depend on the configured TrueForge/Daytona provider. Static preflight reduces risk but cannot prove arbitrary code safe or substitute for sandbox controls.
 
-## Source guide
-
-This setup follows the [Agent Harness Hackathon getting-started guide](https://www.wemakedevs.org/blogs/agent-harness-hackathon-kick-off), published August 24, 2026.
+Architecture and trust boundaries are detailed in [docs/architecture.md](docs/architecture.md) and [docs/threat-model.md](docs/threat-model.md). Qodo-specific behavior is documented in [docs/qodo-workflow.md](docs/qodo-workflow.md).

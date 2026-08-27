@@ -1,0 +1,32 @@
+{
+  "schemaVersion": "qodo_github_review_v1",
+  "repository": "owner/repo",
+  "pullRequestNumber": 7,
+  "reviewId": "qodo-review-duplicate-1",
+  "reviewUrl": "https://github.com/owner/repo/pull/7#pullrequestreview-104",
+  "sourceIdentity": "qodo-merge-pro[bot]",
+  "sourceReceipt": "github-app-receipt-duplicate-104",
+  "commitSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "testsPassed": true,
+  "complete": true,
+  "comments": [
+    {
+      "id": 301,
+      "html_url": "https://github.com/owner/repo/pull/7#discussion_r301",
+      "body": "**Severity:** Medium\nThe validation result is not checked before persistence.",
+      "path": "src/application/sync-review.ts",
+      "line": 31,
+      "user": { "login": "qodo-merge-pro[bot]" },
+      "status": "open"
+    },
+    {
+      "id": 301,
+      "html_url": "https://github.com/owner/repo/pull/7#discussion_r301",
+      "body": "**Severity:** Medium\nThe validation result is not checked before persistence.",
+      "path": "src/application/sync-review.ts",
+      "line": 31,
+      "user": { "login": "qodo-merge-pro[bot]" },
+      "status": "open"
+    }
+  ]
+}

