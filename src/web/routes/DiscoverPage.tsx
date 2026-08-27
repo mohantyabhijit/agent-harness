@@ -126,6 +126,7 @@ export function DiscoverPage({ api, spaces, navigate }: DiscoverPageProps) {
         <p className="eyebrow">Selected spaces · {spaces.map((space) => space.replaceAll("_", " ")).join(", ") || "none"}</p>
         <h1 tabIndex={-1}>Find a project worth your next pull request.</h1>
         <p>Every recommendation pairs visibility with evidence that a contribution can be thoughtfully reviewed.</p>
+        <p className="evidence-mode" role="status"><strong>Demo evidence</strong> · public repository snapshot · no external writes from this surface</p>
       </header>
       {status === "loading" ? <p aria-live="polite">Finding contribution-ready repositories…</p> : null}
       {status === "error" ? <section className="state-card" role="alert"><p>We could not load recommendations.</p><button onClick={loadDiscovery} type="button">Try again</button></section> : null}

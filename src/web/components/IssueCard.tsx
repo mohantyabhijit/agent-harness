@@ -11,7 +11,7 @@ export function IssueCard({ issue, lane, starting, onSelect }: IssueCardProps) {
   return (
     <article className="issue-card" aria-labelledby={`issue-${issue.repository}-${String(issue.number)}`}>
       <p className="eyebrow">{issue.repository} · #{issue.number}</p>
-      <h3 id={`issue-${issue.repository}-${String(issue.number)}`}><a href={issue.url} rel="noreferrer" target="_blank">{issue.title}</a></h3>
+      <h3 id={`issue-${issue.repository}-${String(issue.number)}`}><a aria-label={`${issue.title} (opens GitHub in a new tab)`} href={issue.url} rel="noreferrer" target="_blank">{issue.title}</a></h3>
       <dl className="issue-signals">
         <div><dt>Issue clarity</dt><dd>{percent(issue.clarity)}</dd></div>
         <div><dt>Estimated effort</dt><dd>{issue.estimatedHours} hours</dd></div>

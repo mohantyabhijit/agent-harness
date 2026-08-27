@@ -6,6 +6,7 @@ button { cursor: pointer; }
 button:disabled { cursor: not-allowed; opacity: .48; }
 a { color: #d7b6ff; }
 :focus-visible { outline: .2rem solid #9ff29c; outline-offset: .22rem; }
+button, .primary-action { min-height: 2.75rem; }
 .onboarding-shell, .discover-shell { width: min(72rem, 100%); margin: 0 auto; padding: clamp(1.5rem, 5vw, 5rem) clamp(1rem, 4vw, 3rem) 5rem; }
 .onboarding-shell { min-height: 100svh; }
 .onboarding-hero { max-width: 52rem; padding: 1.2rem 0 2.5rem; }
@@ -33,6 +34,7 @@ p { color: #d2cee2; line-height: 1.55; }
 .state-card { max-width: 38rem; margin: 2rem auto; padding: 1.4rem; border: 1px solid #51466d; border-radius: 1rem; background: #201a31; }
 .discover-header { max-width: 50rem; padding-bottom: 2.5rem; }
 .discover-header h1 { max-width: 15ch; }
+.evidence-mode { display: inline-block; margin: 1rem 0 0; padding: .7rem .85rem; border: 1px solid #4c4266; border-radius: .7rem; color: #d8d0e7; background: rgba(28, 23, 43, .8); font-size: .86rem; }
 .section-heading { max-width: 43rem; margin: 3.75rem 0 1.2rem; }
 .section-heading p:last-child { margin-bottom: 0; }
 .repository-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr)); gap: 1rem; }
