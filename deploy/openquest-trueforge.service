@@ -1,0 +1,23 @@
+[Unit]
+Description=TrueForge for OpenQuest
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=deploy
+Group=deploy
+WorkingDirectory=/srv/openquest/current
+Environment=NODE_ENV=production
+Environment=HOME=/srv/openquest/trueforge-data
+Environment=STANDALONE=true
+ExecStart=/srv/openquest/current/node_modules/.bin/trueforge --port 8790
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/srv/openquest/trueforge-data
+
+[Install]
+WantedBy=multi-user.target

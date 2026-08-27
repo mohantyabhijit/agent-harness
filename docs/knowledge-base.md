@@ -48,3 +48,9 @@ Current evidence from the latest independent pass: 416 unit tests and 127 integr
 ## External MR/PR status
 
 No pull request was created against FastAPI. The connected GitHub integration can read public PR history and identify the authenticated account, but it returned HTTP 403 when checking collaborator permission and has no available fork/branch creation path for that third-party repository. Do not represent a candidate as raised until a real branch, commit, CI result, and public PR URL exist. The current repository branch is the reviewable implementation artifact; external publication requires an authenticated fork or maintainer-approved branch.
+
+## Hosted deployment
+
+The production target is the existing DigitalOcean VPS behind Nginx/TLS at `https://abhijitmohanty.com/openquest/`. Releases live under `/srv/openquest/releases/<commit>`, with `current` updated atomically. The static Vite bundle is served by Nginx; `/openquest/api/` proxies to the localhost OpenQuest API on port 8788; `/openquest/trueforge/` proxies to the standalone TrueForge service on port 8790. Service definitions are in `deploy/`.
+
+The hosted API uses a private `/etc/openquest.env` generated on the VPS and never committed. TrueForge and Qodo/GitHub provider readiness must be checked independently; a reachable page is not evidence that provider-backed discovery or Qodo review is configured.
