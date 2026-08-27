@@ -1,4 +1,4 @@
-:root { font-family: Inter, ui-sans-serif, system-ui, sans-serif; color: #f8f7ff; background: #100d1d; font-synthesis: none; }
+:root { font-family: ui-sans-serif, system-ui, -apple-system, sans-serif; color: #f8f7ff; background: #100d1d; font-synthesis: none; }
 * { box-sizing: border-box; }
 body { margin: 0; min-width: 20rem; background: radial-gradient(circle at 80% 0%, #3f2465 0, transparent 29rem), #100d1d; }
 button, input { font: inherit; }
