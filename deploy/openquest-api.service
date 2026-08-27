@@ -11,6 +11,7 @@ WorkingDirectory=/srv/openquest/current
 EnvironmentFile=/etc/openquest.env
 Environment=NODE_ENV=production
 Environment=HOME=/srv/openquest/data
+Environment=PATH=/opt/secondspin-node/bin:/usr/bin:/bin
 ExecStart=/srv/openquest/current/node_modules/.bin/tsx src/server/index.ts
 Restart=on-failure
 RestartSec=5

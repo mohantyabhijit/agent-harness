@@ -11,6 +11,7 @@ WorkingDirectory=/srv/openquest/current
 Environment=NODE_ENV=production
 Environment=HOME=/srv/openquest/trueforge-data
 Environment=STANDALONE=true
+Environment=PATH=/opt/secondspin-node/bin:/usr/bin:/bin
 ExecStart=/srv/openquest/current/node_modules/.bin/trueforge --port 8790
 Restart=on-failure
 RestartSec=5
