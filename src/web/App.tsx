@@ -21,8 +21,8 @@ export function App({ api, operatorCapability }: AppProps) {
   const browserApi = useMemo(
     () => createOpenQuestApi(
       activeCapability === undefined
-        ? { fetch: window.fetch.bind(window) }
-        : { fetch: window.fetch.bind(window), operatorCapability: activeCapability },
+        ? { fetch: window.fetch.bind(window), baseUrl: import.meta.env.BASE_URL.replace(/\/$/u, "") }
+        : { fetch: window.fetch.bind(window), baseUrl: import.meta.env.BASE_URL.replace(/\/$/u, ""), operatorCapability: activeCapability },
     ),
     [activeCapability],
   );
