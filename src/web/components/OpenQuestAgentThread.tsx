@@ -3,8 +3,11 @@ import { TrueForgeUI } from "@truefoundry/trueforge-ui";
 
 interface OpenQuestAgentThreadProps { readonly sessionId: string; readonly trueForgeBaseUrl?: string; }
 
-export function OpenQuestAgentThread({ sessionId, trueForgeBaseUrl = "http://localhost:8790" }: OpenQuestAgentThreadProps) {
+export function OpenQuestAgentThread({ sessionId, trueForgeBaseUrl }: OpenQuestAgentThreadProps) {
   const [error, setError] = useState(false);
+  const resolvedTrueForgeBaseUrl = trueForgeBaseUrl ?? (
+    import.meta.env.DEV ? "http://localhost:8790" : `${window.location.origin}/openquest/trueforge`
+  );
   const handleError = useCallback(() => { setError(true); }, []);
   return <section aria-labelledby="agent-thread-heading" className="campaign-panel agent-thread" data-session-id={sessionId} data-testid="agent-thread">
     <div className="panel-heading">
@@ -19,7 +22,7 @@ export function OpenQuestAgentThread({ sessionId, trueForgeBaseUrl = "http://loc
         initialSessionId={sessionId}
         layout="drawer"
         onError={handleError}
-        server={{ type: "trueforge", baseUrl: trueForgeBaseUrl }}
+        server={{ type: "trueforge", baseUrl: resolvedTrueForgeBaseUrl }}
         theme={{ brand: { name: "OpenQuest", logo: "/openquest-mark.svg" }, mode: "dark", preset: "trueforge" }}
       />
     </div>
