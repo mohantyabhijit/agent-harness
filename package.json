@@ -4,9 +4,12 @@
   "private": true,
   "description": "Human-in-the-loop production incident investigator built with TrueForge",
   "scripts": {
-    "dev": "trueforge",
-    "start": "trueforge"
+    "dev": "node src/server.mjs",
+    "start": "node src/server.mjs",
+    "test": "node --test",
+    "lint": "node --check src/domain.js && node --check src/cli.mjs && node --check src/server.mjs"
   },
+  "type": "module",
   "engines": {
     "node": ">=22"
   },
@@ -14,4 +17,3 @@
     "@truefoundry/trueforge": "0.1.4"
   }
 }
-

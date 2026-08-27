@@ -1,0 +1,19 @@
+{
+  "repository": {
+    "fullName": "fastapi/fastapi",
+    "stars": 90000,
+    "pushedAt": "2026-08-27T00:00:00Z",
+    "hasContributing": true,
+    "hasCi": true,
+    "hasLicense": true,
+    "externalReview": true
+  },
+  "mergedPullRequests": [
+    { "number": 16252, "title": "Bump Typer min version to 0.26.1", "mergedAt": "2026-08-26T17:53:54Z", "url": "https://github.com/fastapi/fastapi/pull/16252" },
+    { "number": 16249, "title": "Bump setup-uv action to 10.0.1", "mergedAt": "2026-08-25T13:19:26Z", "url": "https://github.com/fastapi/fastapi/pull/16249" }
+  ],
+  "candidateIssues": [
+    { "number": 0, "title": "Add a focused documentation example for dependency overrides", "clearScope": true, "hasAcceptanceCriteria": true, "hasTests": true, "lowSurfaceArea": true, "activeContributor": false, "estimatedHours": 4 },
+    { "number": 0, "title": "Improve test coverage for an edge-case request validation path", "clearScope": false, "hasAcceptanceCriteria": false, "hasTests": true, "lowSurfaceArea": false, "activeContributor": false, "estimatedHours": 12 }
+  ]
+}
