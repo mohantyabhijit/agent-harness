@@ -3,11 +3,11 @@
 
 [github_app]
 pr_commands = [
-  "/review",
+  "/agentic_review",
 ]
 handle_push_trigger = true
 push_commands = [
-  "/review",
+  "/agentic_review",
 ]
 
 [pr_reviewer]
