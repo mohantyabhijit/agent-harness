@@ -230,6 +230,7 @@ export class TrueForgeHarness implements HarnessPort {
           }
         }
       } finally {
+        streamAbortController.abort();
         const closeResult = iterator.return?.();
         if (closeResult !== undefined) {
           await settleWithin(closeResult, TERMINAL_STREAM_GRACE_MS);
