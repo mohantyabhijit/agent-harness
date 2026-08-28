@@ -10,6 +10,8 @@ import type {
 } from "../../application/ports/harness.js";
 import { HarnessAuthRequired, HarnessExecutionFailed, HarnessOutputInvalid, HarnessUnavailable } from "../../application/ports/harness.js";
 
+const TERMINAL_STREAM_GRACE_MS = 250;
+
 const finalEnvelopeSchema = z
   .object({
     summary: z.string().trim().min(1),
@@ -169,7 +171,16 @@ export class TrueForgeHarness implements HarnessPort {
       // A session owns its sandbox in TrueForge. Creating one here ensures every
       // milestone or repair runs in a fresh child context and fresh sandbox.
       const sessionId = await this.createNamedSession(options);
-      const stream = await this.streamSession(sessionId, packet, operation, options);
+      const streamAbortController = new AbortController();
+      const streamOptions = options === undefined
+        ? { signal: streamAbortController.signal }
+        : {
+            ...options,
+            signal: options.signal === undefined
+              ? streamAbortController.signal
+              : AbortSignal.any([options.signal, streamAbortController.signal]),
+          };
+      const stream = await this.streamSession(sessionId, packet, operation, streamOptions);
       const createdTurnIds: string[] = [];
       let terminalState: z.infer<typeof turnDoneSchema>["state"] | undefined;
       let terminalCount = 0;
@@ -177,31 +188,51 @@ export class TrueForgeHarness implements HarnessPort {
       let malformedLifecycleEvent = false;
       let authenticationRequired = false;
 
-      for await (const event of stream) {
-        if (terminalCount > 0) {
-          eventAfterTerminal = true;
-        }
-        if (isMcpAuthRequired(event)) {
-          authenticationRequired = true;
-        }
+      const iterator = stream[Symbol.asyncIterator]();
+      let terminalSeen = false;
+      let streamOpen = true;
+      try {
+        while (streamOpen) {
+          const result = terminalSeen
+            ? await nextWithGracePeriod(iterator, streamAbortController)
+            : await iterator.next();
+          if (result.done) {
+            streamOpen = false;
+            continue;
+          }
+          const event = result.value;
+          if (terminalCount > 0) {
+            eventAfterTerminal = true;
+            break;
+          }
+          if (isMcpAuthRequired(event)) {
+            authenticationRequired = true;
+          }
 
-        if (hasEventType(event, "turn.created")) {
-          const turnCreated = turnCreatedSchema.safeParse(event);
-          if (!turnCreated.success) {
-            malformedLifecycleEvent = true;
-          } else {
-            createdTurnIds.push(turnCreated.data.turnId);
+          if (hasEventType(event, "turn.created")) {
+            const turnCreated = turnCreatedSchema.safeParse(event);
+            if (!turnCreated.success) {
+              malformedLifecycleEvent = true;
+            } else {
+              createdTurnIds.push(turnCreated.data.turnId);
+            }
+          }
+
+          if (hasEventType(event, "turn.done")) {
+            terminalCount += 1;
+            terminalSeen = true;
+            const turnDone = turnDoneSchema.safeParse(event);
+            if (!turnDone.success) {
+              malformedLifecycleEvent = true;
+            } else {
+              terminalState = turnDone.data.state;
+            }
           }
         }
-
-        if (hasEventType(event, "turn.done")) {
-          terminalCount += 1;
-          const turnDone = turnDoneSchema.safeParse(event);
-          if (!turnDone.success) {
-            malformedLifecycleEvent = true;
-          } else {
-            terminalState = turnDone.data.state;
-          }
+      } finally {
+        const closeResult = iterator.return?.();
+        if (closeResult !== undefined) {
+          await settleWithin(closeResult, TERMINAL_STREAM_GRACE_MS);
         }
       }
 
@@ -271,6 +302,50 @@ export class TrueForgeHarness implements HarnessPort {
       throw new HarnessExecutionFailed();
     }
     return sessionId;
+  }
+}
+
+async function nextWithGracePeriod(
+  iterator: AsyncIterator<unknown>,
+  abortController: AbortController,
+): Promise<IteratorResult<unknown>> {
+  const pending = iterator.next();
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const result = await Promise.race([
+      pending.then((value) => ({ kind: "result" as const, value })),
+      new Promise<{ kind: "timeout" }>((resolve) => {
+        timeout = setTimeout(() => {
+          resolve({ kind: "timeout" });
+        }, TERMINAL_STREAM_GRACE_MS);
+      }),
+    ]);
+    if (result.kind === "timeout") {
+      abortController.abort();
+      void pending.catch(() => undefined);
+      return { done: true, value: undefined };
+    }
+    return result.value;
+  } finally {
+    if (timeout !== undefined) {
+      clearTimeout(timeout);
+    }
+  }
+}
+
+async function settleWithin<T>(promise: Promise<T>, timeoutMs: number): Promise<void> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      promise.then(() => undefined, () => undefined),
+      new Promise<void>((resolve) => {
+        timeout = setTimeout(resolve, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout !== undefined) {
+      clearTimeout(timeout);
+    }
   }
 }
 

@@ -80,11 +80,29 @@ describe("TrueForgeHarness", () => {
       output: { status: "verified" },
     });
     expect(client.sessions.create).toHaveBeenCalledWith({ agent: { name: "openquest" } });
-    expect(client.sessions.createTurnStream).toHaveBeenCalledWith("child-session-1", {
-      input: [{ type: "user.message", content: JSON.stringify({ operation: "implement", packet }) }],
-      previousTurnId: "auto",
-    });
+    expect(client.sessions.createTurnStream).toHaveBeenCalledWith(
+      "child-session-1",
+      {
+        input: [{ type: "user.message", content: JSON.stringify({ operation: "implement", packet }) }],
+        previousTurnId: "auto",
+      },
+      { abortSignal: expect.any(AbortSignal) },
+    );
     expect(consumed).toBe(events.length);
+  });
+
+  it("returns after a terminal event when the provider leaves the stream open", async () => {
+    const client = {
+      sessions: {
+        create: vi.fn().mockResolvedValue({ data: { id: "child-session-1" } }),
+        createTurnStream: vi.fn().mockResolvedValue(openEndedAfterTerminalStream()),
+      },
+    };
+    const harness = new TrueForgeHarness(client as never);
+
+    await expect(harness.runChildSession(packet, "discover")).resolves.toMatchObject({
+      sessionId: "child-session-1",
+    });
   });
 
   it("returns persisted events across every SDK page", async () => {
@@ -366,4 +384,10 @@ async function* stream(
 async function* throwingStream(message: string): AsyncGenerator {
   yield turnCreatedEvent();
   throw new Error(message);
+}
+
+async function* openEndedAfterTerminalStream(): AsyncGenerator {
+  yield turnCreatedEvent();
+  yield turnDoneEvent();
+  await new Promise<never>(() => undefined);
 }
