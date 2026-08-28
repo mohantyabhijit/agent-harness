@@ -54,3 +54,17 @@ No pull request was created against FastAPI. The connected GitHub integration ca
 The production target is the existing DigitalOcean VPS behind Nginx/TLS at `https://abhijitmohanty.com/openquest/`. Releases live under `/srv/openquest/releases/<commit>`, with `current` updated atomically. The static Vite bundle is served by Nginx; `/openquest/api/` proxies to the localhost OpenQuest API on port 8788; `/openquest/trueforge/` proxies to the standalone TrueForge service on port 8790. Service definitions are in `deploy/`.
 
 The hosted API uses a private `/etc/openquest.env` generated on the VPS and never committed. TrueForge and Qodo/GitHub provider readiness must be checked independently; a reachable page is not evidence that provider-backed discovery or Qodo review is configured.
+
+### Hosted runtime verification (2026-08-28)
+
+The deployed release is `1dbd96360dc9d5ca347723812e81129181798a53`. Both `openquest-api.service` and `openquest-trueforge.service` are active, the public UI returns HTTP 200, and unauthenticated API writes correctly return HTTP 401. The VPS TrueForge instance is reachable and its read-only GitHub MCP is authenticated; the OpenQuest skill URL and immutable release ref are valid.
+
+The deployment is not provider-ready for discovery yet: the remote TrueForge tenant has no Daytona sandbox provider, no sandbox API key is available on the host, and therefore no `openquest` agent is registered there. `/openquest/api/healthz` reports `provider_unavailable` and `/openquest/api/readyz` intentionally returns HTTP 503. Configure the Daytona provider through TrueForge settings using a secret-managed API key, then run the following pinned, secret-free checks before enabling traffic:
+
+```sh
+export TRUEFORGE_URL=http://[::1]:8790
+export OPENQUEST_SKILL_GIT_URL=https://github.com/mohantyabhijit/agent-harness.git
+export OPENQUEST_SKILL_GIT_REF=1dbd96360dc9d5ca347723812e81129181798a53
+npx tsx scripts/register-openquest-agent.ts --check
+npx tsx scripts/register-openquest-agent.ts
+```
