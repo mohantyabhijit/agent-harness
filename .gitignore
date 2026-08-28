@@ -25,3 +25,4 @@ openquest.sqlite*
 
 # Isolated implementation worktrees
 .worktrees/
+.qodo/
