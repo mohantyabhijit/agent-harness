@@ -1,0 +1,17 @@
+# Qodo Git Integration configuration.
+# The Qodo GitHub App must be installed on this repository for these hooks to run.
+
+[github_app]
+pr_commands = [
+  "/agentic_review",
+]
+handle_push_trigger = true
+push_commands = [
+  "/agentic_review",
+]
+
+[pr_reviewer]
+require_tests_review = true
+require_security_review = true
+require_ticket_analysis_review = true
+extra_instructions = "Review the full repository context. Prioritize correctness, security, concurrency, persistence, approval-boundary violations, and missing regression tests. Treat Qodo findings as review evidence for OpenQuest; never make or approve GitHub writes."

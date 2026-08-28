@@ -10,6 +10,8 @@ OpenQuest treats Qodo review data as untrusted GitHub evidence. A review can blo
 4. Open a controlled pull request and confirm that Qodo posts a review without a manual trigger.
 5. Record the exact GitHub bot login shown on that review. Configure the server's required comma-separated `QODO_BOT_IDENTITIES` allowlist with only verified Qodo bot logins. There is no inferred or built-in identity; startup fails when the allowlist is missing.
 
+This repository includes `.pr_agent.toml`, which asks current Qodo Git Integration (v2) to run `/agentic_review` when a pull request is opened, reopened, or marked ready for review, and again when new commits are pushed to an open pull request. The configuration also requires test, security, and ticket-analysis review sections. Installing and authorizing the Qodo GitHub App remains an external repository-owner action; the file alone cannot grant Qodo access.
+
 Do not put GitHub, Qodo, or TrueForge credentials in this repository, campaign evidence, screenshots, logs, or the allowlist. Authentication stays in the GitHub App installation and the local Qodo/TrueForge credential stores.
 
 ## Local CLI
