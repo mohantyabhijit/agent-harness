@@ -165,6 +165,18 @@ describe("TrueForgeHarness", () => {
     );
   });
 
+  it("preserves authentication failures from late stream events", async () => {
+    const harness = harnessStreaming([
+      turnCreatedEvent(),
+      turnDoneEvent(),
+      { type: "mcp.auth_required", mcpServers: [{ name: "github", authUrl: "https://example.invalid/secret" }] },
+    ]);
+
+    await expect(harness.runChildSession(packet, "verify")).rejects.toBeInstanceOf(
+      HarnessAuthRequired,
+    );
+  });
+
   it("fails closed when the stream ends without a successful turn", async () => {
     const client = {
       sessions: {

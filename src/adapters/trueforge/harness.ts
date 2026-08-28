@@ -201,12 +201,12 @@ export class TrueForgeHarness implements HarnessPort {
             continue;
           }
           const event = result.value;
+          if (isMcpAuthRequired(event)) {
+            authenticationRequired = true;
+          }
           if (terminalCount > 0) {
             eventAfterTerminal = true;
             break;
-          }
-          if (isMcpAuthRequired(event)) {
-            authenticationRequired = true;
           }
 
           if (hasEventType(event, "turn.created")) {
