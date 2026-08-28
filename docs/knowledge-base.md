@@ -57,14 +57,14 @@ The hosted API uses a private `/etc/openquest.env` generated on the VPS and neve
 
 ### Hosted runtime verification (2026-08-28)
 
-The deployed release is `1dbd96360dc9d5ca347723812e81129181798a53`. Both `openquest-api.service` and `openquest-trueforge.service` are active, the public UI returns HTTP 200, and unauthenticated API writes correctly return HTTP 401. The VPS TrueForge instance is reachable and its read-only GitHub MCP is authenticated; the OpenQuest skill URL and immutable release ref are valid.
+The deployed release is `a55cab555ee4cb9798a9e30f122072a7fe8b9c7a`. Both `openquest-api.service` and `openquest-trueforge.service` are active, the public UI returns HTTP 200, and unauthenticated API writes correctly return HTTP 401. The release also preserves the dedicated authentication error for late TrueForge MCP-auth events. The VPS TrueForge instance is reachable and its read-only GitHub MCP is authenticated; the OpenQuest skill URL and immutable release ref are valid.
 
 The deployment is not provider-ready for discovery yet: the remote TrueForge tenant has no Daytona sandbox provider, no sandbox API key is available on the host, and therefore no `openquest` agent is registered there. `/openquest/api/healthz` reports `provider_unavailable` and `/openquest/api/readyz` intentionally returns HTTP 503. Configure the Daytona provider through TrueForge settings using a secret-managed API key, then run the following pinned, secret-free checks before enabling traffic:
 
 ```sh
 export TRUEFORGE_URL=http://[::1]:8790
 export OPENQUEST_SKILL_GIT_URL=https://github.com/mohantyabhijit/agent-harness.git
-export OPENQUEST_SKILL_GIT_REF=1dbd96360dc9d5ca347723812e81129181798a53
+export OPENQUEST_SKILL_GIT_REF=a55cab555ee4cb9798a9e30f122072a7fe8b9c7a
 npx tsx scripts/register-openquest-agent.ts --check
 npx tsx scripts/register-openquest-agent.ts
 ```
