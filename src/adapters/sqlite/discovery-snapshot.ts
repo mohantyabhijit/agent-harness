@@ -75,7 +75,7 @@ export class SqliteDiscoverySnapshotStore implements DiscoverySnapshotPort {
     if (row === undefined) return undefined;
     try {
       const issues = z.array(issueSchema).parse(JSON.parse(row.payload_json));
-      if (!issues.every((issue) => issue.repository.toLowerCase() === repository.toLowerCase())) {
+      if (!issues.every((issue) => isIssueForRepository(issue, repository))) {
         return undefined;
       }
       return { issues, verifiedAt: row.verified_at };
@@ -102,7 +102,7 @@ export class SqliteDiscoverySnapshotStore implements DiscoverySnapshotPort {
   writeIssues(repository: string, values: readonly IssueCandidate[], verifiedAt: string): void {
     validVerificationTime(verifiedAt);
     const issues = z.array(issueSchema).parse(values);
-    if (!issues.every((issue) => issue.repository.toLowerCase() === repository.toLowerCase())) {
+    if (!issues.every((issue) => isIssueForRepository(issue, repository))) {
       throw new Error("Invalid issue snapshot");
     }
     this.write(`issues:${repository.toLowerCase()}`, "issues", issues, verifiedAt);
@@ -144,4 +144,21 @@ function validVerificationTime(value: string): Date {
 
 function isValidTimestamp(value: string): boolean {
   return Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
+}
+
+function isIssueForRepository(issue: IssueCandidate, repository: string): boolean {
+  if (issue.repository.toLowerCase() !== repository.toLowerCase()) return false;
+  try {
+    const url = new URL(issue.url);
+    return url.protocol === "https:" &&
+      url.hostname.toLowerCase() === "github.com" &&
+      url.port === "" &&
+      url.username === "" &&
+      url.password === "" &&
+      url.search === "" &&
+      url.hash === "" &&
+      url.pathname.toLowerCase() === `/${repository}/issues/${String(issue.number)}`.toLowerCase();
+  } catch {
+    return false;
+  }
 }

@@ -6,6 +6,7 @@ export interface CachedDiscovery<T> { readonly values: readonly T[]; readonly ve
 
 export class DiscoverySnapshotCache {
   private readonly refreshing = new Set<string>();
+  private readonly liveRequests = new Map<string, Promise<readonly unknown[]>>();
 
   constructor(
     private readonly live: GithubCatalogPort,
@@ -66,7 +67,7 @@ export class DiscoverySnapshotCache {
         refreshing: stale || this.refreshing.has(key),
       };
     }
-    const fresh = await fetch();
+    const fresh = await this.fetchOnce(key, fetch);
     const verifiedAt = new Date(this.now()).toISOString();
     save(fresh, verifiedAt);
     return { values: fresh, verifiedAt, source: "live", refreshing: false };
@@ -79,9 +80,17 @@ export class DiscoverySnapshotCache {
   ): void {
     if (this.refreshing.has(key)) return;
     this.refreshing.add(key);
-    void fetch()
+    void this.fetchOnce(key, fetch)
       .then((values) => { save(values, new Date(this.now()).toISOString()); })
       .catch(() => undefined)
       .finally(() => { this.refreshing.delete(key); });
+  }
+
+  private fetchOnce<T>(key: string, fetch: () => Promise<readonly T[]>): Promise<readonly T[]> {
+    const active = this.liveRequests.get(key);
+    if (active !== undefined) return active as Promise<readonly T[]>;
+    const request = fetch().finally(() => { this.liveRequests.delete(key); });
+    this.liveRequests.set(key, request);
+    return request;
   }
 }
