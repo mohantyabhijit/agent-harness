@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { Clock, CreateCampaign } from "../../application/create-campaign.js";
 import type { CampaignStore } from "../../application/ports/campaign-store.js";
 import type { RunCampaign } from "../../application/run-campaign.js";
+import type { FinalizeCampaign } from "../../application/finalize-campaign.js";
 import { boundedUrlSchema, campaignIdSchema, campaignNotFound, issueNumberSchema, publicCampaignSnapshot, repositorySchema } from "./support.js";
 
 const createCampaignSchema = z
@@ -22,12 +23,14 @@ const createCampaignSchema = z
 const campaignParamsSchema = z.object({ id: campaignIdSchema }).strict();
 const actionParamsSchema = z.object({ id: campaignIdSchema, action: z.enum(["preflight", "implement", "verify"]) }).strict();
 const emptyBodySchema = z.object({}).strict();
+const finalizeBodySchema = z.object({ expectedVersion: z.number().int().positive(), idempotencyKey: z.string().min(8).max(128) }).strict();
 
 export interface CampaignRouteDependencies {
   readonly createCampaign: CreateCampaign;
   readonly runCampaign: RunCampaign;
   readonly store: CampaignStore;
   readonly clock: Clock;
+  readonly finalizeCampaign: FinalizeCampaign;
 }
 
 export function registerCampaignRoutes(app: FastifyInstance, dependencies: CampaignRouteDependencies): void {
@@ -49,6 +52,11 @@ export function registerCampaignRoutes(app: FastifyInstance, dependencies: Campa
     const { id, action } = actionParamsSchema.parse(request.params);
     emptyBodySchema.parse(request.body ?? {});
     return dependencies.runCampaign.execute(id, action);
+  });
+  app.post("/api/campaigns/:id/finalize", async (request) => {
+    const { id } = campaignParamsSchema.parse(request.params);
+    const input = finalizeBodySchema.parse(request.body);
+    return dependencies.finalizeCampaign.execute({ campaignId: id, expectedVersion: input.expectedVersion, idempotencyKey: input.idempotencyKey });
   });
 }
 

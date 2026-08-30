@@ -29,6 +29,7 @@ export interface HarnessRequestOptions {
   readonly signal?: AbortSignal;
   readonly timeoutMs?: number;
   readonly sessionLifecycle?: "durable" | "transient";
+  readonly sessionProfile?: "default" | "policy";
 }
 
 export type HarnessErrorCode = "auth_required" | "execution_failed" | "invalid_output" | "unavailable";

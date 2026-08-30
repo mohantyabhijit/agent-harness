@@ -20,6 +20,7 @@ const realCampaignResponse = {
 } as const;
 const realCampaignSnapshot: CampaignSnapshot = {
   ...realCampaignResponse,
+  issueBrief: null,
   nextAllowedAction: null,
   evidence: [],
   events: [{ id: "created", eventType: "campaign_created", occurredAt: "2026-08-26T00:00:00Z", sequence: 1, facts: {} }],
@@ -131,6 +132,14 @@ describe("OpenQuest browser API", () => {
 
     await expect(api.getCampaign(":review.1")).resolves.toEqual(realCampaignSnapshot);
     expect(fetcher).toHaveBeenCalledWith("https://openquest.test/api/campaigns/%3Areview.1", expect.not.objectContaining({ headers: expect.anything() }));
+  });
+
+  it("finalizes only a server-persisted brief with version and idempotency", async () => {
+    const fetcher = vi.fn<FetchLike>(async () => new Response(JSON.stringify({ ...realCampaignResponse, status: "coordination_pending", version: 2 }), { status: 200 }));
+    const api = createOpenQuestApi({ fetch: fetcher, operatorCapability: () => "runtime-only" });
+
+    await expect(api.finalizeCampaign(":review.1", 1, "finalize-click-0001")).resolves.toMatchObject({ status: "coordination_pending", version: 2 });
+    expect(fetcher).toHaveBeenCalledWith("/api/campaigns/%3Areview.1/finalize", expect.objectContaining({ method: "POST", headers: { "content-type": "application/json", authorization: "Bearer runtime-only" }, body: JSON.stringify({ expectedVersion: 1, idempotencyKey: "finalize-click-0001" }) }));
   });
 
   it("rejects malformed durable campaign facts at the browser boundary", async () => {

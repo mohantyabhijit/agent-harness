@@ -2,6 +2,7 @@ import type { Approval } from "../../domain/approval.js";
 import type { Campaign, CampaignStatus } from "../../domain/campaign.js";
 import type { Evidence } from "../../domain/evidence.js";
 import type { QodoFinding } from "../../domain/quality-gate.js";
+import type { IssueBrief } from "../../domain/issue-brief.js";
 import type { ExternalActionPayload } from "../external-action.js";
 import type { PersistenceLease } from "./persistence-lease.js";
 
@@ -177,6 +178,7 @@ export interface ProposalApprovalIssuanceRecord {
 }
 
 export interface CampaignStore {
+  finalizeCampaign(campaignId: string, brief: IssueBrief, expectedVersion: number, event: CampaignEventInput): Promise<Campaign>;
   create(campaign: Campaign, initialEvent?: CampaignEventInput): Promise<void>;
   get(id: string, observedAt?: string): Promise<CampaignSnapshot | undefined>;
   findByIssue(repository: string, issueNumber: number): Promise<CampaignSnapshot | undefined>;

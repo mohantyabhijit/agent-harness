@@ -94,6 +94,18 @@ export class FakeHarness implements HarnessPort {
 }
 
 function defaultOutput(operation: HarnessOperation): unknown {
+  if (operation === "policy") {
+    return {
+      problem: "The selected issue describes behavior that does not match the repository contract.",
+      likelyCause: "The affected path lacks the narrow guard required by the issue.",
+      smallestFix: "Add the focused guard and a regression test without unrelated refactoring.",
+      affectedAreas: ["src/affected-path.ts"],
+      tests: ["Run the focused regression test and the repository test suite."],
+      risks: ["The guard could reject a previously accepted edge case."],
+      uncertainty: "The exact file remains subject to sandbox inspection after finalization.",
+      evidence: [{ sourceUrl: "https://github.com/owner/repo/issues/42", observation: "The selected issue defines the reported behavior and expected outcome." }],
+    };
+  }
   if (operation === "preflight") {
     return {
       verdict: "pass",

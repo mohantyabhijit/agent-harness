@@ -28,7 +28,7 @@ export interface Campaign {
 }
 
 const allowed: Record<CampaignStatus, readonly CampaignStatus[]> = {
-  policy_review: ["coordination_pending", "preflight", "withdrawn"],
+  policy_review: ["coordination_pending", "withdrawn"],
   coordination_pending: ["preflight", "withdrawn"],
   preflight: ["quarantined", "baseline", "withdrawn"],
   quarantined: ["preflight", "withdrawn"],

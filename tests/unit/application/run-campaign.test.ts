@@ -22,7 +22,7 @@ const requiredChecks = [
 describe("RunCampaign", () => {
   it("cannot request implementation before a passed preflight", async () => {
     const { service, store, harness } = fixture();
-    store.seed(campaign({ status: "policy_review" }));
+    store.seed(campaign({ status: "coordination_pending" }));
 
     await expect(service.execute("campaign-1", "implement")).rejects.toMatchObject({ code: "invalid_transition" });
     expect(harness.operations).not.toContain("implement");
@@ -36,7 +36,7 @@ describe("RunCampaign", () => {
     expect(packageText).toContain('"preinstall"');
     expect(packageText).toContain("curl");
     const { service, store, harness } = fixture();
-    store.seed(campaign({ status: "policy_review" }));
+    store.seed(campaign({ status: "coordination_pending" }));
     harness.enqueueResult("preflight", {
       summary: "Lifecycle script found by static manifest inspection",
       artifacts: ["artifacts/preflight.json"],
@@ -66,7 +66,7 @@ describe("RunCampaign", () => {
     ["missing source-linked evidence", preflightAttestation({ evidence: [] })],
   ])("rejects an invalid trusted preflight attestation: %s", async (_label, output) => {
     const { service, store, harness } = fixture();
-    store.seed(campaign({ status: "policy_review" }));
+    store.seed(campaign({ status: "coordination_pending" }));
     harness.enqueueResult("preflight", { summary: "preflight", artifacts: [], output });
 
     await expect(service.execute("campaign-1", "preflight")).rejects.toThrow(/quarantined/i);
@@ -88,7 +88,7 @@ describe("RunCampaign", () => {
 
   it("records each child as session and sandbox identity with version-bound artifacts", async () => {
     const { service, store, harness } = fixture();
-    store.seed(campaign({ status: "policy_review" }));
+    store.seed(campaign({ status: "coordination_pending" }));
 
     expect((await service.execute("campaign-1", "preflight")).status).toBe("baseline");
     expect((await service.execute("campaign-1", "implement")).status).toBe("implementation");
@@ -152,7 +152,7 @@ describe("RunCampaign", () => {
   it("rotates a reported implementation head and verifies that exact commit", async () => {
     const nextCommit = "b".repeat(40);
     const { service, store, harness } = fixture();
-    store.seed(campaign({ status: "policy_review" }));
+    store.seed(campaign({ status: "coordination_pending" }));
     await service.execute("campaign-1", "preflight");
     harness.enqueueResult("implement", { summary: "implemented", artifacts: [], output: { status: "completed", commitSha: nextCommit } });
     await service.execute("campaign-1", "implement");
@@ -166,7 +166,7 @@ describe("RunCampaign", () => {
 
   it("fences a delayed verifier after recovery and blocks implementation before completion", async () => {
     const { service, store, harness } = fixture();
-    store.seed(campaign({ status: "policy_review" }));
+    store.seed(campaign({ status: "coordination_pending" }));
     await service.execute("campaign-1", "preflight");
     await service.execute("campaign-1", "implement");
     let releaseResult!: () => void;

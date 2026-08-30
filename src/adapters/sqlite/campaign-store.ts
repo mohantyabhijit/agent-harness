@@ -36,6 +36,7 @@ import {
   type Approval,
 } from "../../domain/approval.js";
 import type { Campaign, CampaignStatus } from "../../domain/campaign.js";
+import type { IssueBrief } from "../../domain/issue-brief.js";
 import type { Evidence } from "../../domain/evidence.js";
 import type { QodoFinding } from "../../domain/quality-gate.js";
 import { parseQodoFinding } from "../../application/qodo-review-batch.js";
@@ -130,6 +131,30 @@ export class SqliteCampaignStore implements CampaignStore {
   constructor(database: Database.Database) {
     this.#database = database;
     migrateCampaignStore(database);
+  }
+
+  async finalizeCampaign(campaignId: string, brief: IssueBrief, expectedVersion: number, event: CampaignEventInput): Promise<Campaign> {
+    const operation = this.#database.transaction(() => {
+      const row = this.#database.prepare("SELECT * FROM campaigns WHERE id = ?").get(campaignId) as CampaignRow | undefined;
+      if (row === undefined) throw new Error("Campaign does not exist");
+      const requestedKey = isRecord(event.payload) ? event.payload.idempotencyKey : undefined;
+      const priorRows = this.#database.prepare("SELECT payload_json FROM campaign_events WHERE campaign_id = ? AND event_type = 'campaign_finalized' ORDER BY sequence").all(campaignId) as { payload_json: string }[];
+      const prior = priorRows.map((candidate) => parseJsonRecord(candidate.payload_json)).find((payload) => payload?.idempotencyKey === requestedKey);
+      if (prior !== undefined) {
+        if (prior.expectedVersion !== expectedVersion) throw new CampaignVersionConflict(campaignId, expectedVersion);
+        return { ...row };
+      }
+      if (row.version !== expectedVersion || row.status !== "policy_review") throw new CampaignVersionConflict(campaignId, expectedVersion);
+      const nextVersion = expectedVersion + 1;
+      const updated = this.#database.prepare("UPDATE campaigns SET status = ?, version = ?, updated_at = ? WHERE id = ? AND version = ?").run("coordination_pending", nextVersion, new Date().toISOString(), campaignId, expectedVersion);
+      if (updated.changes !== 1) throw new CampaignVersionConflict(campaignId, expectedVersion);
+      const sequence = (this.#database.prepare("SELECT COALESCE(MAX(sequence), 0) AS sequence FROM campaign_events WHERE campaign_id = ?").get(campaignId) as { sequence: number }).sequence + 1;
+      const payload = isRecord(event.payload) ? { ...event.payload, brief } : { brief };
+      this.#database.prepare("INSERT INTO campaign_events (id, campaign_id, event_type, payload_json, occurred_at, sequence) VALUES (?, ?, ?, ?, ?, ?)").run(event.id, campaignId, "campaign_finalized", JSON.stringify(payload), normalizeTimestamp(event.occurredAt, "event occurredAt"), sequence);
+      return { id: row.id, repository: row.repository, issue_number: row.issue_number, issue_url: row.issue_url, parent_session_id: row.parent_session_id, lane: row.lane, status: "coordination_pending" as const, qodo_iteration: row.qodo_iteration, version: nextVersion };
+    });
+    const result = operation.immediate();
+    return { id: result.id, repository: result.repository, issueNumber: result.issue_number, issueUrl: result.issue_url, parentSessionId: result.parent_session_id, lane: result.lane, status: result.status, qodoIteration: result.qodo_iteration, version: result.version };
   }
 
   async create(campaign: Campaign, initialEvent?: CampaignEventInput): Promise<void> {
@@ -918,6 +943,19 @@ export class SqliteCampaignStore implements CampaignStore {
       externalReferences,
       externalActionClaims: externalActionClaims.map(mapExternalActionClaim),
     };
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function parseJsonRecord(value: string): Record<string, unknown> | undefined {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return isRecord(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
   }
 }
 

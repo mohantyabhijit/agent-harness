@@ -23,8 +23,9 @@ describe("transitionCampaign", () => {
     expect(verifyCampaignIsReadonly).toBeTypeOf("function");
   });
 
-  it("allows policy review to advance to preflight", () => {
-    expect(transitionCampaign(campaign, "preflight").status).toBe("preflight");
+  it("requires policy review to advance through explicit coordination", () => {
+    expect(transitionCampaign(campaign, "coordination_pending").status).toBe("coordination_pending");
+    expect(() => transitionCampaign(campaign, "preflight")).toThrow(/invalid campaign transition/i);
   });
 
   it("rejects skipping preflight", () => {

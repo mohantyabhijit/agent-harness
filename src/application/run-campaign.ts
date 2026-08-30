@@ -292,7 +292,6 @@ export class RunCampaign {
       throw new ApplicationError("invalid_transition");
     }
     if (
-      snapshot.campaign.status !== "policy_review" &&
       snapshot.campaign.status !== "coordination_pending" &&
       snapshot.campaign.status !== "quarantined"
     ) {

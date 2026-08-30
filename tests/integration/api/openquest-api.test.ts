@@ -24,6 +24,23 @@ import { FakeCampaignStore } from "../../fakes/fake-campaign-store.js";
 import { FakeHarness } from "../../fakes/fake-harness.js";
 
 describe("OpenQuest API", () => {
+  it("projects the backend issue brief and finalizes it idempotently before preflight", async () => {
+    const { app } = buildTestApp();
+    const created = await app.inject({ method: "POST", url: "/api/campaigns", payload: { repository: "owner/repo", issueNumber: 42, issueUrl: "https://github.com/owner/repo/issues/42", lane: "easy_win" } });
+    expect(created.statusCode).toBe(201);
+    const before = await app.inject({ method: "GET", url: "/api/campaigns/campaign-1" });
+    expect(before.json()).toMatchObject({ status: "policy_review", version: 1, nextAllowedAction: null, issueBrief: { problem: expect.any(String), evidence: [{ sourceUrl: "https://github.com/owner/repo/issues/42", observation: expect.any(String) }] } });
+
+    const request = { method: "POST" as const, url: "/api/campaigns/campaign-1/finalize", payload: { expectedVersion: 1, idempotencyKey: "finalize-api-once" } };
+    const finalized = await app.inject(request);
+    const replay = await app.inject(request);
+    expect(finalized.json()).toMatchObject({ status: "coordination_pending", version: 2 });
+    expect(replay.json()).toMatchObject({ status: "coordination_pending", version: 2 });
+    expect((await app.inject({ method: "POST", url: request.url, payload: { expectedVersion: 1, idempotencyKey: "different-finalize" } })).statusCode).toBe(409);
+    expect((await app.inject({ method: "GET", url: "/api/campaigns/campaign-1" })).json()).toMatchObject({ status: "coordination_pending", version: 2, nextAllowedAction: "preflight", issueBrief: { problem: expect.any(String) } });
+    await app.close();
+  });
+
   it("fails closed across operator and review-provider capabilities", async () => {
     const authorization = bearerAuthorizationPolicy({ operator: "operator-secret-token-value-000001", reviewProvider: "review-provider-token-value-000002" });
     const { app } = buildTestApp({ authorization });
@@ -246,6 +263,14 @@ describe("OpenQuest API", () => {
     });
     const campaignId = (await app.inject({ method: "GET", url: "/api/campaigns/campaign-1" })).json().id as string;
 
+    const blocked = await app.inject({ method: "POST", url: `/api/campaigns/${campaignId}/actions/preflight`, payload: {} });
+    expect(blocked.statusCode).toBe(422);
+    const finalized = await app.inject({
+      method: "POST",
+      url: `/api/campaigns/${campaignId}/finalize`,
+      payload: { expectedVersion: 1, idempotencyKey: "finalize-api-flow-0001" },
+    });
+    expect(finalized.statusCode).toBe(200);
     const preflight = await app.inject({ method: "POST", url: `/api/campaigns/${campaignId}/actions/preflight`, payload: {} });
     expect(preflight.statusCode).toBe(200);
     expect(preflight.json()).toMatchObject({ status: "baseline" });

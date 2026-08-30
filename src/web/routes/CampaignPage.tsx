@@ -5,13 +5,15 @@ import { CampaignTimeline } from "../components/CampaignTimeline.js";
 import { CampaignActions, type CampaignAction } from "../components/CampaignActions.js";
 import { ChangeBrief } from "../components/ChangeBrief.js";
 import { EvidencePanel } from "../components/EvidencePanel.js";
+import { IssueBriefPanel } from "../components/IssueBriefPanel.js";
 import { OpenQuestAgentThread } from "../components/OpenQuestAgentThread.js";
 import { QualityGate } from "../components/QualityGate.js";
 
 interface CampaignPageProps {
-  readonly api: Pick<OpenQuestApi, "getCampaign" | "issueApproval"> & Partial<Pick<OpenQuestApi, "runCampaignAction">>;
+  readonly api: Pick<OpenQuestApi, "getCampaign" | "issueApproval"> & Partial<Pick<OpenQuestApi, "finalizeCampaign" | "runCampaignAction">>;
   readonly campaignId: string;
   readonly createIdempotencyKey?: () => string;
+  readonly createFinalizationKey?: () => string;
   readonly trueForgeBaseUrl?: string;
 }
 
@@ -22,7 +24,7 @@ type RunningAction = Readonly<{ routeIdentity: object; action: CampaignAction }>
 
 const REFRESH_DEADLINE_MS = 10_000;
 
-export function CampaignPage({ api, campaignId, createIdempotencyKey = defaultIdempotencyKey, trueForgeBaseUrl }: CampaignPageProps) {
+export function CampaignPage({ api, campaignId, createIdempotencyKey = defaultIdempotencyKey, createFinalizationKey = defaultFinalizationKey, trueForgeBaseUrl }: CampaignPageProps) {
   const routeIdentity = useMemo(() => ({ campaignId }), [campaignId]);
   const [campaign, setCampaign] = useState<CampaignSnapshot>();
   const [error, setError] = useState<{ readonly campaignId: string; readonly message: string }>();
@@ -32,9 +34,11 @@ export function CampaignPage({ api, campaignId, createIdempotencyKey = defaultId
   const [approvedProposal, setApprovedProposal] = useState<ApprovedProposal>();
   const [runningAction, setRunningAction] = useState<RunningAction>();
   const [actionError, setActionError] = useState<{ readonly routeIdentity: object; readonly message: string }>();
+  const [finalization, setFinalization] = useState<{ readonly routeIdentity: object; readonly status: "submitting" | "error" }>();
   const campaignController = useRef<AbortController | undefined>(undefined);
   const campaignDeadline = useRef<{ readonly controller: AbortController; readonly timer: ReturnType<typeof globalThis.setTimeout> } | undefined>(undefined);
   const approvalController = useRef<AbortController | undefined>(undefined);
+  const finalizationController = useRef<AbortController | undefined>(undefined);
   const approvalLocked = useRef(false);
   const routeEpoch = useRef(0);
   const readSequence = useRef(0);
@@ -108,6 +112,7 @@ export function CampaignPage({ api, campaignId, createIdempotencyKey = defaultId
     routeEpoch.current += 1;
     readSequence.current += 1;
     approvalController.current?.abort();
+    finalizationController.current?.abort();
     approvalController.current = undefined;
     approvalLocked.current = false;
     pendingRefresh.current = undefined;
@@ -119,6 +124,8 @@ export function CampaignPage({ api, campaignId, createIdempotencyKey = defaultId
       cancelCampaignRead();
       approvalController.current?.abort();
       approvalController.current = undefined;
+      finalizationController.current?.abort();
+      finalizationController.current = undefined;
       approvalLocked.current = false;
     };
   }, [cancelCampaignRead, loadCampaign]);
@@ -189,21 +196,42 @@ export function CampaignPage({ api, campaignId, createIdempotencyKey = defaultId
     });
   };
 
+  const finalizeBrief = () => {
+    if (campaign === undefined || campaign.status !== "policy_review" || campaign.issueBrief === null || finalization?.routeIdentity === routeIdentity) return;
+    if (api.finalizeCampaign === undefined) { setFinalization({ routeIdentity, status: "error" }); return; }
+    let key: string;
+    try { key = createFinalizationKey(); } catch { setFinalization({ routeIdentity, status: "error" }); return; }
+    const controller = new AbortController();
+    finalizationController.current = controller;
+    const epoch = routeEpoch.current;
+    setFinalization({ routeIdentity, status: "submitting" });
+    void api.finalizeCampaign(campaign.id, campaign.version, key, controller.signal).then(() => {
+      if (!controller.signal.aborted && routeEpoch.current === epoch) {
+        setFinalization(undefined);
+        refreshCampaign({ kind: "action" });
+      }
+    }).catch((reason: unknown) => {
+      if (!isAbort(reason) && routeEpoch.current === epoch) setFinalization({ routeIdentity, status: "error" });
+    }).finally(() => { if (finalizationController.current === controller) finalizationController.current = undefined; });
+  };
+
   if (campaign === undefined || campaign.id !== campaignId) return <main className="state-card"><h1 tabIndex={-1}>Campaign created</h1>{error?.campaignId !== campaignId ? <p role="status">Loading durable campaign facts…</p> : <><p role="alert">{error.message}</p><button onClick={() => { setError(undefined); loadCampaign(); }} type="button">Try again</button></>}</main>;
   const proposal = campaign.approvalProposal;
   const currentRefresh = refreshState?.routeIdentity === routeIdentity ? refreshState : undefined;
   const currentRunningAction = runningAction?.routeIdentity === routeIdentity ? runningAction.action : undefined;
+  const currentFinalization = finalization?.routeIdentity === routeIdentity ? finalization.status : undefined;
   const alreadyApproved = proposal !== null && (
     isOptimisticallyActive(approvedProposal) && approvedProposal.routeIdentity === routeIdentity && approvedProposal.proposalId === proposal.proposalId && approvedProposal.digest === proposal.actionDigest && approvedProposal.expectedVersion === proposal.expectedCampaignVersion ||
     campaign.approvals.some((approval) => isCurrentlyActive(approval) && approval.proposalId === proposal.proposalId && approval.actionDigest === proposal.actionDigest && approval.expectedCampaignVersion === proposal.expectedCampaignVersion)
   );
   return <main className="campaign-shell">
     <header className="campaign-hero"><p className="wordmark">OPENQUEST / CAMPAIGN</p><p className="eyebrow">{campaign.lane.replace("_", " ")} · {campaign.status.replaceAll("_", " ")}</p><h1 ref={heading} tabIndex={-1}>{campaign.repository} <span>#{campaign.issueNumber}</span></h1><p>One issue, one resumable agent session, and a durable record of every verified contribution decision.</p><a href={campaign.issueUrl} rel="noreferrer" target="_blank">View source issue</a></header>
-    <div className="campaign-layout"><div className="campaign-main"><CampaignActions action={campaign.nextAllowedAction} onRun={runAction} {...(currentRunningAction === undefined ? {} : { running: currentRunningAction })} status={campaign.status} />{actionError?.routeIdentity !== routeIdentity ? null : <p className="campaign-error" role="alert">{actionError.message}</p>}<CampaignTimeline approvals={campaign.approvals} events={campaign.events} /><EvidencePanel evidence={campaign.evidence} references={campaign.externalReferences} /><QualityGate escalationReason={campaign.qualityEscalationReason} findings={campaign.qodoFindings} iteration={campaign.qodoIteration} status={campaign.status} /></div><aside className="campaign-side" aria-label="Agent and approval controls"><OpenQuestAgentThread sessionId={campaign.parentSessionId} {...(trueForgeBaseUrl === undefined ? {} : { trueForgeBaseUrl })} />{currentRefresh?.status === "pending" ? <p aria-label="Refreshing campaign facts" className="campaign-error" role="status">Refreshing authoritative campaign facts…</p> : currentRefresh?.status === "failure" ? <div aria-label="Campaign facts refresh failed" className="campaign-error" role="alert"><p>Campaign facts could not be refreshed. The loaded campaign remains visible, but campaign actions remain locked until the refresh succeeds.</p><button onClick={() => { refreshCampaign(currentRefresh.reason); }} type="button">Retry campaign refresh</button></div> : null}{proposal === null ? <section className="campaign-panel pending-proposal" aria-labelledby="proposal-pending-heading"><p className="eyebrow">Human approval boundary</p><h2 id="proposal-pending-heading">Exact proposal is pending</h2><p>The server has not published a current, validated action payload. Approval remains unavailable until a durable proposal matches this campaign and commit.</p><button disabled type="button">Approval unavailable</button></section> : <ChangeBrief approved={alreadyApproved} onApprove={approve} proposal={proposal} submitting={submittingRoute === routeIdentity || currentRunningAction !== undefined} />}{approvalError?.routeIdentity !== routeIdentity ? null : <p className="campaign-error" role="alert">{approvalError.message}</p>}</aside></div>
+    <div className="campaign-layout"><div className="campaign-main">{campaign.issueBrief === null ? <section className="campaign-panel" role="alert"><h2>Issue analysis unavailable</h2><p>OpenQuest did not return a valid source-backed brief. Finalization and sandbox work remain locked.</p></section> : <IssueBriefPanel brief={campaign.issueBrief} finalized={campaign.status !== "policy_review"} onFinalize={finalizeBrief} submitting={currentFinalization === "submitting"} />}{currentFinalization === "error" ? <p className="campaign-error" role="alert">The issue brief could not be finalized. Reload the latest campaign facts and try again.</p> : null}<CampaignActions action={campaign.nextAllowedAction} onRun={runAction} {...(currentRunningAction === undefined ? {} : { running: currentRunningAction })} status={campaign.status} />{actionError?.routeIdentity !== routeIdentity ? null : <p className="campaign-error" role="alert">{actionError.message}</p>}<CampaignTimeline approvals={campaign.approvals} events={campaign.events} /><EvidencePanel evidence={campaign.evidence} references={campaign.externalReferences} /><QualityGate escalationReason={campaign.qualityEscalationReason} findings={campaign.qodoFindings} iteration={campaign.qodoIteration} status={campaign.status} /></div><aside className="campaign-side" aria-label="Agent and approval controls"><OpenQuestAgentThread sessionId={campaign.parentSessionId} {...(trueForgeBaseUrl === undefined ? {} : { trueForgeBaseUrl })} />{currentRefresh?.status === "pending" ? <p aria-label="Refreshing campaign facts" className="campaign-error" role="status">Refreshing authoritative campaign facts…</p> : currentRefresh?.status === "failure" ? <div aria-label="Campaign facts refresh failed" className="campaign-error" role="alert"><p>Campaign facts could not be refreshed. The loaded campaign remains visible, but campaign actions remain locked until the refresh succeeds.</p><button onClick={() => { refreshCampaign(currentRefresh.reason); }} type="button">Retry campaign refresh</button></div> : null}{proposal === null ? <section className="campaign-panel pending-proposal" aria-labelledby="proposal-pending-heading"><p className="eyebrow">Human approval boundary</p><h2 id="proposal-pending-heading">Exact proposal is pending</h2><p>The server has not published a current, validated action payload. Approval remains unavailable until a durable proposal matches this campaign and commit.</p><button disabled type="button">Approval unavailable</button></section> : <ChangeBrief approved={alreadyApproved} onApprove={approve} proposal={proposal} submitting={submittingRoute === routeIdentity || currentRunningAction !== undefined} />}{approvalError?.routeIdentity !== routeIdentity ? null : <p className="campaign-error" role="alert">{approvalError.message}</p>}</aside></div>
   </main>;
 }
 
 function defaultIdempotencyKey(): string { return `approval-${globalThis.crypto.randomUUID()}`; }
+function defaultFinalizationKey(): string { return `finalize-${globalThis.crypto.randomUUID()}`; }
 function isAbort(reason: unknown): boolean { return reason instanceof DOMException && reason.name === "AbortError"; }
 function isCurrentlyActive(approval: CampaignSnapshot["approvals"][number]): boolean { return approval.isActive && (approval.expiresAt === undefined || Date.parse(approval.expiresAt) > Date.now()); }
 function isOptimisticallyActive(approval: ApprovedProposal | undefined): approval is ApprovedProposal { return approval !== undefined && (approval.expiresAt === undefined || Date.parse(approval.expiresAt) > Date.now()); }
