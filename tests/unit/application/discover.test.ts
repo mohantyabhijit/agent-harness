@@ -218,6 +218,7 @@ describe("DiscoverRepositories", () => {
 
     expect(result).toHaveLength(8);
     expect(result.filter(({ repository }) => repository.fullName.toLowerCase() === "popular/repository-0")).toHaveLength(1);
+    expect(result.some(({ repository }) => repository.fullName === duplicate.fullName)).toBe(true);
   });
 
   it("keeps easy wins and long-term challenges in separate deterministic lanes", async () => {

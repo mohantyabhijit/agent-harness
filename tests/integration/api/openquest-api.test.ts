@@ -458,6 +458,7 @@ describe("OpenQuest API", () => {
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual({ kind: "category", space: "data" });
     expect(harness.operations).toEqual(["discover"]);
+    expect(harness.deletedSessions).toEqual(harness.childSessions);
     expect(harness.packets[0]?.goal).toMatch(/Do not.*search GitHub.*recommend repositories.*perform writes/is);
     await app.close();
   });

@@ -53,18 +53,21 @@ export class FakeHarness implements HarnessPort {
     this.requestOptions.push(options);
     const failure = this.#failures.get(operation)?.shift();
     if (failure !== undefined) {
+      if (options?.sessionLifecycle === "transient") this.deletedSessions.push(sessionId);
       throw failure;
     }
     const beforeResult = this.beforeResult;
     delete this.beforeResult;
     await beforeResult?.(operation);
     const queued = this.#results.get(operation)?.shift();
-    return {
+    const result = {
       sessionId,
       summary: queued?.summary ?? `${operation} completed`,
       artifacts: queued?.artifacts ?? [`artifacts/${operation}-${sessionId}.json`],
       output: queued?.output ?? defaultOutput(operation),
     };
+    if (options?.sessionLifecycle === "transient") this.deletedSessions.push(sessionId);
+    return result;
   }
 
   async streamSession(

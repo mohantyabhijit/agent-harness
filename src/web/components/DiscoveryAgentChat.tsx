@@ -1,4 +1,4 @@
-import { useState, type SyntheticEvent } from "react";
+import { useEffect, useRef, useState, type SyntheticEvent } from "react";
 
 import type { DiscoveryConversationMessage } from "../../application/ports/intent-classifier.js";
 import type { Space } from "../../domain/discovery.js";
@@ -14,22 +14,44 @@ export function DiscoveryAgentChat({ api, onSelect }: DiscoveryAgentChatProps) {
   const [history, setHistory] = useState<readonly DiscoveryConversationMessage[]>([]);
   const [reply, setReply] = useState<string>();
   const [status, setStatus] = useState<"idle" | "loading" | "error">("idle");
+  const requestRef = useRef<AbortController | undefined>(undefined);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      requestRef.current?.abort();
+    };
+  }, []);
 
   const submit = (event: SyntheticEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (status === "loading") return;
+    const controller = new AbortController();
+    requestRef.current?.abort();
+    requestRef.current = controller;
+    const turnHistory = history.slice(-10);
+    const submittedMessage = message;
     setStatus("loading");
     setReply(undefined);
-    void api.classifyDiscoveryIntent(message, history).then((result) => {
+    void api.classifyDiscoveryIntent(submittedMessage, turnHistory, controller.signal).then((result) => {
+      if (!mountedRef.current || controller.signal.aborted || requestRef.current !== controller) return;
       if (result.kind === "category") {
+        requestRef.current = undefined;
         onSelect(result.space);
         return;
       }
-      setHistory([...history, { role: "user", content: message }, { role: "assistant", content: result.question }]);
+      const completedTurn: readonly DiscoveryConversationMessage[] = [
+        ...turnHistory,
+        { role: "user", content: submittedMessage },
+        { role: "assistant", content: result.question },
+      ];
+      setHistory(completedTurn.slice(-10));
       setMessage("");
       setReply(result.question);
       setStatus("idle");
-    }, () => { setStatus("error"); });
+    }, () => { if (mountedRef.current && !controller.signal.aborted && requestRef.current === controller) setStatus("error"); });
   };
 
   return <section aria-labelledby="discovery-chat-heading" className="discovery-chat">

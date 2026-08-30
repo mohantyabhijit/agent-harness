@@ -28,20 +28,23 @@ export class DiscoverRepositories {
 
     const repositories = await this.catalog.listRepositories(selectedSpaces);
     const referenceTime = this.clock();
-    const seenRepositories = new Set<string>();
-    return repositories
+    const bestByRepository = new Map<string, DiscoveredRepository>();
+    for (const repository of repositories
       .filter((repository) => isDiscoverable(repository, referenceTime))
-      .filter((repository) => {
-        const identity = repository.fullName.toLowerCase();
-        if (seenRepositories.has(identity)) return false;
-        seenRepositories.add(identity);
-        return true;
-      })
       .map((repository) => ({
         repository,
         score: scoreRepository(repository.signals),
         explanation: explainRepositoryScore(repository.signals, repository.evidence),
-      }))
+      }))) {
+      const identity = repository.repository.fullName.toLowerCase();
+      const current = bestByRepository.get(identity);
+      if (current === undefined || repository.score > current.score ||
+        (repository.score === current.score && repository.repository.fullName.localeCompare(current.repository.fullName) < 0)) {
+        bestByRepository.set(identity, repository);
+      }
+    }
+
+    return [...bestByRepository.values()]
       .sort((left, right) =>
         right.score - left.score || left.repository.fullName.localeCompare(right.repository.fullName),
       )
