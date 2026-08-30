@@ -90,6 +90,13 @@ interface ImplementationResult {
   readonly after: string;
 }
 
+interface VerificationResult {
+  readonly testsPassed: true;
+  readonly currentCommitSha: string;
+  readonly tests: readonly string[];
+  readonly uncertainty: string;
+}
+
 export class RunCampaign {
   readonly #externalActionClaimStaleAfterMs: number;
 
@@ -206,6 +213,13 @@ export class RunCampaign {
         },
         ...(newCommitSha === undefined ? {} : { newCommitSha }),
         ...(publishedReference === undefined ? {} : { publishedReference }),
+        ...(claimed.payload.action === "push_branch" ? {
+          nextProposalEvent: this.createPullRequestProposalEvent(
+            { ...snapshot.campaign, version: resultingVersion },
+            claimed.payload,
+            this.clock.now(),
+          ),
+        } : {}),
       });
     } catch {
       await this.markOutcomeUnknown(campaignId, claimId, approval.action, approval.actionDigest, snapshot);
@@ -415,15 +429,18 @@ export class RunCampaign {
     await this.store.update(claimed, campaign.version);
     try {
       const result = await this.harness.runChildSession(this.packet(snapshot, currentCommitSha, "verify"), "verify");
-      parseVerificationResult(result.output, currentCommitSha);
+      const verification = parseVerificationResult(result.output, currentCommitSha);
+      const contributionApproval = transitionCampaign(claimed, "contribution_approval");
       const recordedVersion = await this.store.recordChildResult(campaign.id, {
         expectedVersion: claimed.version,
         expectedStatus: "verification",
         childSessionId: result.sessionId,
         event: this.operationEvent(claimed, claimed.version, "campaign_operation_completed", "verify", result, { result: result.output, currentCommitSha }),
         operationResult: { operation: "verify", currentCommitSha, qodoIteration: claimed.qodoIteration },
+        nextCampaign: contributionApproval,
+        nextProposalEvent: this.pushProposalEvent(contributionApproval, currentCommitSha, verification),
       });
-      return { ...claimed, version: recordedVersion };
+      return { ...contributionApproval, version: recordedVersion };
     } catch (error) {
       await this.failClaimedOperation(claimed, "human_escalation", "verification_execution_failed");
       if (error instanceof HarnessError) throw error;
@@ -454,6 +471,31 @@ export class RunCampaign {
       },
       occurredAt: this.clock.now(),
     };
+  }
+
+  private pushProposalEvent(campaign: Campaign, commitSha: string, verification: VerificationResult): CampaignEventInput {
+    const payload: ExternalActionPayload = {
+      action: "push_branch",
+      repository: campaign.repository,
+      issueNumber: campaign.issueNumber,
+      branch: contributionBranch(campaign.issueNumber),
+      commitSha,
+    };
+    return approvalProposalEvent(this.nextId(), campaign, payload, commitSha, verification.tests, this.clock.now());
+  }
+
+  private createPullRequestProposalEvent(campaign: Campaign, push: Extract<ExternalActionPayload, { action: "push_branch" }>, occurredAt: string): CampaignEventInput {
+    const payload: ExternalActionPayload = {
+      action: "create_pr",
+      repository: campaign.repository,
+      issueNumber: campaign.issueNumber,
+      branch: push.branch,
+      baseBranch: "main",
+      commitSha: push.commitSha,
+      title: `Fix #${String(campaign.issueNumber)}`,
+      body: `Fixes ${campaign.issueUrl}\n\n## Verified tests\nSee the verified campaign evidence.\n\n## Risks\nMaintainer acceptance and repository-specific CI remain outside local verification.\n\n## Rollback\nRevert commit ${push.commitSha}.\n\n## AI disclosure\nTrueForge assisted this contribution; a maintainer must review it before merge.`,
+    };
+    return approvalProposalEvent(this.nextId(), campaign, payload, push.commitSha, ["Verified campaign tests"], occurredAt);
   }
 
   private packet(snapshot: CampaignSnapshot, currentCommitSha?: string, operation?: "implement" | "verify"): CampaignPacket {
@@ -699,10 +741,41 @@ function parseImplementationResult(output: unknown, currentCommitSha: string): I
   return { status: "completed", commitSha: output.commitSha, changedAreas: output.changedAreas, tests: output.tests, uncertainty: output.uncertainty, before: output.before, after: output.after };
 }
 
-function parseVerificationResult(output: unknown, currentCommitSha: string): void {
+function parseVerificationResult(output: unknown, currentCommitSha: string): VerificationResult {
   if (!isRecord(output) || Object.keys(output).some((key) => !["testsPassed", "currentCommitSha", "tests", "uncertainty"].includes(key)) ||
     output.testsPassed !== true || output.currentCommitSha !== currentCommitSha || !boundedStringList(output.tests) ||
     !boundedExplanation(output.uncertainty)) throw new Error("Invalid verification result");
+  return { testsPassed: true, currentCommitSha, tests: output.tests, uncertainty: output.uncertainty };
+}
+
+function contributionBranch(issueNumber: number): string {
+  return `openquest/issue-${String(issueNumber)}`;
+}
+
+function approvalProposalEvent(id: string, campaign: Campaign, payload: ExternalActionPayload, currentCommitSha: string, tests: readonly string[], occurredAt: string): CampaignEventInput {
+  return {
+    id,
+    eventType: "external_action_proposed",
+    occurredAt,
+    payload: {
+      proposalId: id,
+      payload,
+      actionDigest: externalActionDigest(payload),
+      expectedCampaignVersion: campaign.version,
+      expectedCampaignStatus: campaign.status,
+      expectedCurrentCommitSha: currentCommitSha,
+      brief: {
+        policy: "Only the exact server-owned payload may be approved and published.",
+        approach: payload.action === "push_branch" ? "Publish the verified sandbox commit to a dedicated contribution branch." : "Open a pull request from the already published verified branch.",
+        files: ["Verified implementation changes"],
+        risks: ["Maintainer acceptance and repository-specific CI remain outside local verification."],
+        tests: [...tests],
+        safetyResult: "Static preflight and commit-bound verification completed before publication.",
+        qodoStatus: "Qodo review starts only after the pull request exists.",
+        aiDisclosure: "TrueForge assisted this contribution; maintainer review is required.",
+      },
+    },
+  };
 }
 
 function boundedStringList(value: unknown): value is string[] {

@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { Component, useCallback, useState, type ReactNode } from "react";
 import { OpenQuestTrueForgeUI } from "./OpenQuestTrueForgeUI.js";
 
 interface OpenQuestAgentThreadProps { readonly sessionId: string; readonly trueForgeBaseUrl?: string; }
@@ -14,11 +14,23 @@ export function OpenQuestAgentThread({ sessionId, trueForgeBaseUrl }: OpenQuestA
     <p>The agent workspace resumes the campaign’s parent session. Durable evidence and decisions remain in the campaign record beside it.</p>
     {error ? <p className="campaign-error" role="alert">The agent workspace could not connect. Campaign facts and approvals remain available.</p> : null}
     <div className="trueforge-frame">
-      <OpenQuestTrueForgeUI
-        initialSessionId={sessionId}
-        onError={handleError}
-        {...(trueForgeBaseUrl === undefined ? {} : { trueForgeBaseUrl })}
-      />
+      <AgentWorkspaceBoundary key={sessionId} onError={handleError}>
+        <OpenQuestTrueForgeUI
+          initialSessionId={sessionId}
+          onError={handleError}
+          {...(trueForgeBaseUrl === undefined ? {} : { trueForgeBaseUrl })}
+        />
+      </AgentWorkspaceBoundary>
     </div>
   </section>;
+}
+
+class AgentWorkspaceBoundary extends Component<{ readonly children: ReactNode; readonly onError: () => void }, { readonly failed: boolean }> {
+  state = { failed: false };
+
+  static getDerivedStateFromError(): { readonly failed: true } { return { failed: true }; }
+
+  componentDidCatch(): void { this.props.onError(); }
+
+  render(): ReactNode { return this.state.failed ? null : this.props.children; }
 }

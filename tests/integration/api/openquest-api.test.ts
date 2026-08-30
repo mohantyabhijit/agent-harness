@@ -390,6 +390,24 @@ describe("OpenQuest API", () => {
         uncertainty: expect.any(String),
       },
     });
+    const verification = await app.inject({ method: "POST", url: `/api/campaigns/${campaignId}/actions/verify`, payload: {} });
+    expect(verification.statusCode).toBe(200);
+    expect(verification.json()).toMatchObject({ status: "contribution_approval", version: 9 });
+    expect((await app.inject({ method: "GET", url: `/api/campaigns/${campaignId}` })).json()).toMatchObject({
+      status: "contribution_approval",
+      version: 9,
+      approvalProposal: {
+        expectedCampaignVersion: 9,
+        action: {
+          action: "push_branch",
+          repository: "owner/repo",
+          issueNumber: 42,
+          branch: "openquest/issue-42",
+          sourceCommitSha: "b".repeat(40),
+          targetCommitSha: "b".repeat(40),
+        },
+      },
+    });
     const externalBypass = await app.inject({ method: "POST", url: `/api/campaigns/${campaignId}/actions/create_pr`, payload: {} });
     expect(externalBypass.statusCode).toBe(400);
     await app.close();

@@ -61,7 +61,9 @@ After a successful preflight, the same campaign screen exposes **Run isolated im
 
 When the campaign contains a current server-owned proposal, show the accessible brief: repository policy, approach, files, risks, tests, safety result, Qodo status, exact branch/commit/title/body fields where applicable, AI disclosure, and action digest.
 
-Select the review checkbox and issue approval only if every field is correct. State clearly: this creates ten-minute, single-use authority for that exact payload and campaign version. It does not execute the action. The current release has no route or production adapter that performs the GitHub write.
+Select the review checkbox and issue approval only if every field is correct. State clearly: this creates ten-minute, single-use authority for that exact payload and campaign version. It does not execute the action. A separate execution control then calls the server-only publisher. The default local composition has no live publisher, so demonstrate publication only with the controlled E2E fixture unless an explicitly authorized repository and injected publisher are in scope.
+
+After verification, show the server-owned branch proposal, approve it, and execute it separately. Reload authoritative campaign facts before showing the newly generated pull-request proposal. Review and approve that second proposal independently. Never reuse branch approval as pull-request authority, and never represent the controlled fixture's canonical-looking URL as an external PR.
 
 If no current proposal exists, show the disabled **Approval unavailable** state. Never seed or edit SQLite to manufacture one for a recording.
 
