@@ -558,6 +558,11 @@ export class FakeCampaignStore implements CampaignStore {
     }
     const resultingVersion = snapshot.campaign.version + (changed || confirmedUpdate || confirmedCreate ? 1 : 0);
     assertExternalActionEventVersion(record.event.payload, snapshot.campaign.version, resultingVersion);
+    if (record.nextProposalEvent !== undefined) {
+      if (record.nextProposalEvent.id === record.event.id) throw new Error("Follow-up proposal event must have a distinct id");
+      if (claim.payload.action !== "push_branch" || record.disposition !== "confirmed_completed") throw new Error("Follow-up proposal requires a confirmed completed branch push");
+      assertProposalEvent(record.nextProposalEvent, resultingVersion, claim.claimedCampaignStatus, claim.payload.repository, claim.payload.issueNumber, claim.payload.commitSha, "create_pr", claim.payload.branch);
+    }
     if (this.failNextEvent) {
       this.failNextEvent = false;
       throw new Error("Campaign event persistence failed");
@@ -571,6 +576,10 @@ export class FakeCampaignStore implements CampaignStore {
     if (changed || confirmedUpdate || confirmedCreate) snapshot.campaign = { ...snapshot.campaign, version: resultingVersion, ...(confirmedUpdate ? { status: "qodo_review" as const } : confirmedCreate ? { status: "pull_request_open" as const } : {}) };
     this.#pushEvent(snapshot, record.event);
     this.#eventIds.add(record.event.id);
+    if (record.nextProposalEvent !== undefined) {
+      this.#pushEvent(snapshot, record.nextProposalEvent);
+      this.#eventIds.add(record.nextProposalEvent.id);
+    }
     Object.assign(claim, {
       status: "reconciled",
       closedAt: record.reconciledAt,

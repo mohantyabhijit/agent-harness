@@ -49,6 +49,25 @@ describe("Campaign publication UX", () => {
     expect(screen.queryByRole("button", { name: /create approved pull request/i })).not.toBeInTheDocument();
   });
 
+  it("reconciles a lost publication response from authoritative campaign facts", async () => {
+    const reconciled = {
+      ...snapshot(),
+      status: "pull_request_open" as const,
+      version: 8,
+      approvalProposal: null,
+      approvals: [{ ...snapshot().approvals[0], status: "consumed" as const, isActive: false }],
+      externalReferences: [...snapshot().externalReferences, { kind: "pull_request" as const, value: "https://github.com/owner/repo/pull/17" }],
+    };
+    const getCampaign = vi.fn().mockResolvedValueOnce(snapshot()).mockResolvedValueOnce(reconciled);
+    const publishApprovedAction = vi.fn(async () => { throw new OpenQuestApiError("Network connection lost"); });
+    render(<CampaignPage api={baseApi(getCampaign, publishApprovedAction)} campaignId="campaign-1" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /create approved pull request/i }));
+    expect(await screen.findByText(/publication reconciled/i)).toBeVisible();
+    expect(getCampaign).toHaveBeenCalledTimes(2);
+    expect(screen.queryByText(/approved action was not published/i)).not.toBeInTheDocument();
+  });
+
   it("locks execution when the approval does not match the current server proposal", async () => {
     const currentApproval = snapshot().approvals[0];
     if (currentApproval === undefined) throw new Error("fixture approval missing");

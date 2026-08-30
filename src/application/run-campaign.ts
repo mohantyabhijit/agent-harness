@@ -259,6 +259,9 @@ export class RunCampaign {
     }
     const preserveVerifiedRepair = reconciliation.disposition === "confirmed_not_completed" && claim.payload.action === "update_pr";
     const resultingVersion = snapshot.campaign.version + (confirmedUpdate || confirmedCreate || (!preserveVerifiedRepair && reconciliation.observedCanonicalHead !== undefined && reconciliation.observedCanonicalHead !== current) ? 1 : 0);
+    const nextProposalEvent = reconciliation.disposition === "confirmed_completed" && claim.payload.action === "push_branch"
+      ? this.createPullRequestProposalEvent({ ...snapshot.campaign, version: resultingVersion }, claim.payload, this.clock.now())
+      : undefined;
     await this.store.reconcileExternalAction(campaignId, {
       claimId: reconciliation.claimId,
       disposition: reconciliation.disposition,
@@ -281,6 +284,7 @@ export class RunCampaign {
         },
         occurredAt: this.clock.now(),
       },
+      ...(nextProposalEvent === undefined ? {} : { nextProposalEvent }),
     });
     return (await this.requiredSnapshot(campaignId)).campaign;
   }

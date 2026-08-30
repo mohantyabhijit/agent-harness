@@ -7,7 +7,7 @@ Scope: issue #15, local-only. This evidence contains no credential, provider pay
 - `npm run typecheck` — passed.
 - `npm run lint` — passed.
 - `npm run build` — passed; the existing Vite large-chunk advisory remains informational.
-- `npm test` — passed: 30 files, 511 tests.
+- `npm test` — passed: 30 files, 512 tests.
 - `npm run test:e2e` — passed: three Playwright scenarios, including the controlled contribution flow.
 - `git diff --check` — passed.
 
@@ -21,4 +21,6 @@ The controlled contribution scenario exercises discovery, issue selection, campa
 - The `ce-test-browser` manual-driver run was skipped because this host exposed no integrated browser and `agent-browser` was not installed. The repository-owned Playwright suite is recorded separately and must not be represented as that manual-driver proof.
 - No deployment was performed.
 
-Qodo and GitHub CI evidence belongs to the final repository pull request. Valid High findings must be repaired; incorrect, intentional, or deferred findings must be answered with their reason, followed by exact-head review before merge.
+## Qodo review evidence
+
+[PR #20](https://github.com/mohantyabhijit/agent-harness/pull/20) received an [initial exact-head Qodo review](https://github.com/mohantyabhijit/agent-harness/pull/20#issuecomment-5469595618). Qodo identified two valid publication-recovery defects: confirmed branch-push reconciliation did not persist the next exact pull-request proposal, and browser transport failure could state that no publication occurred without first reloading durable facts. Both were repaired and covered by focused regression tests; no finding was dismissed. The PR history records the required follow-up review against the repair commit and passing GitHub checks before merge.

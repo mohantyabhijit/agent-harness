@@ -99,6 +99,15 @@ describe("OpenQuest API", () => {
     const snapshot = await store.get("campaign-1");
     expect(snapshot?.externalReferences).toEqual(expect.arrayContaining([{ kind: "commit", value: target }, { kind: "branch", value: payload.branch }]));
     expect(snapshot?.externalActionClaims[0]).toMatchObject({ status: "reconciled", disposition: "confirmed_completed" });
+    expect(snapshot?.events.at(-1)).toMatchObject({
+      eventType: "external_action_proposed",
+      payload: expect.objectContaining({
+        expectedCampaignVersion: 8,
+        expectedCampaignStatus: "contribution_approval",
+        expectedCurrentCommitSha: target,
+        payload: expect.objectContaining({ action: "create_pr", branch: payload.branch, commitSha: target }),
+      }),
+    });
     await app.close();
   });
 

@@ -706,6 +706,11 @@ export class SqliteCampaignStore implements CampaignStore {
       }
       const resultingVersion = campaign.version + (changed || confirmedUpdate || confirmedCreate ? 1 : 0);
       assertExternalActionEventVersion(record.event.payload, campaign.version, resultingVersion);
+      if (record.nextProposalEvent !== undefined) {
+        if (record.nextProposalEvent.id === record.event.id) throw new Error("Follow-up proposal event must have a distinct id");
+        if (claim.payload.action !== "push_branch" || record.disposition !== "confirmed_completed") throw new Error("Follow-up proposal requires a confirmed completed branch push");
+        assertProposalEvent(record.nextProposalEvent, resultingVersion, claim.claimedCampaignStatus, claim.payload.repository, claim.payload.issueNumber, claim.payload.commitSha, "create_pr", claim.payload.branch);
+      }
       if (changed) {
         this.#replaceCommit(campaignId, record.observedCanonicalHead);
       }
@@ -717,6 +722,7 @@ export class SqliteCampaignStore implements CampaignStore {
         if (updated.changes !== 1) throw new CampaignVersionConflict(campaignId, campaign.version);
       }
       this.#insertEvent(campaignId, record.event, occurredAt);
+      if (record.nextProposalEvent !== undefined) this.#insertEvent(campaignId, record.nextProposalEvent, normalizeTimestamp(record.nextProposalEvent.occurredAt, "proposal event occurredAt"));
       const closed = this.#database.prepare(`
         UPDATE external_action_claims SET status = 'reconciled', closed_at = ?, disposition = ?, observed_canonical_head = ?
         WHERE id = ? AND campaign_id = ? AND status = 'outcome_unknown'

@@ -101,6 +101,7 @@ export interface ExternalActionReconciliationRecord {
   readonly observedPullRequest?: string;
   readonly reconciledAt: string;
   readonly event: CampaignEventInput;
+  readonly nextProposalEvent?: CampaignEventInput;
 }
 
 export interface ChildResultRecord {
