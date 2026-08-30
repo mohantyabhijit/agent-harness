@@ -22,11 +22,18 @@ export class DiscoverRepositories {
   ) {}
 
   async execute(selectedSpaces: readonly Space[]): Promise<readonly DiscoveredRepository[]> {
+    const repositories = await this.catalog.listRepositories(selectedSpaces);
+    return this.rank(selectedSpaces, repositories);
+  }
+
+  rank(
+    selectedSpaces: readonly Space[],
+    repositories: readonly RepositoryCandidate[],
+  ): readonly DiscoveredRepository[] {
     if (selectedSpaces.length !== 1 || selectedSpaces.some((space) => !isKnownSpace(space))) {
       throw new Error("Select exactly one known category");
     }
 
-    const repositories = await this.catalog.listRepositories(selectedSpaces);
     const referenceTime = this.clock();
     const bestByRepository = new Map<string, DiscoveredRepository>();
     for (const repository of repositories

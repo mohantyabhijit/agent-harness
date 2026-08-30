@@ -4,9 +4,11 @@ import { z } from "zod";
 import { TrueForgeIntentClassifier } from "../adapters/trueforge/intent-classifier.js";
 import { ApplicationError } from "../application/errors.js";
 import { CreateCampaign, type Clock, type IdGenerator } from "../application/create-campaign.js";
+import { FinalizeCampaign } from "../application/finalize-campaign.js";
 import { DiscoverRepositories } from "../application/discover.js";
 import { ApprovalIssuanceConflict, CampaignIdentityConflict, CampaignVersionConflict, type CampaignStore } from "../application/ports/campaign-store.js";
 import type { GithubCatalogPort } from "../application/ports/github-catalog.js";
+import type { DiscoverySnapshotCache } from "../application/discovery-snapshot-cache.js";
 import { HarnessError, HarnessUnavailable, type HarnessPort } from "../application/ports/harness.js";
 import { RunCampaign } from "../application/run-campaign.js";
 import { SyncReview } from "../application/sync-review.js";
@@ -21,11 +23,14 @@ import type { AuthorizationPolicy, Capability } from "./authorization.js";
 import type { QodoReviewJobHealth } from "./jobs/qodo-review-job.js";
 import type { QodoReviewPort } from "../application/ports/qodo-review.js";
 import type { RepairVerifierPort } from "../application/ports/repair-verifier.js";
+import type { PublisherPort } from "../application/ports/publisher.js";
+import { registerPublisherRoutes } from "./routes/publisher.js";
 
 const emptyQuerySchema = z.object({}).strict();
 
 export interface AppDependencies {
   readonly catalog: GithubCatalogPort;
+  readonly discoveryCache?: DiscoverySnapshotCache;
   readonly store: CampaignStore;
   readonly harness: HarnessPort;
   readonly clock: Clock;
@@ -36,12 +41,14 @@ export interface AppDependencies {
   readonly repairVerifier?: RepairVerifierPort;
   readonly requireReviewHealth?: boolean;
   readonly reviewSyncTimeoutMs?: number;
+  readonly publisher?: PublisherPort;
 }
 
 export function buildApp(dependencies: AppDependencies): FastifyInstance {
   const app = Fastify({ logger: false, bodyLimit: 256 * 1_024 });
   const discover = new DiscoverRepositories(dependencies.catalog);
   const createCampaign = new CreateCampaign(dependencies.store, dependencies.harness, dependencies.clock, dependencies.ids);
+  const finalizeCampaign = new FinalizeCampaign(dependencies.store, () => dependencies.clock.now(), () => dependencies.ids.next());
   const runCampaign = new RunCampaign(dependencies.store, dependencies.harness, dependencies.clock, dependencies.ids);
   const syncReview = new SyncReview(dependencies.store, dependencies.harness, dependencies.clock, dependencies.ids, dependencies.repairVerifier);
   const qodoReview = dependencies.qodoReview ?? { getReview: async () => { throw new HarnessUnavailable(); } };
@@ -51,8 +58,8 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
     emptyQuerySchema.parse(request.query);
   });
   app.addHook("onRequest", async (request) => {
-    if (request.method === "GET" || request.method === "HEAD") return;
     const routeConfig = request.routeOptions.config as { capability?: Capability };
+    if ((request.method === "GET" || request.method === "HEAD") && routeConfig.capability === undefined) return;
     dependencies.authorization.require(request, routeConfig.capability ?? "operator");
   });
   app.setErrorHandler((error, _request, reply) => {
@@ -74,11 +81,13 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
     }
     return reply.send({ status: "ready" });
   });
+  app.get("/api/operator-session", { config: { capability: "operator" } }, async (_request, reply) => reply.code(204).send());
   registerSpaceRoutes(app);
-  registerDiscoveryRoutes(app, { discover, catalog: dependencies.catalog, intentClassifier: new TrueForgeIntentClassifier(dependencies.harness) });
-  registerCampaignRoutes(app, { createCampaign, runCampaign, store: dependencies.store, clock: dependencies.clock });
+  registerDiscoveryRoutes(app, { discover, catalog: dependencies.catalog, ...(dependencies.discoveryCache === undefined ? {} : { cache: dependencies.discoveryCache }), intentClassifier: new TrueForgeIntentClassifier(dependencies.harness) });
+  registerCampaignRoutes(app, { createCampaign, finalizeCampaign, runCampaign, store: dependencies.store, clock: dependencies.clock });
   registerApprovalRoutes(app, { store: dependencies.store, clock: dependencies.clock, ids: dependencies.ids });
   registerReviewRoutes(app, { syncReview: authenticatedReview, ...(dependencies.reviewSyncTimeoutMs === undefined ? {} : { timeoutMs: dependencies.reviewSyncTimeoutMs }) });
+  if (dependencies.publisher !== undefined) registerPublisherRoutes(app, { runCampaign, publisher: dependencies.publisher });
   return app;
 }
 
@@ -93,6 +102,7 @@ function mapError(error: unknown): ApiProblem {
       campaign_not_found: [404, "campaign_not_found", "Campaign was not found"],
       campaign_conflict: [409, "campaign_conflict", "Campaign conflicts with current state"],
       approval_required: [412, "approval_required", "Exact action approval is required"],
+      external_action_outcome_unknown: [409, "publication_outcome_unknown", "Publication outcome is unknown; reconciliation is required"],
       invalid_transition: [422, "invalid_transition", "Campaign transition is not allowed"],
       invalid_request: [400, "invalid_request", "Request validation failed"],
     } as const;

@@ -43,7 +43,7 @@ Trust boundaries exist between:
 
 **Threat:** Repository code, prompts, logs, evidence, screenshots, URLs, errors, or downloadable artifacts expose GitHub, model, TrueForge, Daytona, Qodo, operator, or review-provider credentials.
 
-**Controls:** Credentials remain in provider stores or process memory, outside cloned repositories and campaign packets. The browser operator capability is password-masked and held only in React memory. HTTP errors and readiness codes are sanitized. Sandbox artifact paths are bounded and cannot be absolute or URL-like. Evidence rules forbid raw payload captures, headers, cookies, environment dumps, and provider error bodies.
+**Controls:** Credentials remain in provider stores or process memory, outside cloned repositories and campaign packets. The local Vite proxy injects the operator capability server-side and never bundles it into browser code; outside development, any browser-entered capability is password-masked and held only in React memory. HTTP errors and readiness codes are sanitized. Sandbox artifact paths are bounded and cannot be absolute or URL-like. Evidence rules forbid raw payload captures, headers, cookies, environment dumps, and provider error bodies.
 
 **Residual risk:** A compromised local browser, process, dependency, provider, or workstation can access in-memory credentials. This MVP does not provide OS-level secret isolation or content scanning of every user-created screenshot.
 

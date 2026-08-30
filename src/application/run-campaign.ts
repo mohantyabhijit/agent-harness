@@ -4,8 +4,9 @@ import {
 } from "../domain/approval.js";
 import { transitionCampaign, type Campaign } from "../domain/campaign.js";
 import type { Clock, IdGenerator } from "./create-campaign.js";
-import type { CampaignEventInput, CampaignSnapshot, CampaignStore } from "./ports/campaign-store.js";
+import type { CampaignEventInput, CampaignSnapshot, CampaignStore, ExternalReference } from "./ports/campaign-store.js";
 import type { ExternalActionDisposition } from "./ports/campaign-store.js";
+import { campaignOperationResponseSchemas } from "./ports/harness.js";
 import type {
   CampaignPacket,
   HarnessOperation,
@@ -17,6 +18,7 @@ import { ApplicationError } from "./errors.js";
 import {
   deepFreeze,
   externalActionDigest,
+  isPullRequest,
   validateExternalActionPayload,
   type ExternalActionPayload,
 } from "./external-action.js";
@@ -42,6 +44,7 @@ export interface ExternalActionReconciliation {
   readonly claimId: string;
   readonly disposition: ExternalActionDisposition;
   readonly observedCanonicalHead?: string;
+  readonly observedPullRequest?: string;
 }
 
 export interface ExternalActionStaleRecovery {
@@ -75,6 +78,23 @@ interface PreflightEvidence {
   readonly check: (typeof requiredPreflightChecks)[number];
   readonly sourceUrl: string;
   readonly observation: string;
+}
+
+interface ImplementationResult {
+  readonly status: "completed";
+  readonly commitSha: string;
+  readonly changedAreas: readonly string[];
+  readonly tests: readonly string[];
+  readonly uncertainty: string;
+  readonly before: string;
+  readonly after: string;
+}
+
+interface VerificationResult {
+  readonly testsPassed: true;
+  readonly currentCommitSha: string;
+  readonly tests: readonly string[];
+  readonly uncertainty: string;
 }
 
 export class RunCampaign {
@@ -112,6 +132,7 @@ export class RunCampaign {
     campaignId: string,
     request: ExternalActionApproval,
     action: (authorized: Readonly<AuthorizedExternalAction>) => Promise<T>,
+    completionReference?: (result: T, authorized: Readonly<AuthorizedExternalAction>) => ExternalReference | undefined,
   ): Promise<T> {
     validateExternalActionPayload(request.payload);
     const snapshot = await this.requiredSnapshot(campaignId);
@@ -165,11 +186,13 @@ export class RunCampaign {
     });
 
     let result: T;
+    let publishedReference: ExternalReference | undefined;
     try {
       result = await action(authorized);
+      publishedReference = completionReference?.(result, authorized);
     } catch {
       await this.markOutcomeUnknown(campaignId, claimId, approval.action, approval.actionDigest, snapshot);
-      throw new Error("External action outcome is unknown; reconciliation required");
+      throw new ApplicationError("external_action_outcome_unknown", "External action outcome is unknown; reconciliation required");
     }
 
     try {
@@ -177,7 +200,7 @@ export class RunCampaign {
         ? claimed.payload.commitSha
         : undefined;
       const resultingVersion = snapshot.campaign.version + (
-        claimed.payload.action === "update_pr" || (newCommitSha !== undefined && newCommitSha !== campaignCurrentCommit(snapshot)) ? 1 : 0
+        claimed.payload.action === "update_pr" || (claimed.payload.action === "create_pr" && publishedReference?.kind === "pull_request") || (newCommitSha !== undefined && newCommitSha !== campaignCurrentCommit(snapshot)) ? 1 : 0
       );
       await this.store.completeExternalAction(campaignId, {
         claimId,
@@ -189,10 +212,18 @@ export class RunCampaign {
           occurredAt: this.clock.now(),
         },
         ...(newCommitSha === undefined ? {} : { newCommitSha }),
+        ...(publishedReference === undefined ? {} : { publishedReference }),
+        ...(claimed.payload.action === "push_branch" ? {
+          nextProposalEvent: this.createPullRequestProposalEvent(
+            { ...snapshot.campaign, version: resultingVersion },
+            claimed.payload,
+            this.clock.now(),
+          ),
+        } : {}),
       });
     } catch {
       await this.markOutcomeUnknown(campaignId, claimId, approval.action, approval.actionDigest, snapshot);
-      throw new Error("External action outcome is unknown; reconciliation required");
+      throw new ApplicationError("external_action_outcome_unknown", "External action outcome is unknown; reconciliation required");
     }
     return result;
   }
@@ -204,6 +235,7 @@ export class RunCampaign {
     if (claim === undefined || claim.status !== "outcome_unknown") throw new ApplicationError("invalid_transition");
     const current = campaignCurrentCommit(snapshot);
     let confirmedUpdate = false;
+    let confirmedCreate = false;
     if (reconciliation.disposition === "confirmed_completed" && claim.payload.action === "update_pr") {
       confirmedUpdate = true;
       const updatePayload = claim.payload;
@@ -212,12 +244,29 @@ export class RunCampaign {
         throw new ApplicationError("campaign_conflict");
       }
     }
+    if (reconciliation.disposition === "confirmed_completed" && claim.payload.action === "create_pr") {
+      confirmedCreate = true;
+      if (reconciliation.observedPullRequest === undefined || !isPullRequest(reconciliation.observedPullRequest, claim.payload.repository) ||
+        reconciliation.observedCanonicalHead !== undefined || current !== claim.payload.commitSha || snapshot.campaign.status !== "contribution_approval") {
+        throw new ApplicationError("campaign_conflict");
+      }
+    }
+    if (reconciliation.disposition === "confirmed_completed" && claim.payload.action === "push_branch") {
+      if (reconciliation.observedCanonicalHead !== claim.payload.commitSha || reconciliation.observedPullRequest !== undefined) throw new ApplicationError("campaign_conflict");
+    }
+    if (reconciliation.disposition === "confirmed_not_completed" && (reconciliation.observedCanonicalHead !== undefined || reconciliation.observedPullRequest !== undefined)) {
+      throw new ApplicationError("invalid_request");
+    }
     const preserveVerifiedRepair = reconciliation.disposition === "confirmed_not_completed" && claim.payload.action === "update_pr";
-    const resultingVersion = snapshot.campaign.version + (confirmedUpdate || (!preserveVerifiedRepair && reconciliation.observedCanonicalHead !== undefined && reconciliation.observedCanonicalHead !== current) ? 1 : 0);
+    const resultingVersion = snapshot.campaign.version + (confirmedUpdate || confirmedCreate || (!preserveVerifiedRepair && reconciliation.observedCanonicalHead !== undefined && reconciliation.observedCanonicalHead !== current) ? 1 : 0);
+    const nextProposalEvent = reconciliation.disposition === "confirmed_completed" && claim.payload.action === "push_branch"
+      ? this.createPullRequestProposalEvent({ ...snapshot.campaign, version: resultingVersion }, claim.payload, this.clock.now())
+      : undefined;
     await this.store.reconcileExternalAction(campaignId, {
       claimId: reconciliation.claimId,
       disposition: reconciliation.disposition,
       ...(reconciliation.observedCanonicalHead === undefined ? {} : { observedCanonicalHead: reconciliation.observedCanonicalHead }),
+      ...(reconciliation.observedPullRequest === undefined ? {} : { observedPullRequest: reconciliation.observedPullRequest }),
       reconciledAt: this.clock.now(),
       event: {
         id: this.nextId(),
@@ -228,12 +277,14 @@ export class RunCampaign {
           actionDigest: claim.actionDigest,
           disposition: reconciliation.disposition,
           ...(reconciliation.observedCanonicalHead === undefined ? {} : { observedCanonicalHead: reconciliation.observedCanonicalHead }),
+          ...(reconciliation.observedPullRequest === undefined ? {} : { observedPullRequest: reconciliation.observedPullRequest }),
           claimedCampaignVersion: snapshot.campaign.version,
           resultingCampaignVersion: resultingVersion,
           reason: "human_external_action_reconciliation",
         },
         occurredAt: this.clock.now(),
       },
+      ...(nextProposalEvent === undefined ? {} : { nextProposalEvent }),
     });
     return (await this.requiredSnapshot(campaignId)).campaign;
   }
@@ -292,7 +343,6 @@ export class RunCampaign {
       throw new ApplicationError("invalid_transition");
     }
     if (
-      snapshot.campaign.status !== "policy_review" &&
       snapshot.campaign.status !== "coordination_pending" &&
       snapshot.campaign.status !== "quarantined"
     ) {
@@ -349,16 +399,16 @@ export class RunCampaign {
     const claimed = transitionCampaign(campaign, "implementation");
     await this.store.update(claimed, campaign.version);
     try {
-      const result = await this.harness.runChildSession(this.packet(snapshot, currentCommitSha), "implement");
-      const nextCommitSha = implementationCommit(result.output);
-      const resultingCommitSha = nextCommitSha ?? currentCommitSha;
-      const resultingVersion = claimed.version + (resultingCommitSha === currentCommitSha ? 0 : 1);
+      const result = await this.harness.runChildSession(this.packet(snapshot, currentCommitSha, "implement"), "implement");
+      const implementation = parseImplementationResult(result.output, currentCommitSha);
+      const resultingCommitSha = implementation.commitSha;
+      const resultingVersion = claimed.version + 1;
       const recordedVersion = await this.store.recordChildResult(campaign.id, {
         expectedVersion: claimed.version,
         expectedStatus: "implementation",
         childSessionId: result.sessionId,
-        event: this.operationEvent(claimed, resultingVersion, "campaign_operation_completed", "implement", result, { result: result.output, previousCommitSha: currentCommitSha, currentCommitSha: resultingCommitSha }),
-        ...(nextCommitSha === undefined ? {} : { newCommitSha: nextCommitSha }),
+        event: this.operationEvent(claimed, resultingVersion, "campaign_operation_completed", "implement", result, { ...implementation, previousCommitSha: currentCommitSha, currentCommitSha: resultingCommitSha }),
+        newCommitSha: resultingCommitSha,
         operationResult: { operation: "implement", currentCommitSha: resultingCommitSha, qodoIteration: claimed.qodoIteration },
       });
       return { ...claimed, version: recordedVersion };
@@ -382,15 +432,19 @@ export class RunCampaign {
     const claimed = transitionCampaign(campaign, "verification");
     await this.store.update(claimed, campaign.version);
     try {
-      const result = await this.harness.runChildSession(this.packet(snapshot, currentCommitSha), "verify");
+      const result = await this.harness.runChildSession(this.packet(snapshot, currentCommitSha, "verify"), "verify");
+      const verification = parseVerificationResult(result.output, currentCommitSha);
+      const contributionApproval = transitionCampaign(claimed, "contribution_approval");
       const recordedVersion = await this.store.recordChildResult(campaign.id, {
         expectedVersion: claimed.version,
         expectedStatus: "verification",
         childSessionId: result.sessionId,
         event: this.operationEvent(claimed, claimed.version, "campaign_operation_completed", "verify", result, { result: result.output, currentCommitSha }),
         operationResult: { operation: "verify", currentCommitSha, qodoIteration: claimed.qodoIteration },
+        nextCampaign: contributionApproval,
+        nextProposalEvent: this.pushProposalEvent(contributionApproval, currentCommitSha, verification),
       });
-      return { ...claimed, version: recordedVersion };
+      return { ...contributionApproval, version: recordedVersion };
     } catch (error) {
       await this.failClaimedOperation(claimed, "human_escalation", "verification_execution_failed");
       if (error instanceof HarnessError) throw error;
@@ -423,12 +477,42 @@ export class RunCampaign {
     };
   }
 
-  private packet(snapshot: CampaignSnapshot, currentCommitSha?: string): CampaignPacket {
+  private pushProposalEvent(campaign: Campaign, commitSha: string, verification: VerificationResult): CampaignEventInput {
+    const payload: ExternalActionPayload = {
+      action: "push_branch",
+      repository: campaign.repository,
+      issueNumber: campaign.issueNumber,
+      branch: contributionBranch(campaign.issueNumber),
+      commitSha,
+    };
+    return approvalProposalEvent(this.nextId(), campaign, payload, commitSha, verification.tests, this.clock.now());
+  }
+
+  private createPullRequestProposalEvent(campaign: Campaign, push: Extract<ExternalActionPayload, { action: "push_branch" }>, occurredAt: string): CampaignEventInput {
+    const payload: ExternalActionPayload = {
+      action: "create_pr",
+      repository: campaign.repository,
+      issueNumber: campaign.issueNumber,
+      branch: push.branch,
+      baseBranch: "main",
+      commitSha: push.commitSha,
+      title: `Fix #${String(campaign.issueNumber)}`,
+      body: `Fixes ${campaign.issueUrl}\n\n## Verified tests\nSee the verified campaign evidence.\n\n## Risks\nMaintainer acceptance and repository-specific CI remain outside local verification.\n\n## Rollback\nRevert commit ${push.commitSha}.\n\n## AI disclosure\nTrueForge assisted this contribution; a maintainer must review it before merge.`,
+    };
+    return approvalProposalEvent(this.nextId(), campaign, payload, push.commitSha, ["Verified campaign tests"], occurredAt);
+  }
+
+  private packet(snapshot: CampaignSnapshot, currentCommitSha?: string, operation?: "implement" | "verify"): CampaignPacket {
+    const operationSafety = snapshot.campaign.status === "coordination_pending" || snapshot.campaign.status === "quarantined"
+      ? "Static preflight must inspect before any dependency installation or repository script; clone only in this fresh Daytona child."
+      : snapshot.campaign.status === "baseline" || snapshot.campaign.status === "verification"
+        ? "Clone and work only in this fresh Daytona child; bind output to the current commit and never publish."
+        : "Verify the exact current implementation commit in this fresh Daytona child; reject stale results.";
     return {
       campaignId: snapshot.campaign.id,
       repository: snapshot.campaign.repository,
       issueNumber: snapshot.campaign.issueNumber,
-      goal: `Advance campaign with verified ${snapshot.campaign.status} evidence`,
+      goal: `Advance campaign with verified ${snapshot.campaign.status} evidence. ${operationSafety}${operation === "implement" ? " Return exactly one strict implementation result object in output, matching the supplied response schema, after creating a new commit." : operation === "verify" ? " Return exactly one strict verification result object in output, matching the supplied response schema, for the exact current commit." : ""}`,
       verifiedEvidence: snapshot.evidence
         .filter(({ kind }) => kind === "direct")
         .map(({ sourceUrl, observation }) => ({ sourceUrl, observation })),
@@ -438,6 +522,7 @@ export class RunCampaign {
         status,
       })),
       ...(currentCommitSha === undefined ? {} : { currentCommitSha }),
+      ...(operation === undefined ? {} : { context: { responseSchema: campaignOperationResponseSchemas[operation] } }),
     };
   }
 
@@ -553,15 +638,17 @@ function parseExternalActionReconciliation(input: unknown): ExternalActionReconc
   if (!isRecord(input)) throw new Error("Invalid external action reconciliation");
   const keys = Object.keys(input);
   if (
-    keys.some((key) => !["claimId", "disposition", "observedCanonicalHead"].includes(key)) ||
+    keys.some((key) => !["claimId", "disposition", "observedCanonicalHead", "observedPullRequest"].includes(key)) ||
     typeof input.claimId !== "string" || input.claimId.trim().length === 0 ||
     (input.disposition !== "confirmed_completed" && input.disposition !== "confirmed_not_completed") ||
-    (input.observedCanonicalHead !== undefined && (typeof input.observedCanonicalHead !== "string" || !/^[0-9a-f]{40}$/u.test(input.observedCanonicalHead)))
+    (input.observedCanonicalHead !== undefined && (typeof input.observedCanonicalHead !== "string" || !/^[0-9a-f]{40}$/u.test(input.observedCanonicalHead))) ||
+    (input.observedPullRequest !== undefined && (typeof input.observedPullRequest !== "string" || input.observedPullRequest.length > 2_048))
   ) throw new Error("Invalid external action reconciliation");
   return {
     claimId: input.claimId,
     disposition: input.disposition,
     ...(input.observedCanonicalHead === undefined ? {} : { observedCanonicalHead: input.observedCanonicalHead }),
+    ...(input.observedPullRequest === undefined ? {} : { observedPullRequest: input.observedPullRequest }),
   };
 }
 
@@ -648,10 +735,59 @@ function requiredCurrentCommit(snapshot: CampaignSnapshot): string {
   return current.value;
 }
 
-function implementationCommit(output: unknown): string | undefined {
-  if (!isRecord(output) || output.commitSha === undefined) return undefined;
-  if (typeof output.commitSha !== "string" || !/^[0-9a-f]{40}$/u.test(output.commitSha)) throw new Error("Invalid implementation commit");
-  return output.commitSha;
+function parseImplementationResult(output: unknown, currentCommitSha: string): ImplementationResult {
+  if (!isRecord(output) || Object.keys(output).some((key) => !["status", "commitSha", "changedAreas", "tests", "uncertainty", "before", "after"].includes(key)) ||
+    output.status !== "completed" || typeof output.commitSha !== "string" || !/^[0-9a-f]{40}$/u.test(output.commitSha) ||
+    output.commitSha === currentCommitSha || !boundedStringList(output.changedAreas) || !boundedStringList(output.tests) ||
+    !boundedExplanation(output.uncertainty) || !boundedExplanation(output.before) || !boundedExplanation(output.after)) {
+    throw new Error("Invalid implementation result");
+  }
+  return { status: "completed", commitSha: output.commitSha, changedAreas: output.changedAreas, tests: output.tests, uncertainty: output.uncertainty, before: output.before, after: output.after };
+}
+
+function parseVerificationResult(output: unknown, currentCommitSha: string): VerificationResult {
+  if (!isRecord(output) || Object.keys(output).some((key) => !["testsPassed", "currentCommitSha", "tests", "uncertainty"].includes(key)) ||
+    output.testsPassed !== true || output.currentCommitSha !== currentCommitSha || !boundedStringList(output.tests) ||
+    !boundedExplanation(output.uncertainty)) throw new Error("Invalid verification result");
+  return { testsPassed: true, currentCommitSha, tests: output.tests, uncertainty: output.uncertainty };
+}
+
+function contributionBranch(issueNumber: number): string {
+  return `openquest/issue-${String(issueNumber)}`;
+}
+
+function approvalProposalEvent(id: string, campaign: Campaign, payload: ExternalActionPayload, currentCommitSha: string, tests: readonly string[], occurredAt: string): CampaignEventInput {
+  return {
+    id,
+    eventType: "external_action_proposed",
+    occurredAt,
+    payload: {
+      proposalId: id,
+      payload,
+      actionDigest: externalActionDigest(payload),
+      expectedCampaignVersion: campaign.version,
+      expectedCampaignStatus: campaign.status,
+      expectedCurrentCommitSha: currentCommitSha,
+      brief: {
+        policy: "Only the exact server-owned payload may be approved and published.",
+        approach: payload.action === "push_branch" ? "Publish the verified sandbox commit to a dedicated contribution branch." : "Open a pull request from the already published verified branch.",
+        files: ["Verified implementation changes"],
+        risks: ["Maintainer acceptance and repository-specific CI remain outside local verification."],
+        tests: [...tests],
+        safetyResult: "Static preflight and commit-bound verification completed before publication.",
+        qodoStatus: "Qodo review starts only after the pull request exists.",
+        aiDisclosure: "TrueForge assisted this contribution; maintainer review is required.",
+      },
+    },
+  };
+}
+
+function boundedStringList(value: unknown): value is string[] {
+  return Array.isArray(value) && value.length > 0 && value.length <= 100 && value.every((item) => typeof item === "string" && item.trim().length > 0 && item.length <= 2_000);
+}
+
+function boundedExplanation(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0 && value.length <= 2_000;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

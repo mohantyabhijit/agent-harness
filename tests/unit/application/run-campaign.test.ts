@@ -9,6 +9,7 @@ import { transitionCampaign } from "../../../src/domain/campaign.js";
 import { campaign } from "../../builders.js";
 import { FakeCampaignStore } from "../../fakes/fake-campaign-store.js";
 import { FakeHarness } from "../../fakes/fake-harness.js";
+import { campaignOperationResponseSchemas } from "../../../src/application/ports/harness.js";
 
 const commitSha = "a".repeat(40);
 const requiredChecks = [
@@ -22,7 +23,7 @@ const requiredChecks = [
 describe("RunCampaign", () => {
   it("cannot request implementation before a passed preflight", async () => {
     const { service, store, harness } = fixture();
-    store.seed(campaign({ status: "policy_review" }));
+    store.seed(campaign({ status: "coordination_pending" }));
 
     await expect(service.execute("campaign-1", "implement")).rejects.toMatchObject({ code: "invalid_transition" });
     expect(harness.operations).not.toContain("implement");
@@ -36,7 +37,7 @@ describe("RunCampaign", () => {
     expect(packageText).toContain('"preinstall"');
     expect(packageText).toContain("curl");
     const { service, store, harness } = fixture();
-    store.seed(campaign({ status: "policy_review" }));
+    store.seed(campaign({ status: "coordination_pending" }));
     harness.enqueueResult("preflight", {
       summary: "Lifecycle script found by static manifest inspection",
       artifacts: ["artifacts/preflight.json"],
@@ -66,7 +67,7 @@ describe("RunCampaign", () => {
     ["missing source-linked evidence", preflightAttestation({ evidence: [] })],
   ])("rejects an invalid trusted preflight attestation: %s", async (_label, output) => {
     const { service, store, harness } = fixture();
-    store.seed(campaign({ status: "policy_review" }));
+    store.seed(campaign({ status: "coordination_pending" }));
     harness.enqueueResult("preflight", { summary: "preflight", artifacts: [], output });
 
     await expect(service.execute("campaign-1", "preflight")).rejects.toThrow(/quarantined/i);
@@ -88,15 +89,17 @@ describe("RunCampaign", () => {
 
   it("records each child as session and sandbox identity with version-bound artifacts", async () => {
     const { service, store, harness } = fixture();
-    store.seed(campaign({ status: "policy_review" }));
+    store.seed(campaign({ status: "coordination_pending" }));
 
     expect((await service.execute("campaign-1", "preflight")).status).toBe("baseline");
     expect((await service.execute("campaign-1", "implement")).status).toBe("implementation");
-    expect((await service.execute("campaign-1", "verify")).status).toBe("verification");
+    expect((await service.execute("campaign-1", "verify")).status).toBe("contribution_approval");
 
     expect(harness.childSessions).toEqual(["session-1", "session-2", "session-3"]);
     expect(harness.packets[1]?.currentCommitSha).toBe(commitSha);
-    expect(harness.packets[2]?.currentCommitSha).toBe(commitSha);
+    expect(harness.packets[2]?.currentCommitSha).toBe("b".repeat(40));
+    expect(harness.packets[1]?.context?.responseSchema).toEqual(campaignOperationResponseSchemas.implement);
+    expect(harness.packets[2]?.context?.responseSchema).toEqual(campaignOperationResponseSchemas.verify);
     const snapshot = await store.get("campaign-1");
     expect(snapshot?.externalReferences.filter(({ kind }) => kind === "sandbox")).toEqual([
       { kind: "sandbox", value: "session-1" },
@@ -106,8 +109,17 @@ describe("RunCampaign", () => {
     expect(snapshot?.events.map(({ payload }) => payload)).toEqual(expect.arrayContaining([
       expect.objectContaining({ claimedCampaignVersion: 2, sandboxSessionId: "session-1" }),
       expect.objectContaining({ claimedCampaignVersion: 5, sandboxSessionId: "session-2" }),
-      expect.objectContaining({ claimedCampaignVersion: 6, sandboxSessionId: "session-3" }),
+      expect.objectContaining({ claimedCampaignVersion: 7, sandboxSessionId: "session-3" }),
     ]));
+    expect(snapshot?.events).toContainEqual(expect.objectContaining({
+      eventType: "external_action_proposed",
+      payload: expect.objectContaining({
+        expectedCampaignVersion: 8,
+        expectedCampaignStatus: "contribution_approval",
+        expectedCurrentCommitSha: "b".repeat(40),
+        payload: expect.objectContaining({ action: "push_branch", branch: "openquest/issue-42", commitSha: "b".repeat(40) }),
+      }),
+    }));
   });
 
   it("requires durable implementation completion for the claimed campaign version", async () => {
@@ -152,9 +164,9 @@ describe("RunCampaign", () => {
   it("rotates a reported implementation head and verifies that exact commit", async () => {
     const nextCommit = "b".repeat(40);
     const { service, store, harness } = fixture();
-    store.seed(campaign({ status: "policy_review" }));
+    store.seed(campaign({ status: "coordination_pending" }));
     await service.execute("campaign-1", "preflight");
-    harness.enqueueResult("implement", { summary: "implemented", artifacts: [], output: { status: "completed", commitSha: nextCommit } });
+    harness.enqueueResult("implement", { summary: "implemented", artifacts: [], output: { status: "completed", commitSha: nextCommit, changedAreas: ["src/example.ts"], tests: ["npm test"], uncertainty: "No known uncertainty.", before: "The old behavior failed.", after: "The new behavior passes." } });
     await service.execute("campaign-1", "implement");
     await service.execute("campaign-1", "verify");
 
@@ -164,9 +176,36 @@ describe("RunCampaign", () => {
     expect((await store.get("campaign-1"))?.events).toEqual(expect.arrayContaining([expect.objectContaining({ eventType: "campaign_operation_completed", payload: expect.objectContaining({ output: expect.objectContaining({ previousCommitSha: commitSha, currentCommitSha: nextCommit }) }) })]));
   });
 
+  it.each([
+    ["an explanation", { before: "x".repeat(2_001) }],
+    ["a changed-area list", { changedAreas: Array.from({ length: 101 }, () => "src/example.ts") }],
+  ])("rejects implementation output with an unprojectable %s", async (_label, override) => {
+    const { service, store, harness } = fixture();
+    store.seed(campaign({ status: "coordination_pending" }));
+    await service.execute("campaign-1", "preflight");
+    harness.enqueueResult("implement", {
+      summary: "implemented",
+      artifacts: [],
+      output: {
+        status: "completed",
+        commitSha: "b".repeat(40),
+        changedAreas: ["src/example.ts"],
+        tests: ["npm test"],
+        uncertainty: "No known uncertainty.",
+        before: "The old behavior failed.",
+        after: "The new behavior passes.",
+        ...override,
+      },
+    });
+
+    await expect(service.execute("campaign-1", "implement")).rejects.toThrow(/implementation execution failed/i);
+    expect((await store.get("campaign-1"))?.campaign.status).toBe("human_escalation");
+    expect((await store.get("campaign-1"))?.externalReferences.filter(({ kind }) => kind === "commit")).toEqual([{ kind: "commit", value: commitSha }]);
+  });
+
   it("fences a delayed verifier after recovery and blocks implementation before completion", async () => {
     const { service, store, harness } = fixture();
-    store.seed(campaign({ status: "policy_review" }));
+    store.seed(campaign({ status: "coordination_pending" }));
     await service.execute("campaign-1", "preflight");
     await service.execute("campaign-1", "implement");
     let releaseResult!: () => void;
@@ -252,7 +291,7 @@ describe("RunCampaign", () => {
     });
 
     const first = service.executeApprovedExternalAction("campaign-1", approvalRequest(), action);
-    await expect(first).rejects.toEqual(new Error("External action outcome is unknown; reconciliation required"));
+    await expect(first).rejects.toMatchObject({ code: "external_action_outcome_unknown", message: "External action outcome is unknown; reconciliation required" });
     expect(JSON.stringify((await store.get("campaign-1"))?.events)).not.toContain("top-secret");
     expect((await store.get("campaign-1"))?.events.map(({ eventType }) => eventType)).toEqual([
       "external_action_proposed",
@@ -287,7 +326,7 @@ describe("RunCampaign", () => {
 
     await expect(
       service.executeApprovedExternalAction("campaign-1", approvalRequest(), action),
-    ).rejects.toEqual(new Error("External action outcome is unknown; reconciliation required"));
+    ).rejects.toMatchObject({ code: "external_action_outcome_unknown", message: "External action outcome is unknown; reconciliation required" });
     expect((await store.get("campaign-1"))?.events.map(({ eventType }) => eventType)).toEqual([
       "external_action_proposed",
       "external_action_attempted",
@@ -423,6 +462,20 @@ describe("RunCampaign", () => {
     expect(completed?.campaign.version).toBe(8);
     expect(completed?.externalReferences).toContainEqual({ kind: "commit", value: nextCommit });
     expect(completed?.externalActionClaims[0]).toMatchObject({ status: "completed", currentCommitSha: commitSha, payload: pushPayload });
+    expect(completed?.events.at(-1)).toEqual(expect.objectContaining({
+      eventType: "external_action_proposed",
+      payload: expect.objectContaining({
+        expectedCampaignVersion: 8,
+        expectedCurrentCommitSha: nextCommit,
+        payload: expect.objectContaining({
+          action: "create_pr",
+          branch: pushPayload.branch,
+          baseBranch: "main",
+          commitSha: nextCommit,
+          body: expect.stringContaining("AI disclosure"),
+        }),
+      }),
+    }));
   });
 
   it("keeps a failed callback fenced until explicit reconciliation without restoring approval", async () => {
@@ -435,14 +488,15 @@ describe("RunCampaign", () => {
     expect(claim.status).toBe("outcome_unknown");
     await expect(store.replaceCurrentCommit("campaign-1", "b".repeat(40), unknown.campaign.version, unknown.campaign.status)).rejects.toThrow(/external action/i);
     await expect(service.reconcileExternalAction("campaign-1", { claimId: "stale-claim", disposition: "confirmed_not_completed" })).rejects.toMatchObject({ code: "invalid_transition" });
-    await expect(service.reconcileExternalAction("campaign-1", { claimId: claim.id, disposition: "confirmed_completed", observedCanonicalHead: "b".repeat(40) })).resolves.toMatchObject({ version: 8 });
+    const observedPullRequest = "https://github.com/owner/repo/pull/17";
+    await expect(service.reconcileExternalAction("campaign-1", { claimId: claim.id, disposition: "confirmed_completed", observedPullRequest })).resolves.toMatchObject({ version: 8, status: "pull_request_open" });
 
     const reconciled = await store.get("campaign-1");
     if (reconciled === undefined) throw new Error("missing reconciled campaign");
-    expect(reconciled.externalActionClaims[0]).toMatchObject({ status: "reconciled", disposition: "confirmed_completed", observedCanonicalHead: "b".repeat(40) });
-    expect(reconciled.externalReferences).toContainEqual({ kind: "commit", value: "b".repeat(40) });
+    expect(reconciled.externalActionClaims[0]).toMatchObject({ status: "reconciled", disposition: "confirmed_completed" });
+    expect(reconciled.externalReferences).toContainEqual({ kind: "pull_request", value: observedPullRequest });
     expect(reconciled.approvals[0]?.status).toBe("consumed");
-    await expect(service.executeApprovedExternalAction("campaign-1", approvalRequest(), async () => undefined)).rejects.toThrow(/available|current campaign head/i);
+    await expect(service.executeApprovedExternalAction("campaign-1", approvalRequest(), async () => undefined)).rejects.toThrow(/approval|required|available|current campaign head/i);
   });
 
   it.each([
@@ -644,7 +698,7 @@ describe("RunCampaign", () => {
     if (claimId === undefined) throw new Error("missing uncertain claim");
     store.failNextEvent = true;
 
-    await expect(service.reconcileExternalAction("campaign-1", { claimId, disposition: "confirmed_completed", observedCanonicalHead: "b".repeat(40) })).rejects.toThrow(/event persistence/i);
+    await expect(service.reconcileExternalAction("campaign-1", { claimId, disposition: "confirmed_not_completed" })).rejects.toThrow(/event persistence/i);
     expect(await store.get("campaign-1")).toEqual(before);
   });
 });

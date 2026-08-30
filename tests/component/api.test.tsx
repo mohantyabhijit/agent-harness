@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createOpenQuestApi, type CampaignSnapshot, type FetchLike } from "../../src/web/api.js";
@@ -20,6 +20,8 @@ const realCampaignResponse = {
 } as const;
 const realCampaignSnapshot: CampaignSnapshot = {
   ...realCampaignResponse,
+  issueBrief: null,
+  fixExplanation: null,
   nextAllowedAction: null,
   evidence: [],
   events: [{ id: "created", eventType: "campaign_created", occurredAt: "2026-08-26T00:00:00Z", sequence: 1, facts: {} }],
@@ -133,6 +135,55 @@ describe("OpenQuest browser API", () => {
     expect(fetcher).toHaveBeenCalledWith("https://openquest.test/api/campaigns/%3Areview.1", expect.not.objectContaining({ headers: expect.anything() }));
   });
 
+  it("finalizes only a server-persisted brief with version and idempotency", async () => {
+    const fetcher = vi.fn<FetchLike>(async () => new Response(JSON.stringify({ ...realCampaignResponse, status: "coordination_pending", version: 2 }), { status: 200 }));
+    const api = createOpenQuestApi({ fetch: fetcher, operatorCapability: () => "runtime-only" });
+
+    await expect(api.finalizeCampaign(":review.1", 1, "finalize-click-0001")).resolves.toMatchObject({ status: "coordination_pending", version: 2 });
+    expect(fetcher).toHaveBeenCalledWith("/api/campaigns/%3Areview.1/finalize", expect.objectContaining({ method: "POST", headers: { "content-type": "application/json", authorization: "Bearer runtime-only" }, body: JSON.stringify({ expectedVersion: 1, idempotencyKey: "finalize-click-0001" }) }));
+  });
+
+  it("publishes only the exact server-projected branch action and preserves its canonical result", async () => {
+    const fetcher = vi.fn<FetchLike>(async () => new Response(JSON.stringify({ commitSha: "b".repeat(40) }), { status: 200 }));
+    const api = createOpenQuestApi({ fetch: fetcher, operatorCapability: () => "runtime-only" });
+    const action = { action: "push_branch" as const, repository: "owner/repo", issueNumber: 42, branch: "openquest/fix-42", sourceCommitSha: "a".repeat(40), targetCommitSha: "b".repeat(40) };
+
+    await expect(api.publishApprovedAction("campaign-1", "approval-1", action)).resolves.toEqual({ commitSha: "b".repeat(40) });
+    expect(fetcher).toHaveBeenCalledWith("/api/campaigns/campaign-1/publish", expect.objectContaining({
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer runtime-only" },
+      body: JSON.stringify({ approvalId: "approval-1", payload: { action: "push_branch", repository: "owner/repo", issueNumber: 42, branch: "openquest/fix-42", commitSha: "b".repeat(40) } }),
+    }));
+  });
+
+  it("publishes an exact server-projected pull request action and rejects an action-specific response mismatch", async () => {
+    const action = { action: "create_pr" as const, repository: "owner/repo", issueNumber: 42, branch: "openquest/fix-42", baseBranch: "main", commitSha: "b".repeat(40), title: "Fix issue 42", body: "Verified tests, risks, rollback, AI disclosure" };
+    const fetcher = vi.fn<FetchLike>(async () => new Response(JSON.stringify({ pullRequest: "https://github.com/owner/repo/pull/17" }), { status: 200 }));
+    const api = createOpenQuestApi({ fetch: fetcher, operatorCapability: () => "runtime-only" });
+
+    await expect(api.publishApprovedAction("campaign-1", "approval-1", action)).resolves.toEqual({ pullRequest: "https://github.com/owner/repo/pull/17" });
+    expect(fetcher.mock.calls[0]?.[1]?.body).toBe(JSON.stringify({ approvalId: "approval-1", payload: action }));
+
+    const mismatch = createOpenQuestApi({ fetch: async () => new Response(JSON.stringify({ commitSha: "b".repeat(40) }), { status: 200 }), operatorCapability: () => "runtime-only" });
+    await expect(mismatch.publishApprovedAction("campaign-1", "approval-1", action)).rejects.toThrow(/unexpected result/i);
+  });
+
+  it("preserves the reconciliation-required publication error code", async () => {
+    const api = createOpenQuestApi({ fetch: async () => new Response(JSON.stringify({ code: "publication_outcome_unknown", message: "Publication outcome is unknown; reconciliation is required" }), { status: 409 }), operatorCapability: () => "runtime-only" });
+    const action = { action: "create_pr" as const, repository: "owner/repo", issueNumber: 42, branch: "openquest/fix-42", baseBranch: "main", commitSha: "b".repeat(40), title: "Fix issue 42", body: "Verified tests, risks, rollback, AI disclosure" };
+
+    await expect(api.publishApprovedAction("campaign-1", "approval-1", action)).rejects.toMatchObject({ code: "publication_outcome_unknown", status: 409 });
+  });
+
+  it("distinguishes missing publication authority before any network attempt", async () => {
+    const fetcher = vi.fn<FetchLike>();
+    const api = createOpenQuestApi({ fetch: fetcher });
+    const action = { action: "create_pr" as const, repository: "owner/repo", issueNumber: 42, branch: "openquest/fix-42", baseBranch: "main", commitSha: "b".repeat(40), title: "Fix issue 42", body: "Verified tests, risks, rollback, AI disclosure" };
+
+    await expect(api.publishApprovedAction("campaign-1", "approval-1", action)).rejects.toMatchObject({ code: "operator_capability_missing", status: undefined });
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
   it("rejects malformed durable campaign facts at the browser boundary", async () => {
     const api = createOpenQuestApi({ fetch: async () => new Response(JSON.stringify({ ...realCampaignSnapshot, events: [{ ...realCampaignSnapshot.events[0], transcript: "do not expose" }] }), { status: 200 }) });
 
@@ -218,7 +269,7 @@ describe("OpenQuest browser API", () => {
   it("accepts claim-specific direct verification evidence for repository discovery", async () => {
     const api = createOpenQuestApi({ fetch: async () => new Response(JSON.stringify(repositoryResponse()), { status: 200 }), operatorCapability: () => "runtime-only" });
 
-    await expect(api.discoverRepositories(["developer_tools"])).resolves.toHaveLength(1);
+    await expect(api.discoverRepositories(["developer_tools"])).resolves.toMatchObject({ values: expect.arrayContaining([expect.anything()]) });
   });
 
   it.each([
@@ -231,25 +282,21 @@ describe("OpenQuest browser API", () => {
   });
 });
 
-describe("operator connection", () => {
+describe("operator access", () => {
   afterEach(() => {
     cleanup();
     window.history.replaceState({}, "", "/");
   });
 
-  it("requires a local runtime connection and clears it on disconnect", () => {
+  it("does not block local development behind a capability screen", () => {
     render(<App />);
 
-    expect(screen.getByRole("heading", { name: /connect an operator capability/i })).toBeVisible();
-    const field = screen.getByLabelText(/operator capability/i);
-    fireEvent.change(field, { target: { value: "runtime-secret" } });
-    fireEvent.click(screen.getByRole("button", { name: /^connect$/i }));
-    expect(screen.getByRole("button", { name: /disconnect/i })).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: /disconnect/i }));
-    expect(screen.getByRole("heading", { name: /connect an operator capability/i })).toBeVisible();
+    expect(screen.getByRole("heading", { name: /find work that is worth shipping/i })).toBeVisible();
+    expect(screen.getByRole("heading", { name: /chat with openquest/i })).toBeVisible();
+    expect(screen.queryByLabelText(/operator capability/i)).not.toBeInTheDocument();
   });
 
-  it("disconnects from a campaign route and focuses each route heading", async () => {
+  it("keeps an injected capability connected and focuses the route heading", async () => {
     window.history.replaceState({}, "", "/campaigns/campaign-1");
     render(<App operatorCapability={() => "runtime-only"} />);
 
@@ -257,12 +304,6 @@ describe("operator connection", () => {
     await vi.waitFor(() => {
       expect(campaignHeading).toHaveFocus();
     });
-    fireEvent.click(screen.getByRole("button", { name: /disconnect/i }));
-
-    expect(window.location.pathname).toBe("/");
-    const connectionHeading = screen.getByRole("heading", { name: /connect an operator capability/i });
-    await vi.waitFor(() => {
-      expect(connectionHeading).toHaveFocus();
-    });
+    expect(screen.queryByRole("button", { name: /disconnect/i })).not.toBeInTheDocument();
   });
 });

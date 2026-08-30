@@ -1,9 +1,16 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import type { PropsWithChildren } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("@truefoundry/trueforge-ui", () => ({ TrueForgeUI: () => <div /> }));
+vi.mock("@truefoundry/trueforge-ui", () => ({
+  ServerProvider: ({ children }: PropsWithChildren) => <>{children}</>,
+  SlotsProvider: ({ children }: PropsWithChildren) => <>{children}</>,
+  Thread: () => null,
+  TrueForgeUI: () => <div />,
+  TrueFoundryChatProvider: ({ children }: PropsWithChildren) => <>{children}</>,
+}));
 
 import { externalActionDigest, type ExternalActionPayload } from "../../src/application/external-action.js";
 import type { CampaignStatus } from "../../src/domain/campaign.js";
@@ -43,6 +50,8 @@ const proposal: ApprovalProposal = {
   },
 };
 const snapshot: CampaignSnapshot = {
+  issueBrief: null,
+  fixExplanation: null,
   id: "campaign-1", repository: "owner/repo", issueNumber: 42, issueUrl: "https://github.com/owner/repo/issues/42", parentSessionId: "session-42", lane: "easy_win", status: "contribution_approval", qodoIteration: 0, version: 7, nextAllowedAction: null,
   evidence: [], events: [], approvals: [], qodoFindings: [], externalReferences: [{ kind: "commit", value: "a".repeat(40) }], externalActionClaims: [], approvalProposal: proposal, qualityEscalationReason: null,
 };

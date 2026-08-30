@@ -2,6 +2,7 @@ import type { Approval } from "../../domain/approval.js";
 import type { Campaign, CampaignStatus } from "../../domain/campaign.js";
 import type { Evidence } from "../../domain/evidence.js";
 import type { QodoFinding } from "../../domain/quality-gate.js";
+import type { IssueBrief } from "../../domain/issue-brief.js";
 import type { ExternalActionPayload } from "../external-action.js";
 import type { PersistenceLease } from "./persistence-lease.js";
 
@@ -76,6 +77,8 @@ export interface ExternalActionCompletionRecord {
   readonly completedAt: string;
   readonly completedEvent: CampaignEventInput;
   readonly newCommitSha?: string;
+  readonly publishedReference?: ExternalReference;
+  readonly nextProposalEvent?: CampaignEventInput;
 }
 
 export interface ExternalActionOutcomeUnknownRecord {
@@ -95,8 +98,10 @@ export interface ExternalActionReconciliationRecord {
   readonly claimId: string;
   readonly disposition: ExternalActionDisposition;
   readonly observedCanonicalHead?: string;
+  readonly observedPullRequest?: string;
   readonly reconciledAt: string;
   readonly event: CampaignEventInput;
+  readonly nextProposalEvent?: CampaignEventInput;
 }
 
 export interface ChildResultRecord {
@@ -107,6 +112,8 @@ export interface ChildResultRecord {
   readonly event: CampaignEventInput;
   readonly newCommitSha?: string;
   readonly operationResult?: CampaignOperationResult;
+  readonly nextCampaign?: Campaign;
+  readonly nextProposalEvent?: CampaignEventInput;
   readonly persistenceLease?: PersistenceLease;
 }
 
@@ -177,6 +184,7 @@ export interface ProposalApprovalIssuanceRecord {
 }
 
 export interface CampaignStore {
+  finalizeCampaign(campaignId: string, brief: IssueBrief, expectedVersion: number, event: CampaignEventInput): Promise<Campaign>;
   create(campaign: Campaign, initialEvent?: CampaignEventInput): Promise<void>;
   get(id: string, observedAt?: string): Promise<CampaignSnapshot | undefined>;
   findByIssue(repository: string, issueNumber: number): Promise<CampaignSnapshot | undefined>;

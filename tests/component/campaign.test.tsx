@@ -1,16 +1,23 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import type { PropsWithChildren } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@truefoundry/trueforge-ui", () => ({
-  TrueForgeUI: ({ initialSessionId }: { initialSessionId?: string }) => <div>TrueForge session {initialSessionId}</div>,
+  ServerProvider: ({ children }: PropsWithChildren) => <>{children}</>,
+  SlotsProvider: ({ children }: PropsWithChildren) => <>{children}</>,
+  Thread: () => null,
+  TrueForgeUI: () => <div>TrueForge UI</div>,
+  TrueFoundryChatProvider: ({ children, initialSessionId }: PropsWithChildren<{ initialSessionId?: string }>) => <><div>TrueForge session {initialSessionId}</div>{children}</>,
 }));
 
 import type { CampaignSnapshot, OpenQuestApi } from "../../src/web/api.js";
 import { CampaignPage } from "../../src/web/routes/CampaignPage.js";
 
 const snapshot: CampaignSnapshot = {
+  issueBrief: null,
+  fixExplanation: null,
   id: "campaign-1",
   repository: "owner/repo",
   issueNumber: 42,
@@ -60,6 +67,28 @@ describe("CampaignPage", () => {
     expect(screen.getByText(/proposal is pending/i)).toBeVisible();
     expect(screen.getByRole("heading", { name: /awaiting the next verified state/i })).toBeVisible();
     expect(screen.queryByText(/chat transcript/i)).not.toBeInTheDocument();
+  });
+
+  it("renders the backend brief and unlocks preflight only after explicit finalization", async () => {
+    const issueBrief = {
+      problem: "The issue describes an incorrect boundary result.", likelyCause: "A documented guard is missing.", smallestFix: "Add the guard and regression test.",
+      affectedAreas: ["src/boundary.ts"], tests: ["Run the regression test."], risks: ["Invalid callers may surface."], uncertainty: "Call sites require sandbox inspection.",
+      evidence: [{ sourceUrl: "https://github.com/owner/repo/issues/42", observation: "The issue documents expected behavior." }],
+    };
+    const before = { ...snapshot, issueBrief, status: "policy_review" as const, version: 1, nextAllowedAction: null };
+    const after = { ...before, status: "coordination_pending" as const, version: 2, nextAllowedAction: "preflight" as const };
+    const getCampaign = vi.fn().mockResolvedValueOnce(before).mockResolvedValueOnce(after);
+    const finalizeCampaign = vi.fn(async () => ({ ...after }));
+
+    render(<CampaignPage api={{ getCampaign, finalizeCampaign, issueApproval: async () => { throw new Error("No approval should be issued"); }, runCampaignAction: async () => { throw new Error("Preflight is not run in this test"); } }} campaignId="campaign-1" createFinalizationKey={() => "finalize-component"} />);
+
+    expect(await screen.findByRole("heading", { name: /problem and proposed fix/i })).toBeVisible();
+    expect(screen.getByText(issueBrief.smallestFix)).toBeVisible();
+    expect(screen.queryByRole("button", { name: /start static preflight/i })).not.toBeInTheDocument();
+    screen.getByRole("button", { name: /finalize issue brief/i }).click();
+    await waitFor(() => { expect(finalizeCampaign).toHaveBeenCalledWith("campaign-1", 1, "finalize-component", expect.any(AbortSignal)); });
+    expect(await screen.findByRole("button", { name: /start static preflight/i })).toBeVisible();
+    expect(screen.getByText(/finalized/i)).toBeVisible();
   });
 
   it("aborts its in-flight campaign read when the page unmounts", () => {
@@ -127,6 +156,23 @@ describe("CampaignPage", () => {
     render(<CampaignPage api={campaignApi(async () => ({ ...snapshot, status: "human_escalation", qodoIteration: 3, qualityEscalationReason: "tests_failed" }))} campaignId="campaign-1" />);
     expect(await screen.findByText(/durable quality record says verification tests failed/i)).toBeVisible();
     expect(screen.queryByText(/repair limit was reached/i)).not.toBeInTheDocument();
+  });
+
+  it("shows the durable before-and-after fix explanation beside the resumed agent", async () => {
+    render(<CampaignPage api={campaignApi(async () => ({ ...snapshot, fixExplanation: {
+      commitSha: "b".repeat(40),
+      before: "The boundary returned the wrong result.",
+      after: "The boundary now handles the documented case.",
+      changedAreas: ["src/boundary.ts"],
+      tests: ["npm test -- boundary"],
+      uncertainty: "No known uncertainty remains.",
+    } }))} campaignId="campaign-1" />);
+
+    expect(await screen.findByRole("heading", { name: /what changed and why/i })).toBeVisible();
+    expect(screen.getByText("The boundary returned the wrong result.")).toBeVisible();
+    expect(screen.getByText("The boundary now handles the documented case.")).toBeVisible();
+    expect(screen.getByText("src/boundary.ts")).toBeVisible();
+    expect(screen.getByText("TrueForge session session-42")).toBeVisible();
   });
 
   it("uses durable sequence, not descending timestamps, for event causality", async () => {

@@ -36,6 +36,7 @@ import {
   type Approval,
 } from "../../domain/approval.js";
 import type { Campaign, CampaignStatus } from "../../domain/campaign.js";
+import type { IssueBrief } from "../../domain/issue-brief.js";
 import type { Evidence } from "../../domain/evidence.js";
 import type { QodoFinding } from "../../domain/quality-gate.js";
 import { parseQodoFinding } from "../../application/qodo-review-batch.js";
@@ -130,6 +131,30 @@ export class SqliteCampaignStore implements CampaignStore {
   constructor(database: Database.Database) {
     this.#database = database;
     migrateCampaignStore(database);
+  }
+
+  async finalizeCampaign(campaignId: string, brief: IssueBrief, expectedVersion: number, event: CampaignEventInput): Promise<Campaign> {
+    const operation = this.#database.transaction(() => {
+      const row = this.#database.prepare("SELECT * FROM campaigns WHERE id = ?").get(campaignId) as CampaignRow | undefined;
+      if (row === undefined) throw new Error("Campaign does not exist");
+      const requestedKey = isRecord(event.payload) ? event.payload.idempotencyKey : undefined;
+      const priorRows = this.#database.prepare("SELECT payload_json FROM campaign_events WHERE campaign_id = ? AND event_type = 'campaign_finalized' ORDER BY sequence").all(campaignId) as { payload_json: string }[];
+      const prior = priorRows.map((candidate) => parseJsonRecord(candidate.payload_json)).find((payload) => payload?.idempotencyKey === requestedKey);
+      if (prior !== undefined) {
+        if (prior.expectedVersion !== expectedVersion) throw new CampaignVersionConflict(campaignId, expectedVersion);
+        return { ...row };
+      }
+      if (row.version !== expectedVersion || row.status !== "policy_review") throw new CampaignVersionConflict(campaignId, expectedVersion);
+      const nextVersion = expectedVersion + 1;
+      const updated = this.#database.prepare("UPDATE campaigns SET status = ?, version = ?, updated_at = ? WHERE id = ? AND version = ?").run("coordination_pending", nextVersion, new Date().toISOString(), campaignId, expectedVersion);
+      if (updated.changes !== 1) throw new CampaignVersionConflict(campaignId, expectedVersion);
+      const sequence = (this.#database.prepare("SELECT COALESCE(MAX(sequence), 0) AS sequence FROM campaign_events WHERE campaign_id = ?").get(campaignId) as { sequence: number }).sequence + 1;
+      const payload = isRecord(event.payload) ? { ...event.payload, brief } : { brief };
+      this.#database.prepare("INSERT INTO campaign_events (id, campaign_id, event_type, payload_json, occurred_at, sequence) VALUES (?, ?, ?, ?, ?, ?)").run(event.id, campaignId, "campaign_finalized", JSON.stringify(payload), normalizeTimestamp(event.occurredAt, "event occurredAt"), sequence);
+      return { id: row.id, repository: row.repository, issue_number: row.issue_number, issue_url: row.issue_url, parent_session_id: row.parent_session_id, lane: row.lane, status: "coordination_pending" as const, qodo_iteration: row.qodo_iteration, version: nextVersion };
+    });
+    const result = operation.immediate();
+    return { id: result.id, repository: result.repository, issueNumber: result.issue_number, issueUrl: result.issue_url, parentSessionId: result.parent_session_id, lane: result.lane, status: result.status, qodoIteration: result.qodo_iteration, version: result.version };
   }
 
   async create(campaign: Campaign, initialEvent?: CampaignEventInput): Promise<void> {
@@ -601,17 +626,25 @@ export class SqliteCampaignStore implements CampaignStore {
       const current = this.#currentCommit(campaignId);
       const changed = record.newCommitSha !== undefined && record.newCommitSha !== current;
       const returnsToReview = payload.action === "update_pr";
-      const resultingVersion = claim.claimedCampaignVersion + (changed || returnsToReview ? 1 : 0);
+      const opensPullRequest = payload.action === "create_pr" && record.publishedReference?.kind === "pull_request";
+      const resultingVersion = claim.claimedCampaignVersion + (changed || returnsToReview || opensPullRequest ? 1 : 0);
       assertExternalActionEventVersion(record.completedEvent.payload, claim.claimedCampaignVersion, resultingVersion);
+      if (record.nextProposalEvent !== undefined) {
+        if (record.nextProposalEvent.id === record.completedEvent.id) throw new Error("Follow-up proposal event must have a distinct id");
+        if (claim.payload.action !== "push_branch" || record.newCommitSha === undefined) throw new Error("Follow-up proposal requires a completed branch push");
+        assertProposalEvent(record.nextProposalEvent, resultingVersion, claim.claimedCampaignStatus, claim.payload.repository, claim.payload.issueNumber, record.newCommitSha, "create_pr", claim.payload.branch);
+      }
       if (changed) {
         this.#replaceCommit(campaignId, record.newCommitSha);
       }
-      if (changed || returnsToReview) {
-        const nextStatus = returnsToReview ? "qodo_review" : claim.claimedCampaignStatus;
+      if (record.publishedReference !== undefined) this.#recordPublishedReference(campaignId, payload, record.publishedReference);
+      if (changed || returnsToReview || opensPullRequest) {
+        const nextStatus = returnsToReview ? "qodo_review" : opensPullRequest ? "pull_request_open" : claim.claimedCampaignStatus;
         const updated = this.#database.prepare("UPDATE campaigns SET version = version + 1, status = ?, updated_at = ? WHERE id = ? AND version = ? AND status = ?").run(nextStatus, completedAt, campaignId, claim.claimedCampaignVersion, claim.claimedCampaignStatus);
         if (updated.changes !== 1) throw new CampaignVersionConflict(campaignId, claim.claimedCampaignVersion);
       }
       this.#insertEvent(campaignId, record.completedEvent, occurredAt);
+      if (record.nextProposalEvent !== undefined) this.#insertEvent(campaignId, record.nextProposalEvent, normalizeTimestamp(record.nextProposalEvent.occurredAt, "proposal event occurredAt"));
       const closed = this.#database.prepare("UPDATE external_action_claims SET status = 'completed', closed_at = ? WHERE id = ? AND campaign_id = ? AND status = 'active'").run(completedAt, record.claimId, campaignId);
       if (closed.changes !== 1) throw new Error(`External action claim ${record.claimId} is stale`);
       return resultingVersion;
@@ -664,20 +697,32 @@ export class SqliteCampaignStore implements CampaignStore {
       const preserveVerifiedRepair = record.disposition === "confirmed_not_completed" && claim.payload.action === "update_pr";
       const changed = !preserveVerifiedRepair && record.observedCanonicalHead !== undefined && record.observedCanonicalHead !== current;
       const confirmedUpdate = record.disposition === "confirmed_completed" && claim.payload.action === "update_pr";
+      const confirmedCreate = record.disposition === "confirmed_completed" && claim.payload.action === "create_pr";
       if (confirmedUpdate && (record.observedCanonicalHead !== claim.payload.commitSha || current !== claim.payload.commitSha || campaign.status !== "repair" || this.#currentPullRequest(campaignId) !== claim.payload.pullRequest)) {
         throw new Error("Confirmed update_pr reconciliation does not match current authority");
       }
-      const resultingVersion = campaign.version + (changed || confirmedUpdate ? 1 : 0);
+      if (confirmedCreate && (record.observedPullRequest === undefined || !isPullRequest(record.observedPullRequest, claim.payload.repository) || current !== claim.payload.commitSha || campaign.status !== "contribution_approval")) {
+        throw new Error("Confirmed create_pr reconciliation does not match current authority");
+      }
+      const resultingVersion = campaign.version + (changed || confirmedUpdate || confirmedCreate ? 1 : 0);
       assertExternalActionEventVersion(record.event.payload, campaign.version, resultingVersion);
+      if (record.nextProposalEvent !== undefined) {
+        if (record.nextProposalEvent.id === record.event.id) throw new Error("Follow-up proposal event must have a distinct id");
+        if (claim.payload.action !== "push_branch" || record.disposition !== "confirmed_completed") throw new Error("Follow-up proposal requires a confirmed completed branch push");
+        assertProposalEvent(record.nextProposalEvent, resultingVersion, claim.claimedCampaignStatus, claim.payload.repository, claim.payload.issueNumber, claim.payload.commitSha, "create_pr", claim.payload.branch);
+      }
       if (changed) {
         this.#replaceCommit(campaignId, record.observedCanonicalHead);
       }
-      if (changed || confirmedUpdate) {
-        const nextStatus = confirmedUpdate ? "qodo_review" : campaign.status;
+      if (record.disposition === "confirmed_completed" && claim.payload.action === "push_branch") this.#recordPublishedReference(campaignId, claim.payload, { kind: "branch", value: claim.payload.branch });
+      if (confirmedCreate && record.observedPullRequest !== undefined) this.#recordPublishedReference(campaignId, claim.payload, { kind: "pull_request", value: record.observedPullRequest });
+      if (changed || confirmedUpdate || confirmedCreate) {
+        const nextStatus = confirmedUpdate ? "qodo_review" : confirmedCreate ? "pull_request_open" : campaign.status;
         const updated = this.#database.prepare("UPDATE campaigns SET version = version + 1, status = ?, updated_at = ? WHERE id = ? AND version = ? AND status = ?").run(nextStatus, reconciledAt, campaignId, campaign.version, campaign.status);
         if (updated.changes !== 1) throw new CampaignVersionConflict(campaignId, campaign.version);
       }
       this.#insertEvent(campaignId, record.event, occurredAt);
+      if (record.nextProposalEvent !== undefined) this.#insertEvent(campaignId, record.nextProposalEvent, normalizeTimestamp(record.nextProposalEvent.occurredAt, "proposal event occurredAt"));
       const closed = this.#database.prepare(`
         UPDATE external_action_claims SET status = 'reconciled', closed_at = ?, disposition = ?, observed_canonical_head = ?
         WHERE id = ? AND campaign_id = ? AND status = 'outcome_unknown'
@@ -718,16 +763,24 @@ export class SqliteCampaignStore implements CampaignStore {
       this.#assertClaim(campaignId, record.expectedVersion, record.expectedStatus);
       this.#assertNoBlockingExternalAction(campaignId);
       let resultingVersion = record.expectedVersion;
+      const currentBefore = this.#currentCommit(campaignId);
+      if (record.newCommitSha !== undefined && currentBefore !== record.newCommitSha) resultingVersion += 1;
+      assertChildEventVersion(record.event.payload, record.expectedVersion, resultingVersion);
+      if (record.nextCampaign !== undefined || record.nextProposalEvent !== undefined) {
+        if (record.nextCampaign === undefined || record.nextProposalEvent === undefined) throw new Error("Next campaign and proposal must be persisted together");
+        if (record.newCommitSha !== undefined || record.expectedStatus !== "verification" || record.event.eventType !== "campaign_operation_completed" || record.operationResult?.operation !== "verify") throw new Error("Contribution approval requires a completed verification without a new commit");
+        if (record.nextCampaign.version !== resultingVersion + 1 || record.nextCampaign.status !== "contribution_approval") throw new Error("Invalid contribution approval campaign transition");
+        if (record.nextCampaign.id !== campaignId || record.nextCampaign.repository !== this.#repository(campaignId) || record.nextCampaign.issueNumber !== this.#issueNumber(campaignId) || record.nextCampaign.issueUrl !== this.#issueUrl(campaignId) || record.nextCampaign.parentSessionId !== this.#parentSession(campaignId) || record.nextCampaign.lane !== this.#lane(campaignId) || record.nextCampaign.qodoIteration !== this.#qodoIteration(campaignId)) throw new Error("Contribution approval campaign identity changed");
+        assertProposalEvent(record.nextProposalEvent, record.nextCampaign.version, record.nextCampaign.status, record.nextCampaign.repository, record.nextCampaign.issueNumber, currentBefore, "push_branch");
+      }
       if (record.newCommitSha !== undefined) {
         const current = this.#database.prepare("SELECT value FROM external_references WHERE campaign_id = ? AND kind = 'commit'").get(campaignId) as { value: string } | undefined;
         if (current?.value !== record.newCommitSha) {
           this.#replaceCommit(campaignId, record.newCommitSha);
           const updated = this.#database.prepare("UPDATE campaigns SET version = version + 1, updated_at = ? WHERE id = ? AND version = ? AND status = ?").run(new Date().toISOString(), campaignId, record.expectedVersion, record.expectedStatus);
           if (updated.changes !== 1) throw new CampaignVersionConflict(campaignId, record.expectedVersion);
-          resultingVersion += 1;
         }
       }
-      assertChildEventVersion(record.event.payload, record.expectedVersion, resultingVersion);
       this.#database.prepare("INSERT INTO external_references (campaign_id, kind, value) VALUES (?, 'child_session', ?) ON CONFLICT DO NOTHING").run(campaignId, record.childSessionId);
       this.#database.prepare("INSERT INTO external_references (campaign_id, kind, value) VALUES (?, 'sandbox', ?) ON CONFLICT DO NOTHING").run(campaignId, record.sandboxSessionId ?? record.childSessionId);
       if (record.event.eventType === "campaign_operation_completed") {
@@ -748,7 +801,12 @@ export class SqliteCampaignStore implements CampaignStore {
         ).run(record.event.id, campaignId, result.operation, resultingVersion, result.currentCommitSha, result.pullRequest ?? null, result.qodoIteration, record.childSessionId,
           result.repairVerification === undefined ? null : JSON.stringify(result.repairVerification));
       }
-      return resultingVersion;
+      if (record.nextCampaign !== undefined) {
+        const updated = this.#database.prepare("UPDATE campaigns SET status = ?, version = ?, updated_at = ? WHERE id = ? AND version = ? AND status = ?").run(record.nextCampaign.status, record.nextCampaign.version, new Date().toISOString(), campaignId, resultingVersion, record.expectedStatus);
+        if (updated.changes !== 1) throw new CampaignVersionConflict(campaignId, resultingVersion);
+      }
+      if (record.nextProposalEvent !== undefined) this.#insertEvent(campaignId, record.nextProposalEvent, normalizeTimestamp(record.nextProposalEvent.occurredAt, "proposal event occurredAt"));
+      return record.nextCampaign?.version ?? resultingVersion;
     });
     return write.immediate();
   }
@@ -788,6 +846,20 @@ export class SqliteCampaignStore implements CampaignStore {
       return expectedVersion + 1;
     });
     return replace.immediate();
+  }
+
+  #recordPublishedReference(campaignId: string, payload: ExternalActionPayload, reference: ExternalReference): void {
+    if (payload.action === "push_branch" && reference.kind === "branch" && reference.value === payload.branch) {
+      this.#database.prepare("INSERT INTO external_references (campaign_id, kind, value) VALUES (?, 'branch', ?) ON CONFLICT DO NOTHING").run(campaignId, reference.value);
+      return;
+    }
+    if (payload.action === "create_pr" && reference.kind === "pull_request" && isPullRequest(reference.value, payload.repository)) {
+      const current = this.#currentPullRequest(campaignId);
+      if (current !== undefined && current !== reference.value) throw new Error("Campaign already has a different pull request");
+      if (current === undefined) this.#replacePullRequest(campaignId, reference.value);
+      return;
+    }
+    throw new Error("Published reference does not match the claimed external action");
   }
 
   #assertClaim(campaignId: string, expectedVersion: number, expectedStatus: CampaignStatus): void {
@@ -840,6 +912,36 @@ export class SqliteCampaignStore implements CampaignStore {
     const row = this.#database.prepare("SELECT repository FROM campaigns WHERE id = ?").get(campaignId) as { repository: string } | undefined;
     if (row === undefined) throw new Error("Campaign does not exist");
     return row.repository;
+  }
+
+  #issueNumber(campaignId: string): number {
+    const row = this.#database.prepare("SELECT issue_number FROM campaigns WHERE id = ?").get(campaignId) as { issue_number: number } | undefined;
+    if (row === undefined) throw new Error("Campaign does not exist");
+    return row.issue_number;
+  }
+
+  #issueUrl(campaignId: string): string {
+    const row = this.#database.prepare("SELECT issue_url FROM campaigns WHERE id = ?").get(campaignId) as { issue_url: string } | undefined;
+    if (row === undefined) throw new Error("Campaign does not exist");
+    return row.issue_url;
+  }
+
+  #parentSession(campaignId: string): string {
+    const row = this.#database.prepare("SELECT parent_session_id FROM campaigns WHERE id = ?").get(campaignId) as { parent_session_id: string } | undefined;
+    if (row === undefined) throw new Error("Campaign does not exist");
+    return row.parent_session_id;
+  }
+
+  #lane(campaignId: string): Campaign["lane"] {
+    const row = this.#database.prepare("SELECT lane FROM campaigns WHERE id = ?").get(campaignId) as { lane: Campaign["lane"] } | undefined;
+    if (row === undefined) throw new Error("Campaign does not exist");
+    return row.lane;
+  }
+
+  #qodoIteration(campaignId: string): number {
+    const row = this.#database.prepare("SELECT qodo_iteration FROM campaigns WHERE id = ?").get(campaignId) as { qodo_iteration: number } | undefined;
+    if (row === undefined) throw new Error("Campaign does not exist");
+    return row.qodo_iteration;
   }
 
   #insertApproval(approval: Approval): void {
@@ -921,6 +1023,19 @@ export class SqliteCampaignStore implements CampaignStore {
   }
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function parseJsonRecord(value: string): Record<string, unknown> | undefined {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return isRecord(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function mapCampaign(row: CampaignRow): Campaign {
   return {
     id: row.id,
@@ -962,6 +1077,34 @@ function assertValidStoredEventSequence(events: readonly CampaignEvent[]): void 
     if (!Number.isSafeInteger(event.sequence) || event.sequence < 1 || seen.has(event.sequence)) throw new Error("Campaign event sequence is invalid");
     seen.add(event.sequence);
   }
+}
+
+function assertProposalEvent(
+  event: CampaignEventInput,
+  expectedVersion: number,
+  expectedStatus: CampaignStatus,
+  repository: string,
+  issueNumber: number,
+  expectedCommitSha: string | undefined,
+  expectedAction: "push_branch" | "create_pr",
+  expectedBranch?: string,
+): void {
+  if (event.eventType !== "external_action_proposed" || !isRecord(event.payload)) throw new Error("Invalid external action proposal event");
+  const payload = event.payload;
+  const proposalKeys = ["proposalId", "payload", "actionDigest", "expectedCampaignVersion", "expectedCampaignStatus", "expectedCurrentCommitSha", "brief"];
+  if (Object.keys(payload).length !== proposalKeys.length || Object.keys(payload).some((key) => !proposalKeys.includes(key)) || payload.proposalId !== event.id || payload.expectedCampaignVersion !== expectedVersion || payload.expectedCampaignStatus !== expectedStatus || payload.expectedCurrentCommitSha !== expectedCommitSha) throw new Error("External action proposal is not bound to the campaign version");
+  if (!isRecord(payload.payload)) throw new Error("External action proposal payload is invalid");
+  const action = payload.payload as ExternalActionPayload;
+  validateExternalActionPayload(action);
+  if (action.action !== expectedAction || action.repository !== repository || action.issueNumber !== issueNumber || externalActionDigest(action) !== payload.actionDigest) throw new Error("External action proposal identity is invalid");
+  if (expectedCommitSha === undefined || action.commitSha !== expectedCommitSha) throw new Error("External action proposal commit is not current");
+  if (expectedBranch !== undefined && (action.action !== "create_pr" || action.branch !== expectedBranch)) throw new Error("Follow-up proposal branch does not match push");
+  if (!isRecord(payload.brief)) throw new Error("External action proposal brief is invalid");
+  const brief = payload.brief;
+  const briefKeys = ["policy", "approach", "files", "risks", "tests", "safetyResult", "qodoStatus", "aiDisclosure"];
+  if (Object.keys(brief).length !== briefKeys.length || Object.keys(brief).some((key) => !briefKeys.includes(key))) throw new Error("External action proposal brief is invalid");
+  for (const key of ["policy", "approach", "safetyResult", "qodoStatus", "aiDisclosure"]) if (typeof brief[key] !== "string" || brief[key].trim().length < 3 || brief[key].length > 20_000) throw new Error("External action proposal brief is invalid");
+  for (const key of ["files", "risks", "tests"]) if (!Array.isArray(brief[key]) || brief[key].length === 0 || brief[key].length > 200 || !brief[key].every((item) => typeof item === "string" && item.trim().length > 0 && item.length <= 20_000)) throw new Error("External action proposal brief is invalid");
 }
 
 function mapApproval(row: ApprovalRow): Approval {

@@ -43,7 +43,7 @@ One public GitHub issue maps to one campaign. Creation checks for an existing re
 
 The browser does not hold authoritative campaign memory. It reloads a sanitized projection from SQLite. The embedded TrueForge panel resumes the parent session, while every discovery or campaign operation uses a fresh child session. Child packets contain the single campaign's identity, verified direct evidence, approval digests and statuses, current commit when known, a bounded goal, and operation-specific context. They do not inherit another campaign's SQLite record or approval authority.
 
-This is local durable memory, not a multi-user or distributed persistence system. Browser operator capability is memory-only React state and disappears on reload, close, or disconnect.
+This is local durable memory, not a multi-user or distributed persistence system. Local Vite development injects the operator capability into `/api` requests at the proxy boundary; the value is not bundled into browser code. Outside development, browser-entered operator capability remains memory-only React state and disappears on reload, close, or disconnect.
 
 ## Live discovery and read-only chat
 
@@ -77,7 +77,9 @@ The server accepts only five external-action payload shapes: issue comment, assi
 
 The UI displays every exact field and requires the operator to confirm review. `POST /api/campaigns/:id/approvals` requires the operator capability, an idempotency key, proposal ID, exact digest, and expected campaign version. The store issues one active approval, expires it after ten minutes, and invalidates mismatched, replayed, stale, or already-consumed authority. External execution first atomically consumes the approval and records a claim. An unknown callback outcome is fenced for explicit reconciliation rather than retried blindly.
 
-The current HTTP composition stops at approval issuance. There is no route or production GitHub-write adapter wired to `executeApprovedExternalAction`, so comments, assignment requests, pushes, pull-request creation, and pull-request updates cannot be executed by this release. This distinction is deliberate: approval is authority, not evidence that an action occurred.
+The server-only publisher boundary exposes only `push_branch` and `create_pr` through `POST /api/campaigns/:id/publish`. Each request carries the complete exact-approved payload and approval ID; `RunCampaign.executeApprovedExternalAction` performs the existing digest, version, status, replay, claim, and unknown-outcome fencing before calling the injected publisher port. Push and PR creation therefore require separate scoped approvals. The TrueForge agent remains read-only. PR bodies must include the canonical issue link, verified tests, risks, rollback, and AI disclosure, and the route accepts exactly one canonical commit or pull-request URL as evidence. Successful PR creation atomically records that URL and advances the campaign to `pull_request_open`. An ambiguous write returns the fixed `publication_outcome_unknown` problem and remains fenced until an operator uses the strictly validated reconciliation route with independently observed canonical evidence.
+
+The store also owns the handoff between those stages. A valid verification result, the `contribution_approval` transition, and the exact branch proposal are committed in one transaction. A confirmed branch publication, completed claim, and exact pull-request proposal are also committed in one transaction. Invalid or duplicate follow-up proposal evidence rolls the transaction back, preventing a campaign from exposing approval authority for a different version, commit, repository, issue, or branch.
 
 ## Qodo quality gate
 
@@ -104,6 +106,8 @@ Key routes are:
 - `GET /api/campaigns/:id`: sanitized durable campaign projection.
 - `POST /api/campaigns/:id/actions/:action`: authenticated `preflight`, `implement`, or `verify` execution.
 - `POST /api/campaigns/:id/approvals`: authenticated exact-approval issuance only.
+- `POST /api/campaigns/:id/publish`: authenticated server-only execution of an exact-approved branch push or pull-request creation.
+- `POST /api/campaigns/:id/publication/reconcile`: authenticated operator reconciliation of an unknown publication outcome.
 - `POST /api/campaigns/:id/reviews/sync`: separately authenticated Qodo locator ingestion.
 
 The web UI exposes onboarding, discovery, campaign creation, campaign reading, and approval issuance. It does not currently expose controls for the three campaign action routes or review synchronization.

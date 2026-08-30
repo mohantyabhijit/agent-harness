@@ -3,6 +3,7 @@ import { z } from "zod";
 import { currentApprovalProposal, proposalActionSummary } from "../../application/approval-proposal.js";
 import type { CampaignSnapshot } from "../../application/ports/campaign-store.js";
 import type { Approval } from "../../domain/approval.js";
+import { isIssueBriefFor } from "../../domain/issue-brief.js";
 
 export const campaignIdSchema = z.string().min(1).max(128).regex(/^[A-Za-z0-9._:-]+$/u);
 export const repositoryPartSchema = z.string().min(1).max(100).regex(/^[A-Za-z0-9_.-]+$/u);
@@ -52,12 +53,44 @@ export function publicCampaignSnapshot(snapshot: CampaignSnapshot, now: number):
     })),
     approvalProposal: proposal === null ? null : publicApprovalProposal(proposal),
     qualityEscalationReason: qualityEscalationReason(snapshot),
+    issueBrief: publicIssueBrief(snapshot),
+    fixExplanation: publicFixExplanation(snapshot),
   };
+}
+
+function publicFixExplanation(snapshot: CampaignSnapshot): unknown {
+  const commits = snapshot.externalReferences.filter(({ kind }) => kind === "commit");
+  const currentCommit = commits.length === 1 && /^[0-9a-f]{40}$/u.test(commits[0]?.value ?? "") ? commits[0]?.value : undefined;
+  if (currentCommit === undefined) return null;
+  const completed = [...snapshot.events].reverse().find((event) => event.eventType === "campaign_operation_completed" && isRecord(event.payload) && event.payload.operation === "implement" && isRecord(event.payload.output) && event.payload.output.currentCommitSha === currentCommit);
+  if (completed === undefined || !isRecord(completed.payload) || !isRecord(completed.payload.output)) return null;
+  const output = completed.payload.output;
+  if (typeof output.currentCommitSha !== "string" || !/^[0-9a-f]{40}$/u.test(output.currentCommitSha) ||
+    typeof output.before !== "string" || output.before.trim().length === 0 || output.before.length > 2_000 ||
+    typeof output.after !== "string" || output.after.trim().length === 0 || output.after.length > 2_000 ||
+    typeof output.uncertainty !== "string" || output.uncertainty.trim().length === 0 || output.uncertainty.length > 2_000 ||
+    !boundedStringList(output.changedAreas) || !boundedStringList(output.tests)) return null;
+  return { commitSha: output.currentCommitSha, before: output.before, after: output.after, changedAreas: output.changedAreas, tests: output.tests, uncertainty: output.uncertainty };
+}
+
+function boundedStringList(value: unknown): value is string[] {
+  return Array.isArray(value) && value.length > 0 && value.length <= 100 && value.every((item) => typeof item === "string" && item.trim().length > 0 && item.length <= 2_000);
+}
+
+function publicIssueBrief(snapshot: CampaignSnapshot): unknown {
+  const finalized = snapshot.events.find((item) => item.eventType === "campaign_finalized" && isRecord(item.payload) && isIssueBriefFor(item.payload.brief, snapshot.campaign.repository, snapshot.campaign.issueNumber));
+  const created = snapshot.events.find((item) => item.eventType === "campaign_created" && isRecord(item.payload) && isIssueBriefFor(item.payload.issueBrief, snapshot.campaign.repository, snapshot.campaign.issueNumber));
+  const finalizedBrief = finalized !== undefined && isRecord(finalized.payload) ? finalized.payload.brief : undefined;
+  const createdBrief = created !== undefined && isRecord(created.payload) ? created.payload.issueBrief : undefined;
+  const brief = finalizedBrief ?? createdBrief;
+  if (!isIssueBriefFor(brief, snapshot.campaign.repository, snapshot.campaign.issueNumber)) return null;
+  return structuredClone(brief);
 }
 
 function nextAllowedAction(snapshot: CampaignSnapshot): "preflight" | "implement" | "verify" | null {
   switch (snapshot.campaign.status) {
     case "policy_review":
+      return null;
     case "coordination_pending":
     case "quarantined":
       return "preflight";
@@ -129,7 +162,7 @@ function safeEventFacts(eventType: string, payload: unknown): Readonly<Record<st
     };
   }
   const allowedByType: Readonly<Record<string, readonly string[]>> = {
-    campaign_created: ["status"], campaign_operation_completed: ["operation", "status", "claimedCampaignVersion", "resultingCampaignVersion", "iteration", "testsPassed", "childSessionId", "sandboxSessionId", "currentCommitSha", "commitSha", "pullRequest"],
+    campaign_created: ["status"], campaign_finalized: ["expectedVersion"], campaign_operation_completed: ["operation", "status", "claimedCampaignVersion", "resultingCampaignVersion", "iteration", "testsPassed", "childSessionId", "sandboxSessionId", "currentCommitSha", "commitSha", "pullRequest"],
     campaign_operation_rejected: ["operation", "reason", "claimedCampaignVersion", "resultingCampaignVersion"],
     external_action_proposed: ["action", "claimedCampaignVersion"], external_action_attempted: ["action", "claimedCampaignVersion", "resultingCampaignVersion"], external_action_completed: ["action", "claimedCampaignVersion", "resultingCampaignVersion"], external_action_outcome_unknown: ["action", "reason", "claimedCampaignVersion", "resultingCampaignVersion"], external_action_reconciled: ["action", "disposition", "observedCanonicalHead", "reason", "claimedCampaignVersion", "resultingCampaignVersion"], external_action_stale_recovered: ["action", "reason", "claimedCampaignVersion", "resultingCampaignVersion"],
     qodo_review_claimed: ["outcome", "reviewIteration", "reviewId", "testsPassed", "complete", "commitSha", "pullRequest", "claimedCampaignVersion"], qodo_finding_recorded: ["iteration", "reviewId", "commitSha", "pullRequest", "claimedCampaignVersion"], quality_gate_passed: ["iteration", "reviewId", "commitSha", "pullRequest", "claimedCampaignVersion"], quality_gate_escalated: ["iteration", "reason", "reviewId", "commitSha", "pullRequest", "claimedCampaignVersion"], quality_gate_repair_requested: ["iteration", "reviewId", "commitSha", "pullRequest", "claimedCampaignVersion"], repair_execution_failed: ["reason", "reviewId", "commitSha", "pullRequest", "claimedCampaignVersion"],
@@ -157,7 +190,7 @@ const factEnums: Readonly<Record<string, readonly string[]>> = {
   disposition: ["confirmed_completed", "confirmed_not_completed"],
   reason: ["maximum_qodo_iterations", "tests_failed", "repair_child_failed", "repair_cancelled", "invalid_preflight_output", "operation_result_not_safely_recorded", "external_action_result_unknown", "human_external_action_reconciliation", "operator_recovered_stale_active_claim", "operator_recovered_interrupted_operation"],
 };
-const publicEventTypes = new Set(["campaign_created", "campaign_operation_completed", "campaign_operation_rejected", "external_action_proposed", "external_action_attempted", "external_action_completed", "external_action_outcome_unknown", "external_action_reconciled", "external_action_stale_recovered", "interrupted_operation_recovered", "preflight_execution_failed", "implementation_execution_failed", "verification_execution_failed", "qodo_review_claimed", "qodo_finding_recorded", "quality_gate_passed", "quality_gate_escalated", "quality_gate_repair_requested", "repair_execution_failed"]);
+const publicEventTypes = new Set(["campaign_created", "campaign_finalized", "campaign_operation_completed", "campaign_operation_rejected", "external_action_proposed", "external_action_attempted", "external_action_completed", "external_action_outcome_unknown", "external_action_reconciled", "external_action_stale_recovered", "interrupted_operation_recovered", "preflight_execution_failed", "implementation_execution_failed", "verification_execution_failed", "qodo_review_claimed", "qodo_finding_recorded", "quality_gate_passed", "quality_gate_escalated", "quality_gate_repair_requested", "repair_execution_failed"]);
 function validFact(key: string, value: unknown): value is string | number | boolean {
   if (typeof value === "boolean") return true;
   if (typeof value === "number") return Number.isSafeInteger(value) && value >= 0;

@@ -4,6 +4,7 @@ interface CampaignTimelineProps { readonly events: CampaignSnapshot["events"]; r
 
 const eventLabels: Readonly<Record<string, string>> = {
   campaign_created: "Campaign created",
+  campaign_finalized: "Issue brief finalized",
   campaign_operation_completed: "Campaign operation completed",
   campaign_operation_rejected: "Campaign operation rejected",
   external_action_proposed: "External action proposed",

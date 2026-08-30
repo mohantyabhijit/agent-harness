@@ -8,7 +8,7 @@ The feature audit covers the complete `main` history through `4191fc2`, includin
 
 ## Change and review operating rule
 
-Every repository change must be reflected in the root [TODO.md](../TODO.md) checklist and its pull-request evidence: focused branch and issue when applicable, clear scope and rationale, executed verification, Qodo review of the final commit, documented findings/dispositions, required checks, and a human merge. The public README links the representative Qodo-reviewed implementation PR; local checks or a local Qodo client are not substitutes for that GitHub evidence. Documentation-only changes still update the checklist and verification record; the scope of the checks may be proportionate to the change.
+Every repository change must be reflected in the root [TODO.md](../TODO.md) checklist and its pull-request evidence: focused branch and issue when applicable, clear scope and rationale, executed verification, Qodo review of the final commit, documented findings/dispositions, required checks, and an authorized maintainer merge. The maintainer may be a human or an agent explicitly authorized by the user for that merge. The public README links the representative Qodo-reviewed implementation PR; local checks or a local Qodo client are not substitutes for that GitHub evidence. Documentation-only changes still update the checklist and verification record; the scope of the checks may be proportionate to the change.
 
 ## Product boundary
 
@@ -21,11 +21,12 @@ The safety boundary is deliberate: repository text and tool output are untrusted
 - Conversation-first repository discovery through the embedded TrueForge chat, plus five one-click category choices: AI & agents, Developer tools, Web & apps, Data & infrastructure, and Civic, science & social impact. Chat clarifies intent, but authoritative repository and issue recommendations appear only in the validated discovery cards.
 - A deterministic top-eight recommendation boundary ranked by popularity plus contribution readiness, strict source-linked GitHub repository/issue validation, and Easy Win versus Long-Term Challenge issue lanes.
 - Durable one-issue/one-campaign orchestration with a campaign state machine, resumable parent TrueForge sessions, fresh child sessions, Daytona sandbox requirements, static preflight, structured implementation, and structured verification.
+- Backend-generated issue briefs from a bounded read-only TrueForge policy child. The strict problem/cause/smallest-fix/test/risk/uncertainty/evidence object is stored with campaign creation, projected through an allowlist, remains discussable in the parent chat, and must be explicitly finalized with campaign-version and idempotency fencing before preflight is exposed.
 - SQLite-backed campaign persistence, migrations, ordered events, leases, optimistic version and identity fencing, restart recovery, external-action claims, outcome reconciliation, and sanitized public projections.
 - Exact, server-owned approval proposals bound to payload digest, campaign/version/status, current commit, idempotency key, ten-minute expiry, and atomic single use.
 - Authenticated Qodo locator resolution, strict finding normalization, allowlisted bot identities, an independent repair-verification port, a fail-closed quality gate, at most three repair iterations, and durable human escalation.
-- Fastify routes for spaces, discovery, campaigns, `preflight`/`implement`/`verify`, approval issuance, authenticated review synchronization, liveness, and readiness, protected by separate operator and review-provider capabilities.
-- React onboarding, progressive discovery, resumable campaign timeline, evidence, quality-gate, action controls for the next allowed preflight/implementation/verification step, change-brief, approval, and embedded TrueForge thread surfaces with stale-request and approval-race handling.
+- Fastify routes for spaces, discovery, campaigns, issue-brief finalization, `preflight`/`implement`/`verify`, approval issuance, authenticated review synchronization, liveness, and readiness, protected by separate operator and review-provider capabilities.
+- React onboarding, progressive discovery, source-backed issue-brief review/finalization, resumable campaign timeline, evidence, quality-gate, action controls for the next allowed preflight/implementation/verification step, change-brief, approval, and embedded TrueForge thread surfaces with stale-request and approval-race handling.
 - Commit-pinned TrueForge skill/agent registration with dependency preflight and rollback, plus bounded stream cleanup and preservation of late authentication failures.
 - `/openquest/` production hosting, same-origin embedded TrueForge proxying, Nginx and systemd configuration, read-only demo preflight, read-only CI, autonomous Qodo v2 PR review configuration, and layered automated tests.
 
@@ -63,6 +64,12 @@ Current evidence from the 2026-08-30 repository audit: 418 tests in the full Vit
 ## External MR/PR status
 
 No pull request was created against FastAPI. The connected GitHub integration can read public PR history and identify the authenticated account, but it returned HTTP 403 when checking collaborator permission and has no available fork/branch creation path for that third-party repository. Do not represent a candidate as raised until a real branch, commit, CI result, and public PR URL exist. The current repository branch is the reviewable implementation artifact; external publication requires an authenticated fork or maintainer-approved branch.
+
+## Local contribution-flow QA (2026-08-30)
+
+The controlled local flow now covers category selection, verified repository and issue selection, durable brief finalization, static preflight, isolated implementation, verification, server-owned branch proposal, separate branch approval and execution, server-owned pull-request proposal, separate PR approval and execution, and final canonical reference reload. The fixture records the exact publication requests and performs no external network call or GitHub write.
+
+The full local release matrix passed with 514 Vitest tests and three Playwright scenarios, plus typecheck, lint, production build, and diff checks. This is deterministic application evidence, not provider evidence. No live TrueForge model/Daytona execution, live GitHub publisher, Qodo runtime authority, deployment, or third-party open-source pull request was exercised. The controlled TrueForge chat fixture exposed an upstream UI runtime update-loop error; the campaign now contains that failure behind an error boundary so campaign facts and approvals remain usable, but a provider-backed chat turn remains a separate readiness check.
 
 ## Hosted deployment
 

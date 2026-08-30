@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { DiscoveredRepository } from "../../application/discover.js";
 import { classifyIssue, type IssueCandidate, type Space } from "../../domain/discovery.js";
-import type { OpenQuestApi } from "../api.js";
+import { OpenQuestApiError, type DiscoveryResponse, type OpenQuestApi } from "../api.js";
 import { IssueCard } from "../components/IssueCard.js";
 import { RepositoryCard } from "../components/RepositoryCard.js";
 
@@ -16,15 +16,20 @@ interface IssueLoad {
   readonly repository: string;
   readonly issues: readonly IssueCandidate[];
   readonly status: "loading" | "ready" | "error";
+  readonly metadata?: Pick<DiscoveryResponse<IssueCandidate>, "verifiedAt" | "source" | "refreshing">;
 }
 
 export function DiscoverPage({ api, spaces, navigate }: DiscoverPageProps) {
   const [repositories, setRepositories] = useState<readonly DiscoveredRepository[]>([]);
+  const [discoveryMetadata, setDiscoveryMetadata] = useState<Pick<DiscoveryResponse<DiscoveredRepository>, "verifiedAt" | "source" | "refreshing">>();
   const [issueLoads, setIssueLoads] = useState<readonly IssueLoad[]>([]);
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
+  const [slow, setSlow] = useState(false);
+  const [errorCode, setErrorCode] = useState<string>();
   const [startingIssue, setStartingIssue] = useState<string>();
   const [campaignError, setCampaignError] = useState<string>();
   const discoveryController = useRef<AbortController | undefined>(undefined);
+  const slowTimer = useRef<number | undefined>(undefined);
   const discoveryGeneration = useRef(0);
   const campaignController = useRef<AbortController | undefined>(undefined);
   const campaignActive = useRef(false);
@@ -39,9 +44,9 @@ export function DiscoverPage({ api, spaces, navigate }: DiscoverPageProps) {
     issueGenerations.current.set(repository, request);
     setIssueLoads((current) => current.map((entry) => entry.repository === repository ? { ...entry, status: "loading" } : entry));
     void api.getIssues(repository, controller.signal).then(
-      (issues) => {
+      (response) => {
         if (discoveryGeneration.current !== discoveryRequest || issueGenerations.current.get(repository) !== request) return;
-        setIssueLoads((current) => current.map((entry) => entry.repository === repository ? { ...entry, issues, status: "ready" } : entry));
+        setIssueLoads((current) => current.map((entry) => entry.repository === repository ? { ...entry, issues: response.values, metadata: response, status: "ready" } : entry));
       },
       () => {
         if (discoveryGeneration.current !== discoveryRequest || issueGenerations.current.get(repository) !== request || controller.signal.aborted) return;
@@ -52,6 +57,7 @@ export function DiscoverPage({ api, spaces, navigate }: DiscoverPageProps) {
 
   const loadDiscovery = useCallback(() => {
     discoveryController.current?.abort();
+    if (slowTimer.current !== undefined) window.clearTimeout(slowTimer.current);
     const controller = new AbortController();
     discoveryController.current = controller;
     const generation = discoveryGeneration.current + 1;
@@ -63,18 +69,25 @@ export function DiscoverPage({ api, spaces, navigate }: DiscoverPageProps) {
       return;
     }
     setStatus("loading");
+    setSlow(false);
+    setErrorCode(undefined);
     setCampaignError(undefined);
+    slowTimer.current = window.setTimeout(() => { setSlow(true); }, 8_000);
     void api.discoverRepositories([...new Set(spaces)], controller.signal).then(
-      (found) => {
+      (response) => {
+        if (slowTimer.current !== undefined) window.clearTimeout(slowTimer.current);
         if (discoveryGeneration.current !== generation) return;
-        const unique = found.filter((item, index, all) => all.findIndex(({ repository }) => repository.fullName === item.repository.fullName) === index);
+        const unique = response.values.filter((item, index, all) => all.findIndex(({ repository }) => repository.fullName === item.repository.fullName) === index);
+        setDiscoveryMetadata(response);
         setRepositories(unique);
         setIssueLoads(unique.map(({ repository }) => ({ repository: repository.fullName, issues: [], status: "loading" })));
         setStatus("ready");
         for (const item of unique) loadIssuesForRepository(item.repository.fullName, generation);
       },
-      () => {
+      (error: unknown) => {
+        if (slowTimer.current !== undefined) window.clearTimeout(slowTimer.current);
         if (discoveryGeneration.current !== generation || controller.signal.aborted) return;
+        setErrorCode(error instanceof OpenQuestApiError ? error.code : undefined);
         setStatus("error");
       },
     );
@@ -85,6 +98,7 @@ export function DiscoverPage({ api, spaces, navigate }: DiscoverPageProps) {
     const controllers = issueControllers.current;
     return () => {
       window.clearTimeout(task);
+      if (slowTimer.current !== undefined) window.clearTimeout(slowTimer.current);
       discoveryController.current?.abort();
       for (const controller of controllers.values()) controller.abort();
       const controller = campaignController.current;
@@ -121,15 +135,18 @@ export function DiscoverPage({ api, spaces, navigate }: DiscoverPageProps) {
 
   return (
     <main className="discover-shell">
+      <nav aria-label="Product" className="product-nav">
+        <button className="brand brand--button" onClick={() => { navigate("/"); }} type="button"><img alt="" height="28" src={`${import.meta.env.BASE_URL}openquest-mark.svg`} width="28" /><span>OpenQuest</span></button>
+        <button className="back-link" onClick={() => { navigate("/"); }} type="button">Back to chat</button>
+      </nav>
       <header className="discover-header">
-        <p className="wordmark">OPENQUEST</p>
         <p className="eyebrow">Selected category · {spaces.map((space) => space.replaceAll("_", " ")).join(", ") || "none"}</p>
-        <h1 tabIndex={-1}>Find a project worth your next pull request.</h1>
+        <h1 tabIndex={-1}>Find your next contribution.</h1>
         <p>Every recommendation pairs visibility with evidence that a contribution can be thoughtfully reviewed.</p>
-        <p className="evidence-mode" role="status"><strong>Demo evidence</strong> · public repository snapshot · no external writes from this surface</p>
+        <p className="evidence-mode" role="status"><strong>{discoveryMetadata?.source === "snapshot" ? "Verified snapshot" : "Live verification"}</strong>{discoveryMetadata?.refreshing ? " · refreshing live evidence in background" : " · read-only GitHub evidence"}{discoveryMetadata?.verifiedAt ? ` · verified ${new Date(discoveryMetadata.verifiedAt).toLocaleString()}` : ""} · no external writes</p>
       </header>
-      {status === "loading" ? <p aria-live="polite">Finding contribution-ready repositories…</p> : null}
-      {status === "error" ? <section className="state-card" role="alert"><p>We could not load recommendations.</p><button onClick={loadDiscovery} type="button">Try again</button></section> : null}
+      {status === "loading" ? <section aria-live="polite" className="loading-state"><div className="loading-grid" aria-hidden="true"><span className="skeleton-card" /><span className="skeleton-card" /><span className="skeleton-card" /></div><p className="loading-status">{slow ? "Still verifying live GitHub evidence. This can take about a minute." : "Starting a read-only TrueForge verification…"}</p></section> : null}
+      {status === "error" ? <section className="state-card" role="alert"><h2>Verification did not finish</h2><p>{errorCode === "harness_unavailable" ? "TrueForge could not complete a fully verified set. No unverified recommendations were shown." : "We could not load verified recommendations. No unverified results were shown."}</p><div className="error-actions"><button onClick={loadDiscovery} type="button">Try again</button><button className="secondary-action" onClick={() => { navigate("/"); }} type="button">Back to chat</button></div></section> : null}
       {status === "ready" && repositories.length === 0 ? <section className="state-card"><h2>No recommendations yet</h2><p>Try choosing another space or return when the catalog has fresh evidence.</p></section> : null}
       {status === "ready" && repositories.length > 0 ? (
         <>

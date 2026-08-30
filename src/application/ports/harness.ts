@@ -9,6 +9,37 @@ export interface CampaignPacket {
   context?: Readonly<Record<string, unknown>>;
 }
 
+// These are sent with production implementation and verification turns. Keep
+// this contract in the shared port so the production prompt and the
+// application parsers cannot silently drift apart.
+export const campaignOperationResponseSchemas = {
+  implement: {
+    type: "object",
+    additionalProperties: false,
+    required: ["status", "commitSha", "changedAreas", "tests", "uncertainty", "before", "after"],
+    properties: {
+      status: { const: "completed" },
+      commitSha: { type: "string", pattern: "^[0-9a-f]{40}$", description: "A new lowercase commit SHA, different from the current head." },
+      changedAreas: { type: "array", minItems: 1, maxItems: 100, items: { type: "string", minLength: 1, maxLength: 2_000 } },
+      tests: { type: "array", minItems: 1, maxItems: 100, items: { type: "string", minLength: 1, maxLength: 2_000 } },
+      uncertainty: { type: "string", minLength: 1, maxLength: 2_000 },
+      before: { type: "string", minLength: 1, maxLength: 2_000 },
+      after: { type: "string", minLength: 1, maxLength: 2_000 },
+    },
+  },
+  verify: {
+    type: "object",
+    additionalProperties: false,
+    required: ["testsPassed", "currentCommitSha", "tests", "uncertainty"],
+    properties: {
+      testsPassed: { const: true },
+      currentCommitSha: { type: "string", pattern: "^[0-9a-f]{40}$", description: "Exactly the current implementation commit SHA." },
+      tests: { type: "array", minItems: 1, maxItems: 100, items: { type: "string", minLength: 1, maxLength: 2_000 } },
+      uncertainty: { type: "string", minLength: 1, maxLength: 2_000 },
+    },
+  },
+} as const;
+
 export type HarnessOperation =
   | "discover"
   | "policy"
@@ -29,6 +60,7 @@ export interface HarnessRequestOptions {
   readonly signal?: AbortSignal;
   readonly timeoutMs?: number;
   readonly sessionLifecycle?: "durable" | "transient";
+  readonly sessionProfile?: "default" | "policy" | "conversation";
 }
 
 export type HarnessErrorCode = "auth_required" | "execution_failed" | "invalid_output" | "unavailable";

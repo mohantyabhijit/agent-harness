@@ -64,7 +64,7 @@ export class FakeHarness implements HarnessPort {
       sessionId,
       summary: queued?.summary ?? `${operation} completed`,
       artifacts: queued?.artifacts ?? [`artifacts/${operation}-${sessionId}.json`],
-      output: queued?.output ?? defaultOutput(operation),
+      output: queued?.output ?? defaultOutput(operation, packet),
     };
     if (options?.sessionLifecycle === "transient") this.deletedSessions.push(sessionId);
     return result;
@@ -93,7 +93,19 @@ export class FakeHarness implements HarnessPort {
   }
 }
 
-function defaultOutput(operation: HarnessOperation): unknown {
+function defaultOutput(operation: HarnessOperation, packet: CampaignPacket): unknown {
+  if (operation === "policy") {
+    return {
+      problem: "The selected issue describes behavior that does not match the repository contract.",
+      likelyCause: "The affected path lacks the narrow guard required by the issue.",
+      smallestFix: "Add the focused guard and a regression test without unrelated refactoring.",
+      affectedAreas: ["src/affected-path.ts"],
+      tests: ["Run the focused regression test and the repository test suite."],
+      risks: ["The guard could reject a previously accepted edge case."],
+      uncertainty: "The exact file remains subject to sandbox inspection after finalization.",
+      evidence: [{ sourceUrl: "https://github.com/owner/repo/issues/42", observation: "The selected issue defines the reported behavior and expected outcome." }],
+    };
+  }
   if (operation === "preflight") {
     return {
       verdict: "pass",
@@ -121,7 +133,7 @@ function defaultOutput(operation: HarnessOperation): unknown {
     };
   }
   if (operation === "verify") {
-    return { testsPassed: true };
+    return { testsPassed: true, currentCommitSha: packet.currentCommitSha ?? "a".repeat(40), tests: ["npm test"], uncertainty: "No known uncertainty." };
   }
   if (operation === "repair") {
     return {
@@ -134,7 +146,7 @@ function defaultOutput(operation: HarnessOperation): unknown {
       },
     };
   }
-  return { status: "completed" };
+  return { status: "completed", commitSha: "b".repeat(40), changedAreas: ["src/example.ts"], tests: ["npm test"], uncertainty: "No known uncertainty.", before: "The issue behavior was present.", after: "The issue behavior is corrected." };
 }
 
 async function* emptyStream() {
