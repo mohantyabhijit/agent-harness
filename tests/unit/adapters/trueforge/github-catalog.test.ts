@@ -9,14 +9,15 @@ import { TrueForgeGithubCatalog } from "../../../../src/adapters/trueforge/githu
 describe("TrueForgeGithubCatalog", () => {
   it("maps a valid, source-linked repository envelope", async () => {
     const [repository] = await loadFixture<readonly unknown[]>("repositories.json");
+    const webRepository = { ...(repository as Record<string, unknown>), spaces: ["web"] };
     const { harness, runChildSession } = harnessReturning({
       kind: "repositories",
-      items: [repository],
+      items: [webRepository],
     });
     const catalog = new TrueForgeGithubCatalog(harness);
 
-    await expect(catalog.listRepositories(["developer_tools", "web"])).resolves.toEqual([
-      repository,
+    await expect(catalog.listRepositories(["web"])).resolves.toEqual([
+      webRepository,
     ]);
     expect(runChildSession).toHaveBeenCalledOnce();
     expect(runChildSession).toHaveBeenCalledWith(
@@ -30,6 +31,28 @@ describe("TrueForgeGithubCatalog", () => {
     );
   });
 
+  it("uses background candidates only as seeds and requires fresh canonical GitHub verification", async () => {
+    const { harness, runChildSession } = harnessReturning({ kind: "repositories", items: [] });
+    const catalog = new TrueForgeGithubCatalog(harness);
+
+    await catalog.listRepositories(["ai_ml"]);
+
+    const request = runChildSession.mock.calls[0]?.[0] as { goal?: string } | undefined;
+    expect(request?.goal).toMatch(/background research.*seeds/i);
+    expect(request?.goal).toContain("nanocoai/nanoclaw");
+    expect(request?.goal).toContain("tinyfish-io/tinyfish-cookbook");
+    expect(request?.goal).toContain("openclaw/openclaw");
+    expect(request?.goal).toContain("NousResearch/hermes-agent");
+    expect(request?.goal).toContain("NVIDIA/NeMo-Agent-Toolkit");
+    expect(request?.goal).toContain("openai/openai-agents-python");
+    expect(request?.goal).toContain("microsoft/agent-framework");
+    expect(request?.goal).toContain("agentscope-ai/agentscope");
+    expect(request?.goal).toMatch(/freshly verify.*public visibility.*license.*recent activity.*contribution guide.*external pull request acceptance/i);
+    expect(request?.goal).toMatch(/exclude openai\/codex.*does not accept external code contributions/i);
+    expect(request?.goal).toMatch(/at most 8/i);
+    expect(request?.goal).toMatch(/GitHub read tools only/i);
+  });
+
   it("maps a valid issue envelope for the requested repository", async () => {
     const issues = await loadFixture<readonly unknown[]>("issues.json");
     const { harness } = harnessReturning({ kind: "issues", items: issues });
@@ -40,11 +63,11 @@ describe("TrueForgeGithubCatalog", () => {
 
   it("normalizes a canonical GitHub repository URL before identity comparison", async () => {
     const [repository] = await loadFixture<readonly Record<string, unknown>[]>("repositories.json");
-    const normalizedCandidate = { ...repository, url: "https://GITHUB.com/legacy/famous-dormant/" };
+    const normalizedCandidate = { ...repository, url: "https://GITHUB.com/legacy/famous-dormant/", spaces: ["web"] };
     const { harness } = harnessReturning({ kind: "repositories", items: [normalizedCandidate] });
     const catalog = new TrueForgeGithubCatalog(harness);
 
-    await expect(catalog.listRepositories(["developer_tools", "web"])).resolves.toEqual([
+    await expect(catalog.listRepositories(["web"])).resolves.toEqual([
       normalizedCandidate,
     ]);
   });
@@ -93,11 +116,11 @@ describe("TrueForgeGithubCatalog", () => {
     const [repository] = await loadFixture<readonly Record<string, unknown>[]>("repositories.json");
     const { harness } = harnessReturning({
       kind: "repositories",
-      items: [{ ...repository, ...replacement }],
+      items: [{ ...repository, spaces: ["web"], ...replacement }],
     });
     const catalog = new TrueForgeGithubCatalog(harness);
 
-    await expect(catalog.listRepositories(["developer_tools", "web"])).rejects.toBeInstanceOf(
+    await expect(catalog.listRepositories(["web"])).rejects.toBeInstanceOf(
       HarnessOutputInvalid,
     );
   });
@@ -117,11 +140,11 @@ describe("TrueForgeGithubCatalog", () => {
     }];
     const { harness } = harnessReturning({
       kind: "repositories",
-      items: [{ ...repository, evidence }],
+      items: [{ ...repository, spaces: ["web"], evidence }],
     });
     const catalog = new TrueForgeGithubCatalog(harness);
 
-    await expect(catalog.listRepositories(["developer_tools", "web"])).rejects.toBeInstanceOf(
+    await expect(catalog.listRepositories(["web"])).rejects.toBeInstanceOf(
       HarnessOutputInvalid,
     );
   });
@@ -138,11 +161,11 @@ describe("TrueForgeGithubCatalog", () => {
     const signals = { ...(repository.signals as Record<string, unknown>), ...signalReplacement };
     const { harness } = harnessReturning({
       kind: "repositories",
-      items: [{ ...repository, signals }],
+      items: [{ ...repository, spaces: ["web"], signals }],
     });
     const catalog = new TrueForgeGithubCatalog(harness);
 
-    await expect(catalog.listRepositories(["developer_tools", "web"])).rejects.toBeInstanceOf(
+    await expect(catalog.listRepositories(["web"])).rejects.toBeInstanceOf(
       HarnessOutputInvalid,
     );
   });

@@ -6,7 +6,7 @@ import type { GithubCatalogPort } from "../../application/ports/github-catalog.j
 import { spaces } from "../../domain/discovery.js";
 import { repositoryPartSchema } from "./support.js";
 
-const discoveryBodySchema = z.object({ spaces: z.array(z.enum(spaces)).min(1).max(spaces.length) }).strict();
+const discoveryBodySchema = z.object({ spaces: z.array(z.enum(spaces)).length(1) }).strict();
 const repositoryParamsSchema = z.object({ owner: repositoryPartSchema.max(39), repo: repositoryPartSchema }).strict();
 
 export interface DiscoveryRouteDependencies {

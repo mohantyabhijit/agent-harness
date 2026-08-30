@@ -4,7 +4,7 @@ import { createOpenQuestApi, type OpenQuestApi, type OpenQuestApiOptions } from 
 import { DiscoverPage } from "./routes/DiscoverPage.js";
 import { CampaignPage } from "./routes/CampaignPage.js";
 import { OnboardingPage } from "./routes/OnboardingPage.js";
-import type { Space } from "../domain/discovery.js";
+import { isKnownSpace, type Space } from "../domain/discovery.js";
 
 interface AppProps {
   readonly api?: OpenQuestApi;
@@ -64,6 +64,6 @@ function campaignIdFromPath(path: string): string | undefined {
 
 function spacesFromLocation(): readonly Space[] {
   const values = new URLSearchParams(window.location.search).get("spaces")?.split(",") ?? [];
-  const knownSpaces: readonly Space[] = ["ai_ml", "developer_tools", "web", "mobile", "data", "infrastructure", "security", "science", "social_impact"];
-  return [...new Set(values)].filter((value): value is Space => knownSpaces.includes(value as Space));
+  if (values.length !== 1 || values[0] === undefined || !isKnownSpace(values[0])) return [];
+  return values as readonly Space[];
 }

@@ -3,8 +3,14 @@ import { describe, expect, it } from "vitest";
 
 describe("OpenQuest project configuration", () => {
   it("keeps the embedded OpenQuest agent incapable of GitHub writes", () => {
-    const manifest = JSON.parse(readFileSync("config/agents/openquest.json", "utf8")) as { mcp_servers: { name: string; enable_tools: string[]; disable_tools: string[] }[] };
+    const manifest = JSON.parse(readFileSync("config/agents/openquest.json", "utf8")) as { instructions: string; mcp_servers: { name: string; enable_tools: string[]; disable_tools: string[] }[] };
     expect(manifest.mcp_servers.find(({ name }) => name === "github")).toMatchObject({ enable_tools: ["@read-only"], disable_tools: [] });
+    expect(manifest.instructions).toMatch(/AI & agents.*Developer tools.*Web & apps.*Data & infrastructure.*Civic, science & social impact/is);
+    expect(manifest.instructions).toMatch(/GitHub read-only tools.*at most 8.*source-linked/is);
+    expect(manifest.instructions).toMatch(/public.*license.*recent activity.*contribution policy.*external pull request acceptance/is);
+    expect(manifest.instructions).toMatch(/background.*seeds.*leads/is);
+    expect(manifest.instructions).toMatch(/exclude openai\/codex.*does not accept external code contributions/is);
+    expect(manifest.instructions).toMatch(/untrusted.*never.*write/is);
   });
 
   it("pins the harness and exposes every quality command", () => {

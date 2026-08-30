@@ -1,7 +1,7 @@
 import {
   explainRepositoryScore,
+  isKnownSpace,
   scoreRepository,
-  spaces,
   type RepositoryCandidate,
   type RepositoryScoreExplanation,
   type Space,
@@ -18,12 +18,11 @@ export class DiscoverRepositories {
   constructor(private readonly catalog: GithubCatalogPort) {}
 
   async execute(selectedSpaces: readonly Space[]): Promise<readonly DiscoveredRepository[]> {
-    if (selectedSpaces.length === 0 || selectedSpaces.some((space) => !isKnownSpace(space))) {
-      throw new Error("Select at least one known space");
+    if (selectedSpaces.length !== 1 || selectedSpaces.some((space) => !isKnownSpace(space))) {
+      throw new Error("Select exactly one known category");
     }
 
-    const normalizedSpaces = [...new Set(selectedSpaces)];
-    const repositories = await this.catalog.listRepositories(normalizedSpaces);
+    const repositories = await this.catalog.listRepositories(selectedSpaces);
     return repositories
       .filter(isDiscoverable)
       .map((repository) => ({
@@ -33,16 +32,18 @@ export class DiscoverRepositories {
       }))
       .sort((left, right) =>
         right.score - left.score || left.repository.fullName.localeCompare(right.repository.fullName),
-      );
+      )
+      .slice(0, 8);
   }
-}
-
-function isKnownSpace(value: string): value is Space {
-  return (spaces as readonly string[]).includes(value);
 }
 
 function isDiscoverable(repository: RepositoryCandidate): boolean {
   // Catalog adapters are untrusted at runtime; only an explicit true is public.
   // eslint-disable-next-line @typescript-eslint/no-unnecessary-boolean-literal-compare
-  return repository.isPublic === true && repository.license !== null && repository.signals.recentActivity > 0;
+  return repository.isPublic === true &&
+    repository.license !== null &&
+    repository.signals.recentActivity > 0 &&
+    repository.signals.contributionGuide &&
+    repository.signals.externalPrAcceptance > 0 &&
+    repository.fullName.toLowerCase() !== "openai/codex";
 }

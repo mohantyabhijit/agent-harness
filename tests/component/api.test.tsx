@@ -7,7 +7,7 @@ import { createOpenQuestApi, type CampaignSnapshot, type FetchLike } from "../..
 import { App } from "../../src/web/App.js";
 import type { Evidence } from "../../src/domain/evidence.js";
 
-const realSpacesResponse = { spaces: ["developer_tools", "web"] };
+const realSpacesResponse = { spaces: ["ai_ml", "developer_tools", "web", "data", "social_impact"] };
 const realCampaignResponse = {
   id: ":review.1",
   repository: "owner/repo",
@@ -79,8 +79,11 @@ describe("OpenQuest browser API", () => {
     const api = createOpenQuestApi({ fetch: fetcher, baseUrl: "https://openquest.test", operatorCapability: () => "runtime-only" });
 
     await expect(api.getSpaces()).resolves.toEqual([
-      expect.objectContaining({ id: "developer_tools", name: "Developer tools" }),
-      expect.objectContaining({ id: "web", name: "Web" }),
+      { id: "ai_ml", name: "AI & agents", description: "Contribute to models, agents, and intelligent systems." },
+      { id: "developer_tools", name: "Developer tools", description: "Improve the tools developers use to build and ship." },
+      { id: "web", name: "Web & apps", description: "Build open experiences for browsers, desktops, and mobile devices." },
+      { id: "data", name: "Data & infrastructure", description: "Strengthen data systems and the infrastructure behind them." },
+      { id: "social_impact", name: "Civic, science & social impact", description: "Support public-interest technology, research, and access." },
     ]);
     expect(fetcher).toHaveBeenCalledWith("https://openquest.test/api/spaces", expect.not.objectContaining({ headers: expect.anything() }));
     expect(fetcher.mock.calls[0]?.[1]?.headers).toBeUndefined();
@@ -90,6 +93,23 @@ describe("OpenQuest browser API", () => {
     const api = createOpenQuestApi({ fetch: async () => new Response(JSON.stringify({ spaces: ["developer_tools", "<script>"] }), { status: 200 }) });
 
     await expect(api.getSpaces()).rejects.toThrow(/spaces/i);
+  });
+
+  it("rejects retired category identifiers before rendering them", async () => {
+    const api = createOpenQuestApi({ fetch: async () => new Response(JSON.stringify({ spaces: ["mobile"] }), { status: 200 }) });
+
+    await expect(api.getSpaces()).rejects.toThrow(/spaces/i);
+  });
+
+  it("rejects an unbounded repository recommendation response", async () => {
+    const response = repositoryResponse();
+    const repositories = Array.from({ length: 9 }, () => response.repositories[0]);
+    const api = createOpenQuestApi({
+      fetch: async () => new Response(JSON.stringify({ repositories }), { status: 200 }),
+      operatorCapability: () => "runtime-only",
+    });
+
+    await expect(api.discoverRepositories(["developer_tools"])).rejects.toThrow(/recommendations/i);
   });
 
   it("accepts the strict Task 7 campaign response and projects its navigation id", async () => {

@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { DiscoverRepositories } from "../../../src/application/discover.js";
 import type { GithubCatalogPort } from "../../../src/application/ports/github-catalog.js";
-import { classifyIssue, type IssueCandidate, type RepositoryCandidate, type Space } from "../../../src/domain/discovery.js";
+import { classifyIssue, spaces, type IssueCandidate, type RepositoryCandidate, type Space } from "../../../src/domain/discovery.js";
 
 const repositories = JSON.parse(
   readFileSync("fixtures/catalog/repositories.json", "utf8"),
@@ -27,6 +27,16 @@ class FixtureCatalog implements GithubCatalogPort {
 }
 
 describe("DiscoverRepositories", () => {
+  it("exposes exactly the five prospective repository categories", () => {
+    expect(spaces).toEqual([
+      "ai_ml",
+      "developer_tools",
+      "web",
+      "data",
+      "social_impact",
+    ]);
+  });
+
   it("filters inactive and unlicensed repositories, then sorts scores deterministically", async () => {
     const result = await new DiscoverRepositories(new FixtureCatalog()).execute(["developer_tools"]);
 
@@ -34,14 +44,6 @@ describe("DiscoverRepositories", () => {
       "community/same-score",
       "friendly/healthy-contributor",
     ]);
-  });
-
-  it("normalizes duplicate selected spaces in first-seen order before asking the catalog", async () => {
-    const catalog = new FixtureCatalog();
-
-    await new DiscoverRepositories(catalog).execute(["web", "developer_tools", "web"]);
-
-    expect(catalog.requestedSpaces).toEqual(["web", "developer_tools"]);
   });
 
   it("returns only active, licensed public repositories overlapping a web-only selection", async () => {
@@ -91,11 +93,66 @@ describe("DiscoverRepositories", () => {
     await expect(new DiscoverRepositories(catalog).execute(["developer_tools"])).resolves.toEqual([]);
   });
 
-  it("rejects an empty or unknown space selection", async () => {
+  it("fails closed when contribution guidance or accepted external pull requests are unverified", async () => {
+    const base = repositories[1];
+    if (base === undefined) throw new Error("Catalog fixture is incomplete");
+    const catalog: GithubCatalogPort = {
+      async listRepositories() {
+        return [
+          { ...base, fullName: "unready/no-guide", signals: { ...base.signals, contributionGuide: false } },
+          { ...base, fullName: "unready/no-external-prs", signals: { ...base.signals, externalPrAcceptance: 0 } },
+          { ...base, fullName: "openai/codex" },
+        ];
+      },
+      async listIssues() { return []; },
+    };
+
+    await expect(new DiscoverRepositories(catalog).execute(["developer_tools"])).resolves.toEqual([]);
+  });
+
+  it("rejects empty, multiple, unknown, and retired category selections", async () => {
     const discovery = new DiscoverRepositories(new FixtureCatalog());
 
-    await expect(discovery.execute([])).rejects.toThrow(/at least one known space/i);
-    await expect(discovery.execute(["unknown" as never])).rejects.toThrow(/at least one known space/i);
+    await expect(discovery.execute([])).rejects.toThrow(/one known category/i);
+    await expect(discovery.execute(["web", "developer_tools"])).rejects.toThrow(/one known category/i);
+    await expect(discovery.execute(["unknown" as never])).rejects.toThrow(/one known category/i);
+    await expect(discovery.execute(["mobile" as never])).rejects.toThrow(/one known category/i);
+  });
+
+  it("returns at most eight repositories in deterministic score order", async () => {
+    const base = repositories[1];
+    if (base === undefined) throw new Error("Catalog fixture is incomplete");
+    const baseEvidence = base.evidence[0];
+    if (baseEvidence === undefined) throw new Error("Catalog fixture evidence is incomplete");
+    const candidates = Array.from({ length: 10 }, (_, index): RepositoryCandidate => ({
+      ...base,
+      fullName: `popular/repository-${String(index).padStart(2, "0")}`,
+      url: `https://github.com/popular/repository-${String(index).padStart(2, "0")}`,
+      signals: { ...base.signals, stars: 1_000 + index, maintainerResponse: (index + 1) / 10 },
+      evidence: [{
+        ...baseEvidence,
+        id: `evidence-${String(index)}`,
+        sourceUrl: `https://github.com/popular/repository-${String(index).padStart(2, "0")}`,
+      }],
+    }));
+    const catalog: GithubCatalogPort = {
+      async listRepositories() { return candidates; },
+      async listIssues() { return []; },
+    };
+
+    const result = await new DiscoverRepositories(catalog).execute(["developer_tools"]);
+
+    expect(result).toHaveLength(8);
+    expect(result.map(({ repository }) => repository.fullName)).toEqual([
+      "popular/repository-09",
+      "popular/repository-08",
+      "popular/repository-07",
+      "popular/repository-06",
+      "popular/repository-05",
+      "popular/repository-04",
+      "popular/repository-03",
+      "popular/repository-02",
+    ]);
   });
 
   it("keeps easy wins and long-term challenges in separate deterministic lanes", async () => {

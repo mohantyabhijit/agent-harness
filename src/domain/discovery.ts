@@ -4,15 +4,15 @@ export const spaces = [
   "ai_ml",
   "developer_tools",
   "web",
-  "mobile",
   "data",
-  "infrastructure",
-  "security",
-  "science",
   "social_impact",
 ] as const;
 
 export type Space = (typeof spaces)[number];
+
+export function isKnownSpace(value: string): value is Space {
+  return (spaces as readonly string[]).includes(value);
+}
 
 export interface RepositorySignals {
   readonly stars: number;
