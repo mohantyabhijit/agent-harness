@@ -9,6 +9,7 @@ import { transitionCampaign } from "../../../src/domain/campaign.js";
 import { campaign } from "../../builders.js";
 import { FakeCampaignStore } from "../../fakes/fake-campaign-store.js";
 import { FakeHarness } from "../../fakes/fake-harness.js";
+import { campaignOperationResponseSchemas } from "../../../src/application/ports/harness.js";
 
 const commitSha = "a".repeat(40);
 const requiredChecks = [
@@ -97,6 +98,8 @@ describe("RunCampaign", () => {
     expect(harness.childSessions).toEqual(["session-1", "session-2", "session-3"]);
     expect(harness.packets[1]?.currentCommitSha).toBe(commitSha);
     expect(harness.packets[2]?.currentCommitSha).toBe("b".repeat(40));
+    expect(harness.packets[1]?.context?.responseSchema).toEqual(campaignOperationResponseSchemas.implement);
+    expect(harness.packets[2]?.context?.responseSchema).toEqual(campaignOperationResponseSchemas.verify);
     const snapshot = await store.get("campaign-1");
     expect(snapshot?.externalReferences.filter(({ kind }) => kind === "sandbox")).toEqual([
       { kind: "sandbox", value: "session-1" },
@@ -162,6 +165,33 @@ describe("RunCampaign", () => {
     expect(harness.packets.at(-1)?.currentCommitSha).toBe(nextCommit);
     expect((await store.get("campaign-1"))?.externalReferences.filter(({ kind }) => kind === "commit")).toEqual([{ kind: "commit", value: nextCommit }]);
     expect((await store.get("campaign-1"))?.events).toEqual(expect.arrayContaining([expect.objectContaining({ eventType: "campaign_operation_completed", payload: expect.objectContaining({ output: expect.objectContaining({ previousCommitSha: commitSha, currentCommitSha: nextCommit }) }) })]));
+  });
+
+  it.each([
+    ["an explanation", { before: "x".repeat(2_001) }],
+    ["a changed-area list", { changedAreas: Array.from({ length: 101 }, () => "src/example.ts") }],
+  ])("rejects implementation output with an unprojectable %s", async (_label, override) => {
+    const { service, store, harness } = fixture();
+    store.seed(campaign({ status: "coordination_pending" }));
+    await service.execute("campaign-1", "preflight");
+    harness.enqueueResult("implement", {
+      summary: "implemented",
+      artifacts: [],
+      output: {
+        status: "completed",
+        commitSha: "b".repeat(40),
+        changedAreas: ["src/example.ts"],
+        tests: ["npm test"],
+        uncertainty: "No known uncertainty.",
+        before: "The old behavior failed.",
+        after: "The new behavior passes.",
+        ...override,
+      },
+    });
+
+    await expect(service.execute("campaign-1", "implement")).rejects.toThrow(/implementation execution failed/i);
+    expect((await store.get("campaign-1"))?.campaign.status).toBe("human_escalation");
+    expect((await store.get("campaign-1"))?.externalReferences.filter(({ kind }) => kind === "commit")).toEqual([{ kind: "commit", value: commitSha }]);
   });
 
   it("fences a delayed verifier after recovery and blocks implementation before completion", async () => {

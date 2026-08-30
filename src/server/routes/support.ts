@@ -59,7 +59,10 @@ export function publicCampaignSnapshot(snapshot: CampaignSnapshot, now: number):
 }
 
 function publicFixExplanation(snapshot: CampaignSnapshot): unknown {
-  const completed = [...snapshot.events].reverse().find((event) => event.eventType === "campaign_operation_completed" && isRecord(event.payload) && event.payload.operation === "implement" && isRecord(event.payload.output));
+  const commits = snapshot.externalReferences.filter(({ kind }) => kind === "commit");
+  const currentCommit = commits.length === 1 && /^[0-9a-f]{40}$/u.test(commits[0]?.value ?? "") ? commits[0]?.value : undefined;
+  if (currentCommit === undefined) return null;
+  const completed = [...snapshot.events].reverse().find((event) => event.eventType === "campaign_operation_completed" && isRecord(event.payload) && event.payload.operation === "implement" && isRecord(event.payload.output) && event.payload.output.currentCommitSha === currentCommit);
   if (completed === undefined || !isRecord(completed.payload) || !isRecord(completed.payload.output)) return null;
   const output = completed.payload.output;
   if (typeof output.currentCommitSha !== "string" || !/^[0-9a-f]{40}$/u.test(output.currentCommitSha) ||
