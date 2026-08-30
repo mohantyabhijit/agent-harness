@@ -4,6 +4,10 @@
 
 OpenQuest is a local, single-operator web application around TrueForge. The React interface owns onboarding, discovery, durable campaign presentation, and approval issuance. Fastify owns validation, authorization, orchestration, and sanitized public projections. SQLite is the campaign system of record. TrueForge owns agent sessions; the registered OpenQuest agent is configured to use GitHub read-only MCP tools, dynamic subagents, and a Daytona sandbox.
 
+![OpenQuest and TrueForge architecture overview](architecture/openquest-trueforge-overview.png)
+
+The visual overview summarizes the user journey and the backend safety boundaries. The lower strip distinguishes internal orchestration from external GitHub systems; the dashed write path is gated by human approval and Qodo review.
+
 ```mermaid
 flowchart LR
     B[Browser UI] -->|GET or operator bearer POST| A[Fastify API]
