@@ -8,6 +8,7 @@ import { FinalizeCampaign } from "../application/finalize-campaign.js";
 import { DiscoverRepositories } from "../application/discover.js";
 import { ApprovalIssuanceConflict, CampaignIdentityConflict, CampaignVersionConflict, type CampaignStore } from "../application/ports/campaign-store.js";
 import type { GithubCatalogPort } from "../application/ports/github-catalog.js";
+import type { DiscoverySnapshotCache } from "../application/discovery-snapshot-cache.js";
 import { HarnessError, HarnessUnavailable, type HarnessPort } from "../application/ports/harness.js";
 import { RunCampaign } from "../application/run-campaign.js";
 import { SyncReview } from "../application/sync-review.js";
@@ -29,6 +30,7 @@ const emptyQuerySchema = z.object({}).strict();
 
 export interface AppDependencies {
   readonly catalog: GithubCatalogPort;
+  readonly discoveryCache?: DiscoverySnapshotCache;
   readonly store: CampaignStore;
   readonly harness: HarnessPort;
   readonly clock: Clock;
@@ -81,7 +83,7 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
   });
   app.get("/api/operator-session", { config: { capability: "operator" } }, async (_request, reply) => reply.code(204).send());
   registerSpaceRoutes(app);
-  registerDiscoveryRoutes(app, { discover, catalog: dependencies.catalog, intentClassifier: new TrueForgeIntentClassifier(dependencies.harness) });
+  registerDiscoveryRoutes(app, { discover, catalog: dependencies.catalog, ...(dependencies.discoveryCache === undefined ? {} : { cache: dependencies.discoveryCache }), intentClassifier: new TrueForgeIntentClassifier(dependencies.harness) });
   registerCampaignRoutes(app, { createCampaign, finalizeCampaign, runCampaign, store: dependencies.store, clock: dependencies.clock });
   registerApprovalRoutes(app, { store: dependencies.store, clock: dependencies.clock, ids: dependencies.ids });
   registerReviewRoutes(app, { syncReview: authenticatedReview, ...(dependencies.reviewSyncTimeoutMs === undefined ? {} : { timeoutMs: dependencies.reviewSyncTimeoutMs }) });

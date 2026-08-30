@@ -21,6 +21,7 @@ process.once("SIGTERM", () => { void shutdown(); });
 try {
   await app.listen({ host: "127.0.0.1", port: config.PORT });
   container.reviewJob.start();
+  void container.warmDiscoverySnapshots();
 } catch (error) {
   await shutdown();
   throw error;

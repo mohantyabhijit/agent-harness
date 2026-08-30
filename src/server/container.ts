@@ -12,16 +12,21 @@ import type { AppDependencies } from "./app.js";
 import type { ServerConfig } from "./config.js";
 import { createQodoReviewJob, type QodoReviewJob, type ReviewJobScheduler } from "./jobs/qodo-review-job.js";
 import { bearerAuthorizationPolicy } from "./authorization.js";
+import { SqliteDiscoverySnapshotStore } from "../adapters/sqlite/discovery-snapshot.js";
+import { DiscoverySnapshotCache } from "../application/discovery-snapshot-cache.js";
+import { spaces } from "../domain/discovery.js";
 
 export interface ServerContainer {
   readonly dependencies: AppDependencies;
   readonly reviewJob: QodoReviewJob;
+  warmDiscoverySnapshots(): Promise<void>;
   close(): Promise<void>;
 }
 
 export function createContainer(config: ServerConfig): ServerContainer {
   const database = new Database(config.DATABASE_PATH);
   const store = new SqliteCampaignStore(database);
+  const snapshotStore = new SqliteDiscoverySnapshotStore(database);
   const client = new TrueForge({ baseUrl: config.TRUEFORGE_BASE_URL });
   const harness = new TrueForgeHarness(client);
   const clock = { now: () => new Date().toISOString() };
@@ -41,10 +46,13 @@ export function createContainer(config: ServerConfig): ServerContainer {
     reviewAuthorityReady: () => qodoReview.isReady(),
     repairVerifierReady: () => false,
   });
+  const catalog = new TrueForgeGithubCatalog(harness);
+  const discoveryCache = new DiscoverySnapshotCache(catalog, snapshotStore);
   const dependencies: AppDependencies = {
     store,
     harness,
-    catalog: new TrueForgeGithubCatalog(harness),
+    catalog,
+    discoveryCache,
     clock,
     ids,
     authorization: bearerAuthorizationPolicy({ operator: config.OPERATOR_BEARER_TOKEN, reviewProvider: config.REVIEW_PROVIDER_BEARER_TOKEN }),
@@ -56,6 +64,7 @@ export function createContainer(config: ServerConfig): ServerContainer {
   return {
     dependencies,
     reviewJob,
+    warmDiscoverySnapshots: () => discoveryCache.warmup(spaces),
     async close() {
       await reviewJob.stop();
       if (database.open) database.close();

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { DiscoveredRepository } from "../../application/discover.js";
 import { classifyIssue, type IssueCandidate, type Space } from "../../domain/discovery.js";
-import { OpenQuestApiError, type OpenQuestApi } from "../api.js";
+import { OpenQuestApiError, type DiscoveryResponse, type OpenQuestApi } from "../api.js";
 import { IssueCard } from "../components/IssueCard.js";
 import { RepositoryCard } from "../components/RepositoryCard.js";
 
@@ -16,10 +16,12 @@ interface IssueLoad {
   readonly repository: string;
   readonly issues: readonly IssueCandidate[];
   readonly status: "loading" | "ready" | "error";
+  readonly metadata?: Pick<DiscoveryResponse<IssueCandidate>, "verifiedAt" | "source" | "refreshing">;
 }
 
 export function DiscoverPage({ api, spaces, navigate }: DiscoverPageProps) {
   const [repositories, setRepositories] = useState<readonly DiscoveredRepository[]>([]);
+  const [discoveryMetadata, setDiscoveryMetadata] = useState<Pick<DiscoveryResponse<DiscoveredRepository>, "verifiedAt" | "source" | "refreshing">>();
   const [issueLoads, setIssueLoads] = useState<readonly IssueLoad[]>([]);
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
   const [slow, setSlow] = useState(false);
@@ -42,9 +44,9 @@ export function DiscoverPage({ api, spaces, navigate }: DiscoverPageProps) {
     issueGenerations.current.set(repository, request);
     setIssueLoads((current) => current.map((entry) => entry.repository === repository ? { ...entry, status: "loading" } : entry));
     void api.getIssues(repository, controller.signal).then(
-      (issues) => {
+      (response) => {
         if (discoveryGeneration.current !== discoveryRequest || issueGenerations.current.get(repository) !== request) return;
-        setIssueLoads((current) => current.map((entry) => entry.repository === repository ? { ...entry, issues, status: "ready" } : entry));
+        setIssueLoads((current) => current.map((entry) => entry.repository === repository ? { ...entry, issues: response.values, metadata: response, status: "ready" } : entry));
       },
       () => {
         if (discoveryGeneration.current !== discoveryRequest || issueGenerations.current.get(repository) !== request || controller.signal.aborted) return;
@@ -72,10 +74,11 @@ export function DiscoverPage({ api, spaces, navigate }: DiscoverPageProps) {
     setCampaignError(undefined);
     slowTimer.current = window.setTimeout(() => { setSlow(true); }, 8_000);
     void api.discoverRepositories([...new Set(spaces)], controller.signal).then(
-      (found) => {
+      (response) => {
         if (slowTimer.current !== undefined) window.clearTimeout(slowTimer.current);
         if (discoveryGeneration.current !== generation) return;
-        const unique = found.filter((item, index, all) => all.findIndex(({ repository }) => repository.fullName === item.repository.fullName) === index);
+        const unique = response.values.filter((item, index, all) => all.findIndex(({ repository }) => repository.fullName === item.repository.fullName) === index);
+        setDiscoveryMetadata(response);
         setRepositories(unique);
         setIssueLoads(unique.map(({ repository }) => ({ repository: repository.fullName, issues: [], status: "loading" })));
         setStatus("ready");
@@ -140,7 +143,7 @@ export function DiscoverPage({ api, spaces, navigate }: DiscoverPageProps) {
         <p className="eyebrow">Selected category · {spaces.map((space) => space.replaceAll("_", " ")).join(", ") || "none"}</p>
         <h1 tabIndex={-1}>Find your next contribution.</h1>
         <p>Every recommendation pairs visibility with evidence that a contribution can be thoughtfully reviewed.</p>
-        <p className="evidence-mode" role="status"><strong>Live verification</strong> · read-only GitHub evidence · no external writes</p>
+        <p className="evidence-mode" role="status"><strong>{discoveryMetadata?.source === "snapshot" ? "Verified snapshot" : "Live verification"}</strong>{discoveryMetadata?.refreshing ? " · refreshing live evidence in background" : " · read-only GitHub evidence"}{discoveryMetadata?.verifiedAt ? ` · verified ${new Date(discoveryMetadata.verifiedAt).toLocaleString()}` : ""} · no external writes</p>
       </header>
       {status === "loading" ? <section aria-live="polite" className="loading-state"><div className="loading-grid" aria-hidden="true"><span className="skeleton-card" /><span className="skeleton-card" /><span className="skeleton-card" /></div><p className="loading-status">{slow ? "Still verifying live GitHub evidence. This can take about a minute." : "Starting a read-only TrueForge verification…"}</p></section> : null}
       {status === "error" ? <section className="state-card" role="alert"><h2>Verification did not finish</h2><p>{errorCode === "harness_unavailable" ? "TrueForge could not complete a fully verified set. No unverified recommendations were shown." : "We could not load verified recommendations. No unverified results were shown."}</p><div className="error-actions"><button onClick={loadDiscovery} type="button">Try again</button><button className="secondary-action" onClick={() => { navigate("/"); }} type="button">Back to chat</button></div></section> : null}
