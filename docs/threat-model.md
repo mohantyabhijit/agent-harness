@@ -43,7 +43,7 @@ Trust boundaries exist between:
 
 **Threat:** Repository code, prompts, logs, evidence, screenshots, URLs, errors, or downloadable artifacts expose GitHub, model, TrueForge, Daytona, Qodo, operator, or review-provider credentials.
 
-**Controls:** Credentials remain in provider stores or process memory, outside cloned repositories and campaign packets. The browser operator capability is password-masked and held only in React memory. HTTP errors and readiness codes are sanitized. Sandbox artifact paths are bounded and cannot be absolute or URL-like. Evidence rules forbid raw payload captures, headers, cookies, environment dumps, and provider error bodies.
+**Controls:** Credentials remain in provider stores or process memory, outside cloned repositories and campaign packets. The browser does not collect or store an operator credential. HTTP errors and readiness codes are sanitized. Sandbox artifact paths are bounded and cannot be absolute or URL-like. Evidence rules forbid raw payload captures, headers, cookies, environment dumps, and provider error bodies.
 
 **Residual risk:** A compromised local browser, process, dependency, provider, or workstation can access in-memory credentials. This MVP does not provide OS-level secret isolation or content scanning of every user-created screenshot.
 
@@ -91,7 +91,7 @@ Trust boundaries exist between:
 
 **Threat:** Another local process or browser reads campaign data, invokes writes, or accesses the SQLite file.
 
-**Controls:** Fastify binds to `127.0.0.1`. Non-GET routes require one of two distinct high-entropy bearer capabilities; the review route cannot use the operator capability. Public campaign projections omit raw review bodies, source paths/lines, approval payload authority, and arbitrary event fields. Query strings and oversized/unknown request fields are rejected.
+**Controls:** Fastify binds to `127.0.0.1`; Nginx publishes the single-operator browser surface. Browser routes do not require a bearer capability, while every external write still requires a fresh exact approval and has no production execution adapter. Public campaign projections omit raw review bodies, source paths/lines, approval payload authority, and arbitrary event fields. Query strings and oversized/unknown request fields are rejected.
 
 **Residual risk:** `GET` campaign routes are intentionally unauthenticated on localhost, and SQLite is an unencrypted local file. Any same-user process may be able to read them. Do not expose the API or TrueForge directly to a network without adding transport security, origin protections, authenticated reads, and a multi-user authorization model.
 

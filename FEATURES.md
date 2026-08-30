@@ -16,7 +16,7 @@ OpenQuest is an approval-gated, evidence-first harness for open-source contribut
 ## Campaign orchestration and isolation
 
 - **Explicit campaign state machine.** Campaigns move through policy review, coordination, preflight, quarantine, baseline, implementation, verification, contribution approval, pull-request review, repair, escalation, and terminal states only through allowed transitions. (`c4c2dfe`, `6849556`)
-- **Parent and child TrueForge sessions.** Each campaign has a resumable parent session for context. Discovery, preflight, implementation, verification, Qodo synchronization, and repair use fresh child sessions with bounded goals and campaign-specific packets. (`e470867`, `8d174a3`, `01681b0`, `01c1485`)
+- **Parent and child TrueForge sessions.** Each campaign has a resumable parent session for context. Discovery, preflight, implementation, and verification use fresh child sessions with bounded goals and campaign-specific packets. (`e470867`, `8d174a3`, `01681b0`, `01c1485`)
 - **Daytona-backed sandbox contract.** The OpenQuest agent requires sandboxing and dynamic subagents. Registration fails closed unless TrueForge, authenticated read-only GitHub MCP access, Daytona, and a commit-pinned trusted skill are ready. (`e470867`, `d1b0c14`, `47105a5`)
 - **Static preflight before execution.** Preflight must report all required repository, lifecycle, path, credential, and network checks and prove that dependencies and repository scripts were not executed. Invalid or uncertain evidence quarantines the campaign. (`8d174a3`, `47105a5`)
 - **Structured implementation and verification.** Child results use strict schemas, bounded artifact paths, direct evidence, session/sandbox identities, commit identities, and operation-specific validation. Late or cross-campaign results cannot mutate current campaign state. (`8d174a3`, `85289a0`, `01681b0`, `01c1485`)
@@ -39,7 +39,9 @@ OpenQuest is an approval-gated, evidence-first harness for open-source contribut
 - **Race-resistant approval UI.** The campaign screen refreshes authoritative facts after approval and expiry, prevents duplicate submission, cancels stale route work, and disables approval when no exact durable proposal exists. (`e55b770`, `2307baf`)
 - **Issuance without publication.** The current UI and API can issue authority, but no production GitHub write adapter or HTTP execution route publishes comments, branches, or pull requests. This is a deliberate product boundary, not a hidden automation feature.
 
-## Qodo review and bounded repair
+## Repository-only Qodo review
+
+Qodo remains configured for the Agent Harness repository's own pull-request practice. It is not part of the OpenQuest production service, agent registration, readiness, or autonomous contribution lifecycle.
 
 - **Authenticated review synchronization.** A dedicated review-provider capability accepts only a canonical review locator. An independently injected authority resolves bot identity, reviewed commit, completion, tests, comments, and source URLs. (`fbbf2fb`, `1af4eff`, `b3ebab3`)
 - **Strict Qodo evidence parsing.** Reviews are bounded, bot identities are allowlisted, duplicate comment IDs are checked for conflicts, cross-PR and unsafe-path evidence is rejected, and severity is derived only from explicit fields or labels. (`fbbf2fb`, `1af4eff`)
@@ -48,14 +50,13 @@ OpenQuest is an approval-gated, evidence-first harness for open-source contribut
 - **Independent repair verification.** A repair commit is accepted only with a verifier receipt proving campaign/repository/PR identity, expected parentage, candidate commit, child session and sandbox, and approved test-policy results. (`b3ebab3`, `b498db4`)
 - **Fresh approval for repaired updates.** Qodo synchronization cannot push a repair. Publishing a verified repair requires a new exact `update_pr` proposal and single-use approval for that pull request and commit. (`1af4eff`, `b3ebab3`)
 - **Bounded background scheduler.** One review tick runs at a time, health includes scheduler/store/provider state, and shutdown fencing prevents aborted generations from persisting late results. (`a94b79e`, `bf8d38d`, `b498db4`)
-- **Autonomous repository PR reviews.** `.pr_agent.toml` requests Qodo v2 `/agentic_review` on pull-request events and pushes, including test, security, and ticket-analysis sections. The Qodo GitHub App must still be installed and authorized externally. (`8a79451`)
+- **Repository PR reviews.** `.pr_agent.toml` requests Qodo v2 `/agentic_review` on this repository's pull-request events and pushes, including test, security, and ticket-analysis sections. The Qodo GitHub App must still be installed and authorized externally. (`8a79451`)
 
 ## API and operator experience
 
-- **Fastify campaign API.** Routes cover spaces, repository discovery, issue discovery, campaign creation/read, `preflight`/`implement`/`verify` actions, approval issuance, authenticated review synchronization, liveness, and readiness. (`a94b79e`)
-- **Separated capabilities.** Mutating operator requests and review-provider synchronization use distinct bearer capabilities. Reads are sanitized, request bodies and identifiers are bounded, unknown query fields are rejected, and errors do not leak provider details. (`7d16ff9`)
-- **Honest health model.** `/api/healthz` reports liveness and sanitized degradation; `/api/readyz` fails with HTTP 503 unless review authority, repair verification, scheduler, and store health are ready. (`a94b79e`, `b3ebab3`)
-- **Memory-only operator credential.** The onboarding flow keeps the operator bearer token in React memory. Reloading, closing, or disconnecting clears it; it is not written to local or session storage. (`9ff9269`, `62118f6`)
+- **Fastify campaign API.** Routes cover spaces, repository discovery, issue discovery, campaign creation/read, `preflight`/`implement`/`verify` actions, approval issuance, liveness, and readiness. (`a94b79e`)
+- **Direct single-operator access.** The browser starts with discovery, without a capability prompt. Request bodies and identifiers remain bounded, unknown query fields are rejected, and errors do not leak provider details.
+- **Honest health model.** `/api/healthz` reports liveness and `/api/readyz` reports the OpenQuest service state; neither relies on Qodo. (`a94b79e`, `b3ebab3`)
 - **Resumable campaign dashboard.** The UI shows the campaign timeline, direct evidence, external references, Qodo findings, quality status, escalation reason, exact change brief, approval state, and embedded parent TrueForge thread. (`e55b770`, `5d4583d`)
 - **Accessible responsive interface.** The graphite/purple/lime design includes keyboard focus, semantic live/error states, responsive layouts, provenance labels, actionable retry states, and reduced-motion support. (`9ff9269`, `152ab2a`, `e5f4711`)
 
@@ -71,7 +72,7 @@ OpenQuest is an approval-gated, evidence-first harness for open-source contribut
 - **Embedded TrueForge proxy.** The campaign thread uses the same-origin `/openquest/trueforge/` path in production, including websocket upgrade support through Nginx. (`2c07f34`, `ac8f79a`)
 - **VPS service definitions.** Versioned releases under `/srv/openquest/releases/<commit>` can be switched atomically through `/srv/openquest/current`; systemd units run the API and TrueForge with private environment configuration. (`ca17e47`, `af8da7f`)
 - **Nginx/TLS composition.** Nginx serves the static application and proxies the API to IPv4 loopback and TrueForge to IPv6 loopback beneath the public OpenQuest prefix. (`ca17e47`, `ac8f79a`)
-- **Read-only demo preflight.** `scripts/demo.ts` checks web/API health, TrueForge, GitHub MCP authorization, Daytona, agent/skill registration, trusted skill pinning, and Qodo readiness without creating campaigns or external writes. Strict mode exits non-zero if any dependency is not ready. (`2f51693`)
+- **Read-only demo preflight.** `scripts/demo.ts` checks web/API health, TrueForge, GitHub MCP authorization, Daytona, agent/skill registration, and trusted skill pinning without creating campaigns or external writes. Strict mode exits non-zero if any dependency is not ready. (`2f51693`)
 - **Release evidence contract.** The demo guide and `evidence/` documentation define secret-free captures and clearly separate local tests, provider readiness, and real external publication. (`2f51693`, `985cdc7`)
 
 ## Engineering and verification
@@ -88,7 +89,6 @@ OpenQuest is an approval-gated, evidence-first harness for open-source contribut
 
 ## Current limitations
 
-- The default container deliberately injects no production Qodo review authority and no independent repair verifier, so full readiness fails closed.
 - No production adapter or API route executes approved GitHub writes.
 - The web UI exposes the next allowed `preflight`, `implement`, or `verify` action with clear sandboxing and no-write guidance; an unavailable or unsafe provider still stops the campaign fail-closed.
 - Runtime discovery has no fixture/demo fallback and requires ready TrueForge, GitHub MCP, Daytona, registered agent, and trusted skill configuration.

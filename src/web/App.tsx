@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 
-import { createOpenQuestApi, type OpenQuestApi, type OpenQuestApiOptions } from "./api.js";
+import { createOpenQuestApi, type OpenQuestApi } from "./api.js";
 import { DiscoverPage } from "./routes/DiscoverPage.js";
 import { CampaignPage } from "./routes/CampaignPage.js";
 import { OnboardingPage } from "./routes/OnboardingPage.js";
@@ -8,30 +8,19 @@ import type { Space } from "../domain/discovery.js";
 
 interface AppProps {
   readonly api?: OpenQuestApi;
-  readonly operatorCapability?: OpenQuestApiOptions["operatorCapability"];
 }
 
-export function App({ api, operatorCapability }: AppProps) {
-  const [enteredCapability, setEnteredCapability] = useState("");
-  const [connected, setConnected] = useState(operatorCapability !== undefined);
-  const activeCapability = useMemo(
-    () => operatorCapability ?? (connected ? () => enteredCapability : undefined),
-    [connected, enteredCapability, operatorCapability],
-  );
+export function App({ api }: AppProps) {
   const browserApi = useMemo(
-    () => createOpenQuestApi(
-      activeCapability === undefined
-        ? { fetch: window.fetch.bind(window), baseUrl: import.meta.env.BASE_URL.replace(/\/$/u, "") }
-        : { fetch: window.fetch.bind(window), baseUrl: import.meta.env.BASE_URL.replace(/\/$/u, ""), operatorCapability: activeCapability },
-    ),
-    [activeCapability],
+    () => createOpenQuestApi({ fetch: window.fetch.bind(window), baseUrl: import.meta.env.BASE_URL.replace(/\/$/u, "") }),
+    [],
   );
   const client = api ?? browserApi;
-  const [location, setLocation] = useState(() => `${window.location.pathname}${window.location.search}`);
+  const [location, setLocation] = useState(currentAppLocation);
 
   useEffect(() => {
     const updateLocation = () => {
-      setLocation(`${window.location.pathname}${window.location.search}`);
+      setLocation(currentAppLocation());
     };
     window.addEventListener("popstate", updateLocation);
     return () => {
@@ -40,20 +29,31 @@ export function App({ api, operatorCapability }: AppProps) {
   }, []);
 
   const navigate = (destination: string) => {
-    window.history.pushState({}, "", destination);
+    window.history.pushState({}, "", `${appBasePath()}${destination}`);
     setLocation(destination);
   };
   useEffect(() => {
     window.setTimeout(() => document.querySelector<HTMLElement>("h1")?.focus(), 0);
-  }, [location, connected]);
-  if (api === undefined && !connected) return <main className="state-card connection-card"><h1 tabIndex={-1}>Connect an operator capability</h1><p>Your capability stays only in this page's memory and is required before authenticated discovery starts.</p><label htmlFor="operator-capability">Operator capability</label><input autoComplete="off" id="operator-capability" onChange={(event) => { setEnteredCapability(event.target.value); }} type="password" value={enteredCapability} /><button disabled={enteredCapability.trim() === ""} onClick={() => { setConnected(true); }} type="button">Connect</button></main>;
+  }, [location]);
   const [path = "/"] = location.split("?");
   const selectedSpaces = spacesFromLocation();
-  const disconnect = () => { setEnteredCapability(""); setConnected(false); navigate("/"); };
-  if (path === "/discover" && selectedSpaces.length > 0) return <><button className="disconnect" onClick={disconnect} type="button">Disconnect</button><DiscoverPage api={client} navigate={navigate} spaces={selectedSpaces} /></>;
+  if (path === "/discover" && selectedSpaces.length > 0) return <DiscoverPage api={client} navigate={navigate} spaces={selectedSpaces} />;
   const campaignId = campaignIdFromPath(path);
-  if (campaignId !== undefined) return <><button className="disconnect" onClick={disconnect} type="button">Disconnect</button><CampaignPage api={client} campaignId={campaignId} key={campaignId} /></>;
-  return <><button className="disconnect" onClick={() => { setEnteredCapability(""); setConnected(false); }} type="button">Disconnect</button>{path === "/discover" ? <p className="state-card" role="status">Choose spaces before discovering repositories.</p> : null}<OnboardingPage api={client} navigate={navigate} /></>;
+  if (campaignId !== undefined) return <CampaignPage api={client} campaignId={campaignId} key={campaignId} />;
+  return <>{path === "/discover" ? <p className="state-card" role="status">Choose spaces before discovering repositories.</p> : null}<OnboardingPage api={client} navigate={navigate} /></>;
+}
+
+function currentAppLocation(): string {
+  const basePath = appBasePath();
+  const path = basePath !== "" && window.location.pathname.startsWith(`${basePath}/`)
+    ? window.location.pathname.slice(basePath.length)
+    : window.location.pathname;
+  return `${path}${window.location.search}`;
+}
+
+function appBasePath(): string {
+  const base = import.meta.env.BASE_URL.replace(/\/$/u, "");
+  return base === "/" ? "" : base;
 }
 
 function campaignIdFromPath(path: string): string | undefined {

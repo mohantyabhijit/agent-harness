@@ -7,8 +7,6 @@ This script demonstrates only behavior that exists in the current release. It ma
 1. Use a clean terminal and disable shell tracing. Close panes that contain tokens, cookies, provider settings, or private repositories.
 2. Confirm Node.js 22 or newer and install with `npm ci`.
 3. Start TrueForge on `127.0.0.1:8790`. Configure a model, authorized GitHub MCP, and a ready Daytona provider in TrueForge's own credential store.
-4. Export distinct generated `OPERATOR_BEARER_TOKEN` and `REVIEW_PROVIDER_BEARER_TOKEN` values in the terminal that will start OpenQuest. Do not display them.
-5. Set `QODO_BOT_IDENTITIES` to an independently verified GitHub bot login. This does not make Qodo ready by itself.
 6. Set `OPENQUEST_SKILL_GIT_REF` to the full SHA of a pushed commit containing the OpenQuest skill. Check and register the skill/agent:
 
    ```sh
@@ -27,24 +25,23 @@ This script demonstrates only behavior that exists in the current release. It ma
 
 ## Honest readiness checkpoint
 
-Read the `API readiness / Qodo` line aloud. In the default composition it should report not-ready, normally because the authenticated review authority or repair verifier is unavailable. This is the current release boundary. Do not edit screenshots, use fixture files, or describe this status as a live Qodo pass.
+Read the `API readiness` line aloud. It confirms the deployed OpenQuest process is ready; Qodo is not part of this service.
 
 If demonstrating only implemented campaign behavior, continue with the readiness limitation visible in the evidence notes. If the goal is a full Qodo-to-repair demo, stop: that requires production implementations of both missing provider seams and is outside this release.
 
 ## Browser walkthrough
 
 1. Open the exact browser URL printed by the preflight.
-2. Enter the operator capability without exposing it. Explain that it stays only in page memory and disappears on reload, close, or **Disconnect**.
-3. Choose a curated space such as **Developer tools**, then select **Continue to discovery**.
-4. Explain that repository and issue cards are live TrueForge/GitHub read results with validated canonical source URLs. There is no runtime fixture fallback.
-5. Open source evidence in a separate tab and confirm repository identity, license/activity evidence, and issue URL match the card before selecting it.
+2. Choose a curated space such as **Developer tools**, then select **Continue to discovery**.
+3. Explain that repository and issue cards are live TrueForge/GitHub read results with validated canonical source URLs. There is no runtime fixture fallback.
+4. Open source evidence in a separate tab and confirm repository identity, license/activity evidence, and issue URL match the card before selecting it.
 6. Start an **Easy Win** or **Long-Term Challenge**. The resulting URL contains the durable campaign ID. Record that ID in the private demo notes only if it contains no sensitive information.
 7. Reload the campaign URL. Show that SQLite restores the issue identity, status, timeline, evidence, parent session ID, Qodo state, and any current approval surface.
 8. In the embedded OpenQuest agent, explain that GitHub tools are read-only. Do not ask it to post, push, or create a pull request.
 
 ## Static preflight and campaign operations
 
-The campaign screen presents only the next action allowed by durable state. Use **Start static preflight** to begin the read-only repository examination; the control explains that it creates a fresh sandbox session and performs no GitHub write. The action requires the in-memory operator capability and records a durable claim before work begins.
+The campaign screen presents only the next action allowed by durable state. Use **Start static preflight** to begin the read-only repository examination; the control explains that it creates a fresh sandbox session and performs no GitHub write. The action records a durable claim before work begins.
 
 After completion, refresh the campaign page and show:
 
@@ -72,7 +69,7 @@ The default release cannot demonstrate a live Qodo pass or independently verifie
 
 ## Finish and capture
 
-1. Select **Disconnect** and show that the browser requests the capability again.
+1. Reload the page and show that the discovery flow remains available without a credential prompt.
 2. Run the four existing release checks in a clean terminal:
 
    ```sh

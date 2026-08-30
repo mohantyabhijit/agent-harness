@@ -6,7 +6,7 @@ OpenQuest is a local, single-operator web application around TrueForge. The Reac
 
 ```mermaid
 flowchart LR
-    B[Browser UI] -->|GET or operator bearer POST| A[Fastify API]
+    B[Browser UI] -->|HTTPS| A[Fastify API]
     B -->|parent session UI| T[TrueForge]
     A --> C[Application use cases]
     C --> D[(SQLite campaign store)]
@@ -39,7 +39,7 @@ One public GitHub issue maps to one campaign. Creation checks for an existing re
 
 The browser does not hold authoritative campaign memory. It reloads a sanitized projection from SQLite. The embedded TrueForge panel resumes the parent session, while every discovery or campaign operation uses a fresh child session. Child packets contain the single campaign's identity, verified direct evidence, approval digests and statuses, current commit when known, a bounded goal, and operation-specific context. They do not inherit another campaign's SQLite record or approval authority.
 
-This is local durable memory, not a multi-user or distributed persistence system. Browser operator capability is memory-only React state and disappears on reload, close, or disconnect.
+This is local durable memory, not a multi-user or distributed persistence system. The browser starts directly without storing a credential.
 
 ## Live discovery and read-only chat
 
@@ -71,7 +71,7 @@ Implementation requires a successful preflight commit. Verification requires a r
 
 The server accepts only five external-action payload shapes: issue comment, assignment request, branch push, pull-request creation, and pull-request update. A server-owned durable proposal binds the entire validated payload, SHA-256 digest, campaign version, campaign status, current commit where applicable, and accessible change brief.
 
-The UI displays every exact field and requires the operator to confirm review. `POST /api/campaigns/:id/approvals` requires the operator capability, an idempotency key, proposal ID, exact digest, and expected campaign version. The store issues one active approval, expires it after ten minutes, and invalidates mismatched, replayed, stale, or already-consumed authority. External execution first atomically consumes the approval and records a claim. An unknown callback outcome is fenced for explicit reconciliation rather than retried blindly.
+The UI displays every exact field and requires the operator to confirm review. `POST /api/campaigns/:id/approvals` requires an idempotency key, proposal ID, exact digest, and expected campaign version. The store issues one active approval, expires it after ten minutes, and invalidates mismatched, replayed, stale, or already-consumed authority. External execution first atomically consumes the approval and records a claim. An unknown callback outcome is fenced for explicit reconciliation rather than retried blindly.
 
 The current HTTP composition stops at approval issuance. There is no route or production GitHub-write adapter wired to `executeApprovedExternalAction`, so comments, assignment requests, pushes, pull-request creation, and pull-request updates cannot be executed by this release. This distinction is deliberate: approval is authority, not evidence that an action occurred.
 
@@ -87,7 +87,7 @@ The default container cannot complete this path because both authenticated revie
 
 ## HTTP and readiness contracts
 
-All request query strings are rejected unless empty, and request bodies are strictly validated. `GET` and `HEAD` routes are read-only and do not require bearer authorization. Other routes require the operator capability except review synchronization, which requires a distinct review-provider capability. Public campaign responses omit raw Qodo bodies, source paths and lines, approval payload authority, and arbitrary event fields.
+All request query strings are rejected unless empty, and request bodies are strictly validated. This single-operator deployment does not require browser bearer authorization. Public campaign responses omit raw Qodo bodies, source paths and lines, approval payload authority, and arbitrary event fields.
 
 Key routes are:
 

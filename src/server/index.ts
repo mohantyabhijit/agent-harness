@@ -10,7 +10,6 @@ let shuttingDown = false;
 async function shutdown(): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
-  await container.reviewJob.stop();
   await app.close();
   await container.close();
 }
@@ -20,7 +19,6 @@ process.once("SIGTERM", () => { void shutdown(); });
 
 try {
   await app.listen({ host: "127.0.0.1", port: config.PORT });
-  container.reviewJob.start();
 } catch (error) {
   await shutdown();
   throw error;

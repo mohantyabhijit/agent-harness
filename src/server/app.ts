@@ -6,7 +6,7 @@ import { CreateCampaign, type Clock, type IdGenerator } from "../application/cre
 import { DiscoverRepositories } from "../application/discover.js";
 import { ApprovalIssuanceConflict, CampaignIdentityConflict, CampaignVersionConflict, type CampaignStore } from "../application/ports/campaign-store.js";
 import type { GithubCatalogPort } from "../application/ports/github-catalog.js";
-import { HarnessError, HarnessUnavailable, type HarnessPort } from "../application/ports/harness.js";
+import { HarnessError, type HarnessPort } from "../application/ports/harness.js";
 import { RunCampaign } from "../application/run-campaign.js";
 import { SyncReview } from "../application/sync-review.js";
 import { SyncAuthenticatedReview } from "../application/sync-authenticated-review.js";
@@ -16,7 +16,6 @@ import { registerDiscoveryRoutes } from "./routes/discovery.js";
 import { registerReviewRoutes } from "./routes/reviews.js";
 import { registerSpaceRoutes } from "./routes/spaces.js";
 import { ApiProblem } from "./routes/support.js";
-import type { AuthorizationPolicy, Capability } from "./authorization.js";
 import type { QodoReviewJobHealth } from "./jobs/qodo-review-job.js";
 import type { QodoReviewPort } from "../application/ports/qodo-review.js";
 import type { RepairVerifierPort } from "../application/ports/repair-verifier.js";
@@ -29,7 +28,6 @@ export interface AppDependencies {
   readonly harness: HarnessPort;
   readonly clock: Clock;
   readonly ids: IdGenerator;
-  readonly authorization: AuthorizationPolicy;
   readonly reviewHealth?: () => QodoReviewJobHealth;
   readonly qodoReview?: QodoReviewPort;
   readonly repairVerifier?: RepairVerifierPort;
@@ -43,16 +41,9 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
   const createCampaign = new CreateCampaign(dependencies.store, dependencies.harness, dependencies.clock, dependencies.ids);
   const runCampaign = new RunCampaign(dependencies.store, dependencies.harness, dependencies.clock, dependencies.ids);
   const syncReview = new SyncReview(dependencies.store, dependencies.harness, dependencies.clock, dependencies.ids, dependencies.repairVerifier);
-  const qodoReview = dependencies.qodoReview ?? { getReview: async () => { throw new HarnessUnavailable(); } };
-  const authenticatedReview = new SyncAuthenticatedReview(dependencies.store, qodoReview, syncReview);
 
   app.addHook("preValidation", async (request) => {
     emptyQuerySchema.parse(request.query);
-  });
-  app.addHook("onRequest", async (request) => {
-    if (request.method === "GET" || request.method === "HEAD") return;
-    const routeConfig = request.routeOptions.config as { capability?: Capability };
-    dependencies.authorization.require(request, routeConfig.capability ?? "operator");
   });
   app.setErrorHandler((error, _request, reply) => {
     const problem = mapError(error);
@@ -77,7 +68,13 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
   registerDiscoveryRoutes(app, { discover, catalog: dependencies.catalog });
   registerCampaignRoutes(app, { createCampaign, runCampaign, store: dependencies.store, clock: dependencies.clock });
   registerApprovalRoutes(app, { store: dependencies.store, clock: dependencies.clock, ids: dependencies.ids });
-  registerReviewRoutes(app, { syncReview: authenticatedReview, ...(dependencies.reviewSyncTimeoutMs === undefined ? {} : { timeoutMs: dependencies.reviewSyncTimeoutMs }) });
+  // Qodo review intake is an optional repository-maintenance integration. It
+  // is not part of the autonomous OpenQuest workflow and production does not
+  // configure it. Tests and a separately wired internal deployment may opt in.
+  if (dependencies.qodoReview !== undefined) {
+    const authenticatedReview = new SyncAuthenticatedReview(dependencies.store, dependencies.qodoReview, syncReview);
+    registerReviewRoutes(app, { syncReview: authenticatedReview, ...(dependencies.reviewSyncTimeoutMs === undefined ? {} : { timeoutMs: dependencies.reviewSyncTimeoutMs }) });
+  }
   return app;
 }
 
