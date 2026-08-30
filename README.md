@@ -114,6 +114,10 @@ npm test
 
 The repository also defines targeted integration and Playwright commands. `npm run test:e2e` includes a controlled local contribution flow that exercises discovery through separate branch and pull-request approvals without contacting or mutating GitHub. The quality workflow installs with `npm ci` and runs type-check, lint, build, and the test suite on pushes and pull requests with read-only repository permissions.
 
+## External Contribution Example
+
+[tinyfish-io/tinyfish-cookbook PR #267](https://github.com/tinyfish-io/tinyfish-cookbook/pull/267) is a public example of an external pull request raised through the agent-assisted OpenQuest workflow. It addresses [issue #255](https://github.com/tinyfish-io/tinyfish-cookbook/issues/255) by removing two unavailable deployments from the Featured live-demo table, replacing their dead README links with an honest availability notice, and keeping both recipes discoverable in the catalog. The live GitHub record is the source of truth for its current review and merge status.
+
 ## Qodo Code Review Evidence
 
 Every repository change follows the [change checklist](TODO.md): a focused branch and PR, recorded verification, Qodo review of the latest commit, resolution or documented disposition of findings, a follow-up Qodo review after repairs, passing GitHub checks, and an authorized maintainer merge. Direct pushes to `main` do not count as reviewed work.
