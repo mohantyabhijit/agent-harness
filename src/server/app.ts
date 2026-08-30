@@ -99,6 +99,7 @@ function mapError(error: unknown): ApiProblem {
       campaign_not_found: [404, "campaign_not_found", "Campaign was not found"],
       campaign_conflict: [409, "campaign_conflict", "Campaign conflicts with current state"],
       approval_required: [412, "approval_required", "Exact action approval is required"],
+      external_action_outcome_unknown: [409, "publication_outcome_unknown", "Publication outcome is unknown; reconciliation is required"],
       invalid_transition: [422, "invalid_transition", "Campaign transition is not allowed"],
       invalid_request: [400, "invalid_request", "Request validation failed"],
     } as const;

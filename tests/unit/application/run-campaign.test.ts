@@ -282,7 +282,7 @@ describe("RunCampaign", () => {
     });
 
     const first = service.executeApprovedExternalAction("campaign-1", approvalRequest(), action);
-    await expect(first).rejects.toEqual(new Error("External action outcome is unknown; reconciliation required"));
+    await expect(first).rejects.toMatchObject({ code: "external_action_outcome_unknown", message: "External action outcome is unknown; reconciliation required" });
     expect(JSON.stringify((await store.get("campaign-1"))?.events)).not.toContain("top-secret");
     expect((await store.get("campaign-1"))?.events.map(({ eventType }) => eventType)).toEqual([
       "external_action_proposed",
@@ -317,7 +317,7 @@ describe("RunCampaign", () => {
 
     await expect(
       service.executeApprovedExternalAction("campaign-1", approvalRequest(), action),
-    ).rejects.toEqual(new Error("External action outcome is unknown; reconciliation required"));
+    ).rejects.toMatchObject({ code: "external_action_outcome_unknown", message: "External action outcome is unknown; reconciliation required" });
     expect((await store.get("campaign-1"))?.events.map(({ eventType }) => eventType)).toEqual([
       "external_action_proposed",
       "external_action_attempted",
@@ -465,14 +465,15 @@ describe("RunCampaign", () => {
     expect(claim.status).toBe("outcome_unknown");
     await expect(store.replaceCurrentCommit("campaign-1", "b".repeat(40), unknown.campaign.version, unknown.campaign.status)).rejects.toThrow(/external action/i);
     await expect(service.reconcileExternalAction("campaign-1", { claimId: "stale-claim", disposition: "confirmed_not_completed" })).rejects.toMatchObject({ code: "invalid_transition" });
-    await expect(service.reconcileExternalAction("campaign-1", { claimId: claim.id, disposition: "confirmed_completed", observedCanonicalHead: "b".repeat(40) })).resolves.toMatchObject({ version: 8 });
+    const observedPullRequest = "https://github.com/owner/repo/pull/17";
+    await expect(service.reconcileExternalAction("campaign-1", { claimId: claim.id, disposition: "confirmed_completed", observedPullRequest })).resolves.toMatchObject({ version: 8, status: "pull_request_open" });
 
     const reconciled = await store.get("campaign-1");
     if (reconciled === undefined) throw new Error("missing reconciled campaign");
-    expect(reconciled.externalActionClaims[0]).toMatchObject({ status: "reconciled", disposition: "confirmed_completed", observedCanonicalHead: "b".repeat(40) });
-    expect(reconciled.externalReferences).toContainEqual({ kind: "commit", value: "b".repeat(40) });
+    expect(reconciled.externalActionClaims[0]).toMatchObject({ status: "reconciled", disposition: "confirmed_completed" });
+    expect(reconciled.externalReferences).toContainEqual({ kind: "pull_request", value: observedPullRequest });
     expect(reconciled.approvals[0]?.status).toBe("consumed");
-    await expect(service.executeApprovedExternalAction("campaign-1", approvalRequest(), async () => undefined)).rejects.toThrow(/available|current campaign head/i);
+    await expect(service.executeApprovedExternalAction("campaign-1", approvalRequest(), async () => undefined)).rejects.toThrow(/approval|required|available|current campaign head/i);
   });
 
   it.each([
@@ -674,7 +675,7 @@ describe("RunCampaign", () => {
     if (claimId === undefined) throw new Error("missing uncertain claim");
     store.failNextEvent = true;
 
-    await expect(service.reconcileExternalAction("campaign-1", { claimId, disposition: "confirmed_completed", observedCanonicalHead: "b".repeat(40) })).rejects.toThrow(/event persistence/i);
+    await expect(service.reconcileExternalAction("campaign-1", { claimId, disposition: "confirmed_not_completed" })).rejects.toThrow(/event persistence/i);
     expect(await store.get("campaign-1")).toEqual(before);
   });
 });

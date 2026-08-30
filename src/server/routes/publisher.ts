@@ -7,6 +7,12 @@ import { ApiProblem, campaignIdSchema } from "./support.js";
 
 const params = z.object({ id: campaignIdSchema }).strict();
 const body = z.object({ approvalId: campaignIdSchema, payload: z.record(z.string(), z.unknown()) }).strict();
+const reconciliationBody = z.object({
+  claimId: campaignIdSchema,
+  disposition: z.enum(["confirmed_completed", "confirmed_not_completed"]),
+  observedCanonicalHead: z.string().regex(/^[0-9a-f]{40}$/u).optional(),
+  observedPullRequest: z.url().max(2_048).optional(),
+}).strict();
 export function registerPublisherRoutes(app: FastifyInstance, dependencies: { runCampaign: RunCampaign; publisher: PublisherPort }): void {
   app.post("/api/campaigns/:id/publish", async (request) => {
     const { id } = params.parse(request.params);
@@ -35,6 +41,10 @@ export function registerPublisherRoutes(app: FastifyInstance, dependencies: { ru
       return published;
     }, (published) => ({ kind: "pull_request", value: published.pullRequest }));
     return { pullRequest: result.pullRequest };
+  });
+  app.post("/api/campaigns/:id/publication/reconcile", async (request) => {
+    const { id } = params.parse(request.params);
+    return dependencies.runCampaign.reconcileExternalAction(id, reconciliationBody.parse(request.body));
   });
 }
 

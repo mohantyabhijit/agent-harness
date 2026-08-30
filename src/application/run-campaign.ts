@@ -18,6 +18,7 @@ import { ApplicationError } from "./errors.js";
 import {
   deepFreeze,
   externalActionDigest,
+  isPullRequest,
   validateExternalActionPayload,
   type ExternalActionPayload,
 } from "./external-action.js";
@@ -43,6 +44,7 @@ export interface ExternalActionReconciliation {
   readonly claimId: string;
   readonly disposition: ExternalActionDisposition;
   readonly observedCanonicalHead?: string;
+  readonly observedPullRequest?: string;
 }
 
 export interface ExternalActionStaleRecovery {
@@ -183,7 +185,7 @@ export class RunCampaign {
       publishedReference = completionReference?.(result, authorized);
     } catch {
       await this.markOutcomeUnknown(campaignId, claimId, approval.action, approval.actionDigest, snapshot);
-      throw new Error("External action outcome is unknown; reconciliation required");
+      throw new ApplicationError("external_action_outcome_unknown", "External action outcome is unknown; reconciliation required");
     }
 
     try {
@@ -191,7 +193,7 @@ export class RunCampaign {
         ? claimed.payload.commitSha
         : undefined;
       const resultingVersion = snapshot.campaign.version + (
-        claimed.payload.action === "update_pr" || (newCommitSha !== undefined && newCommitSha !== campaignCurrentCommit(snapshot)) ? 1 : 0
+        claimed.payload.action === "update_pr" || (claimed.payload.action === "create_pr" && publishedReference?.kind === "pull_request") || (newCommitSha !== undefined && newCommitSha !== campaignCurrentCommit(snapshot)) ? 1 : 0
       );
       await this.store.completeExternalAction(campaignId, {
         claimId,
@@ -207,7 +209,7 @@ export class RunCampaign {
       });
     } catch {
       await this.markOutcomeUnknown(campaignId, claimId, approval.action, approval.actionDigest, snapshot);
-      throw new Error("External action outcome is unknown; reconciliation required");
+      throw new ApplicationError("external_action_outcome_unknown", "External action outcome is unknown; reconciliation required");
     }
     return result;
   }
@@ -219,6 +221,7 @@ export class RunCampaign {
     if (claim === undefined || claim.status !== "outcome_unknown") throw new ApplicationError("invalid_transition");
     const current = campaignCurrentCommit(snapshot);
     let confirmedUpdate = false;
+    let confirmedCreate = false;
     if (reconciliation.disposition === "confirmed_completed" && claim.payload.action === "update_pr") {
       confirmedUpdate = true;
       const updatePayload = claim.payload;
@@ -227,12 +230,26 @@ export class RunCampaign {
         throw new ApplicationError("campaign_conflict");
       }
     }
+    if (reconciliation.disposition === "confirmed_completed" && claim.payload.action === "create_pr") {
+      confirmedCreate = true;
+      if (reconciliation.observedPullRequest === undefined || !isPullRequest(reconciliation.observedPullRequest, claim.payload.repository) ||
+        reconciliation.observedCanonicalHead !== undefined || current !== claim.payload.commitSha || snapshot.campaign.status !== "contribution_approval") {
+        throw new ApplicationError("campaign_conflict");
+      }
+    }
+    if (reconciliation.disposition === "confirmed_completed" && claim.payload.action === "push_branch") {
+      if (reconciliation.observedCanonicalHead !== claim.payload.commitSha || reconciliation.observedPullRequest !== undefined) throw new ApplicationError("campaign_conflict");
+    }
+    if (reconciliation.disposition === "confirmed_not_completed" && (reconciliation.observedCanonicalHead !== undefined || reconciliation.observedPullRequest !== undefined)) {
+      throw new ApplicationError("invalid_request");
+    }
     const preserveVerifiedRepair = reconciliation.disposition === "confirmed_not_completed" && claim.payload.action === "update_pr";
-    const resultingVersion = snapshot.campaign.version + (confirmedUpdate || (!preserveVerifiedRepair && reconciliation.observedCanonicalHead !== undefined && reconciliation.observedCanonicalHead !== current) ? 1 : 0);
+    const resultingVersion = snapshot.campaign.version + (confirmedUpdate || confirmedCreate || (!preserveVerifiedRepair && reconciliation.observedCanonicalHead !== undefined && reconciliation.observedCanonicalHead !== current) ? 1 : 0);
     await this.store.reconcileExternalAction(campaignId, {
       claimId: reconciliation.claimId,
       disposition: reconciliation.disposition,
       ...(reconciliation.observedCanonicalHead === undefined ? {} : { observedCanonicalHead: reconciliation.observedCanonicalHead }),
+      ...(reconciliation.observedPullRequest === undefined ? {} : { observedPullRequest: reconciliation.observedPullRequest }),
       reconciledAt: this.clock.now(),
       event: {
         id: this.nextId(),
@@ -243,6 +260,7 @@ export class RunCampaign {
           actionDigest: claim.actionDigest,
           disposition: reconciliation.disposition,
           ...(reconciliation.observedCanonicalHead === undefined ? {} : { observedCanonicalHead: reconciliation.observedCanonicalHead }),
+          ...(reconciliation.observedPullRequest === undefined ? {} : { observedPullRequest: reconciliation.observedPullRequest }),
           claimedCampaignVersion: snapshot.campaign.version,
           resultingCampaignVersion: resultingVersion,
           reason: "human_external_action_reconciliation",
@@ -574,15 +592,17 @@ function parseExternalActionReconciliation(input: unknown): ExternalActionReconc
   if (!isRecord(input)) throw new Error("Invalid external action reconciliation");
   const keys = Object.keys(input);
   if (
-    keys.some((key) => !["claimId", "disposition", "observedCanonicalHead"].includes(key)) ||
+    keys.some((key) => !["claimId", "disposition", "observedCanonicalHead", "observedPullRequest"].includes(key)) ||
     typeof input.claimId !== "string" || input.claimId.trim().length === 0 ||
     (input.disposition !== "confirmed_completed" && input.disposition !== "confirmed_not_completed") ||
-    (input.observedCanonicalHead !== undefined && (typeof input.observedCanonicalHead !== "string" || !/^[0-9a-f]{40}$/u.test(input.observedCanonicalHead)))
+    (input.observedCanonicalHead !== undefined && (typeof input.observedCanonicalHead !== "string" || !/^[0-9a-f]{40}$/u.test(input.observedCanonicalHead))) ||
+    (input.observedPullRequest !== undefined && (typeof input.observedPullRequest !== "string" || input.observedPullRequest.length > 2_048))
   ) throw new Error("Invalid external action reconciliation");
   return {
     claimId: input.claimId,
     disposition: input.disposition,
     ...(input.observedCanonicalHead === undefined ? {} : { observedCanonicalHead: input.observedCanonicalHead }),
+    ...(input.observedPullRequest === undefined ? {} : { observedPullRequest: input.observedPullRequest }),
   };
 }
 

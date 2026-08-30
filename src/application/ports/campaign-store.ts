@@ -97,6 +97,7 @@ export interface ExternalActionReconciliationRecord {
   readonly claimId: string;
   readonly disposition: ExternalActionDisposition;
   readonly observedCanonicalHead?: string;
+  readonly observedPullRequest?: string;
   readonly reconciledAt: string;
   readonly event: CampaignEventInput;
 }

@@ -626,14 +626,15 @@ export class SqliteCampaignStore implements CampaignStore {
       const current = this.#currentCommit(campaignId);
       const changed = record.newCommitSha !== undefined && record.newCommitSha !== current;
       const returnsToReview = payload.action === "update_pr";
-      const resultingVersion = claim.claimedCampaignVersion + (changed || returnsToReview ? 1 : 0);
+      const opensPullRequest = payload.action === "create_pr" && record.publishedReference?.kind === "pull_request";
+      const resultingVersion = claim.claimedCampaignVersion + (changed || returnsToReview || opensPullRequest ? 1 : 0);
       assertExternalActionEventVersion(record.completedEvent.payload, claim.claimedCampaignVersion, resultingVersion);
       if (changed) {
         this.#replaceCommit(campaignId, record.newCommitSha);
       }
       if (record.publishedReference !== undefined) this.#recordPublishedReference(campaignId, payload, record.publishedReference);
-      if (changed || returnsToReview) {
-        const nextStatus = returnsToReview ? "qodo_review" : claim.claimedCampaignStatus;
+      if (changed || returnsToReview || opensPullRequest) {
+        const nextStatus = returnsToReview ? "qodo_review" : opensPullRequest ? "pull_request_open" : claim.claimedCampaignStatus;
         const updated = this.#database.prepare("UPDATE campaigns SET version = version + 1, status = ?, updated_at = ? WHERE id = ? AND version = ? AND status = ?").run(nextStatus, completedAt, campaignId, claim.claimedCampaignVersion, claim.claimedCampaignStatus);
         if (updated.changes !== 1) throw new CampaignVersionConflict(campaignId, claim.claimedCampaignVersion);
       }
@@ -690,16 +691,22 @@ export class SqliteCampaignStore implements CampaignStore {
       const preserveVerifiedRepair = record.disposition === "confirmed_not_completed" && claim.payload.action === "update_pr";
       const changed = !preserveVerifiedRepair && record.observedCanonicalHead !== undefined && record.observedCanonicalHead !== current;
       const confirmedUpdate = record.disposition === "confirmed_completed" && claim.payload.action === "update_pr";
+      const confirmedCreate = record.disposition === "confirmed_completed" && claim.payload.action === "create_pr";
       if (confirmedUpdate && (record.observedCanonicalHead !== claim.payload.commitSha || current !== claim.payload.commitSha || campaign.status !== "repair" || this.#currentPullRequest(campaignId) !== claim.payload.pullRequest)) {
         throw new Error("Confirmed update_pr reconciliation does not match current authority");
       }
-      const resultingVersion = campaign.version + (changed || confirmedUpdate ? 1 : 0);
+      if (confirmedCreate && (record.observedPullRequest === undefined || !isPullRequest(record.observedPullRequest, claim.payload.repository) || current !== claim.payload.commitSha || campaign.status !== "contribution_approval")) {
+        throw new Error("Confirmed create_pr reconciliation does not match current authority");
+      }
+      const resultingVersion = campaign.version + (changed || confirmedUpdate || confirmedCreate ? 1 : 0);
       assertExternalActionEventVersion(record.event.payload, campaign.version, resultingVersion);
       if (changed) {
         this.#replaceCommit(campaignId, record.observedCanonicalHead);
       }
-      if (changed || confirmedUpdate) {
-        const nextStatus = confirmedUpdate ? "qodo_review" : campaign.status;
+      if (record.disposition === "confirmed_completed" && claim.payload.action === "push_branch") this.#recordPublishedReference(campaignId, claim.payload, { kind: "branch", value: claim.payload.branch });
+      if (confirmedCreate && record.observedPullRequest !== undefined) this.#recordPublishedReference(campaignId, claim.payload, { kind: "pull_request", value: record.observedPullRequest });
+      if (changed || confirmedUpdate || confirmedCreate) {
+        const nextStatus = confirmedUpdate ? "qodo_review" : confirmedCreate ? "pull_request_open" : campaign.status;
         const updated = this.#database.prepare("UPDATE campaigns SET version = version + 1, status = ?, updated_at = ? WHERE id = ? AND version = ? AND status = ?").run(nextStatus, reconciledAt, campaignId, campaign.version, campaign.status);
         if (updated.changes !== 1) throw new CampaignVersionConflict(campaignId, campaign.version);
       }

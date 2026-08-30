@@ -475,7 +475,8 @@ export class FakeCampaignStore implements CampaignStore {
     }
     const headVersion = this.#validatedExternalActionHeadVersion(claim, snapshot, record.newCommitSha);
     const returnsToReview = claim.payload.action === "update_pr";
-    const resultingVersion = returnsToReview ? snapshot.campaign.version + 1 : headVersion;
+    const opensPullRequest = claim.payload.action === "create_pr" && record.publishedReference?.kind === "pull_request";
+    const resultingVersion = returnsToReview || opensPullRequest ? snapshot.campaign.version + 1 : headVersion;
     assertExternalActionEventVersion(record.completedEvent.payload, claim.claimedCampaignVersion, resultingVersion);
     if (record.newCommitSha !== undefined && singletonCommit(snapshot) !== record.newCommitSha) {
       snapshot.externalReferences = snapshot.externalReferences.filter(({ kind }) => kind !== "commit");
@@ -484,6 +485,7 @@ export class FakeCampaignStore implements CampaignStore {
     }
     if (record.publishedReference !== undefined) this.#recordPublishedReference(snapshot, claim.payload, record.publishedReference);
     if (returnsToReview) snapshot.campaign = { ...snapshot.campaign, status: "qodo_review", version: resultingVersion };
+    if (opensPullRequest) snapshot.campaign = { ...snapshot.campaign, status: "pull_request_open", version: resultingVersion };
     this.#pushEvent(snapshot, record.completedEvent);
     this.#eventIds.add(record.completedEvent.id);
     Object.assign(claim, { status: "completed", closedAt: record.completedAt });
@@ -537,10 +539,14 @@ export class FakeCampaignStore implements CampaignStore {
     const preserveVerifiedRepair = record.disposition === "confirmed_not_completed" && claim.payload.action === "update_pr";
     const changed = !preserveVerifiedRepair && record.observedCanonicalHead !== undefined && record.observedCanonicalHead !== current;
     const confirmedUpdate = record.disposition === "confirmed_completed" && claim.payload.action === "update_pr";
+    const confirmedCreate = record.disposition === "confirmed_completed" && claim.payload.action === "create_pr";
     if (confirmedUpdate && (record.observedCanonicalHead !== claim.payload.commitSha || current !== claim.payload.commitSha || snapshot.campaign.status !== "repair" || singletonPullRequest(snapshot) !== claim.payload.pullRequest)) {
       throw new Error("Confirmed update_pr reconciliation does not match current authority");
     }
-    const resultingVersion = snapshot.campaign.version + (changed || confirmedUpdate ? 1 : 0);
+    if (confirmedCreate && (record.observedPullRequest === undefined || !isPullRequest(record.observedPullRequest, claim.payload.repository) || current !== claim.payload.commitSha || snapshot.campaign.status !== "contribution_approval")) {
+      throw new Error("Confirmed create_pr reconciliation does not match current authority");
+    }
+    const resultingVersion = snapshot.campaign.version + (changed || confirmedUpdate || confirmedCreate ? 1 : 0);
     assertExternalActionEventVersion(record.event.payload, snapshot.campaign.version, resultingVersion);
     if (this.failNextEvent) {
       this.failNextEvent = false;
@@ -550,7 +556,9 @@ export class FakeCampaignStore implements CampaignStore {
       snapshot.externalReferences = snapshot.externalReferences.filter(({ kind }) => kind !== "commit");
       snapshot.externalReferences.push({ kind: "commit", value: record.observedCanonicalHead });
     }
-    if (changed || confirmedUpdate) snapshot.campaign = { ...snapshot.campaign, version: resultingVersion, ...(confirmedUpdate ? { status: "qodo_review" as const } : {}) };
+    if (record.disposition === "confirmed_completed" && claim.payload.action === "push_branch") this.#recordPublishedReference(snapshot, claim.payload, { kind: "branch", value: claim.payload.branch });
+    if (confirmedCreate && record.observedPullRequest !== undefined) this.#recordPublishedReference(snapshot, claim.payload, { kind: "pull_request", value: record.observedPullRequest });
+    if (changed || confirmedUpdate || confirmedCreate) snapshot.campaign = { ...snapshot.campaign, version: resultingVersion, ...(confirmedUpdate ? { status: "qodo_review" as const } : confirmedCreate ? { status: "pull_request_open" as const } : {}) };
     this.#pushEvent(snapshot, record.event);
     this.#eventIds.add(record.event.id);
     Object.assign(claim, {

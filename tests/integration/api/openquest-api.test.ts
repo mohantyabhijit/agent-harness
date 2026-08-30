@@ -64,10 +64,64 @@ describe("OpenQuest API", () => {
     expect(prApprovalId).not.toBe(pushApprovalId);
     expect((await app.inject({ method: "POST", url: "/api/campaigns/campaign-1/publish", headers: operatorHeaders, payload: { approvalId: prApprovalId, payload: createPr } })).json()).toEqual({ pullRequest });
     const completed = await store.get("campaign-1");
+    expect(completed?.campaign).toMatchObject({ status: "pull_request_open", version: 9 });
     expect(completed?.externalReferences.filter(({ kind }) => kind === "pull_request")).toEqual([{ kind: "pull_request", value: pullRequest }]);
     expect(completed?.externalActionClaims.map(({ status }) => status)).toEqual(["completed", "completed"]);
     expect(publisher.pushes).toHaveLength(1);
     expect(publisher.pullRequests).toHaveLength(1);
+    await app.close();
+  });
+
+  it("returns a distinct unknown-publication problem and reconciles a confirmed push", async () => {
+    const source = "a".repeat(40);
+    const target = "b".repeat(40);
+    const authorization = bearerAuthorizationPolicy({ operator: "operator-secret-token-value-000001", reviewProvider: "review-provider-token-value-000002" });
+    const publisher = { pushBranch: async () => { throw new Error("remote uncertainty"); }, createPr: async () => ({ pullRequest: "https://github.com/owner/repo/pull/17" }) };
+    let nextId = 0;
+    const { app, store } = buildTestApp({ publisher, authorization, ids: { next: () => `reconcile-${String(++nextId)}` } });
+    store.seed(campaign({ status: "contribution_approval", version: 7 }));
+    store.seedExternalReference("campaign-1", { kind: "commit", value: source });
+    const payload = { action: "push_branch" as const, repository: "owner/repo", issueNumber: 42, branch: "openquest/fix-42", commitSha: target };
+    await appendProposal(store, payload, { id: "proposal-unknown-push", version: 7, status: "contribution_approval", currentHead: source });
+    const headers = { authorization: "Bearer operator-secret-token-value-000001" };
+    const approval = await app.inject({ method: "POST", url: "/api/campaigns/campaign-1/approvals", headers: { ...headers, "idempotency-key": "approve-unknown-push" }, payload: { proposalId: "proposal-unknown-push", actionDigest: externalActionDigest(payload), expectedCampaignVersion: 7 } });
+    const approvalId = approval.json().approval.id as string;
+
+    const unknown = await app.inject({ method: "POST", url: "/api/campaigns/campaign-1/publish", headers, payload: { approvalId, payload } });
+    expect(unknown.statusCode).toBe(409);
+    expect(unknown.json()).toEqual({ code: "publication_outcome_unknown", message: "Publication outcome is unknown; reconciliation is required" });
+    const claimId = (await store.get("campaign-1"))?.externalActionClaims[0]?.id;
+    if (claimId === undefined) throw new Error("missing publication claim");
+    expect((await app.inject({ method: "POST", url: "/api/campaigns/campaign-1/publication/reconcile", payload: { claimId, disposition: "confirmed_completed", observedCanonicalHead: target } })).statusCode).toBe(401);
+
+    const reconciled = await app.inject({ method: "POST", url: "/api/campaigns/campaign-1/publication/reconcile", headers, payload: { claimId, disposition: "confirmed_completed", observedCanonicalHead: target } });
+    expect(reconciled.json()).toMatchObject({ version: 8, status: "contribution_approval" });
+    const snapshot = await store.get("campaign-1");
+    expect(snapshot?.externalReferences).toEqual(expect.arrayContaining([{ kind: "commit", value: target }, { kind: "branch", value: payload.branch }]));
+    expect(snapshot?.externalActionClaims[0]).toMatchObject({ status: "reconciled", disposition: "confirmed_completed" });
+    await app.close();
+  });
+
+  it("reconciles a failed completion as not completed without inventing publication evidence", async () => {
+    const head = "a".repeat(40);
+    const publisher = new FakePublisher(head, "https://github.com/owner/repo/pull/17");
+    let nextId = 0;
+    const { app, store } = buildTestApp({ publisher, ids: { next: () => `completion-${String(++nextId)}` } });
+    store.seed(campaign({ status: "contribution_approval", version: 7 }));
+    store.seedExternalReference("campaign-1", { kind: "commit", value: head });
+    const payload = { action: "push_branch" as const, repository: "owner/repo", issueNumber: 42, branch: "openquest/fix-42", commitSha: head };
+    await appendProposal(store, payload, { id: "proposal-completion-failure", version: 7, status: "contribution_approval", currentHead: head });
+    const approval = await app.inject({ method: "POST", url: "/api/campaigns/campaign-1/approvals", headers: { "idempotency-key": "approve-completion-failure" }, payload: { proposalId: "proposal-completion-failure", actionDigest: externalActionDigest(payload), expectedCampaignVersion: 7 } });
+    const approvalId = approval.json().approval.id as string;
+    store.failNextExternalCompletion = true;
+
+    expect((await app.inject({ method: "POST", url: "/api/campaigns/campaign-1/publish", payload: { approvalId, payload } })).json()).toMatchObject({ code: "publication_outcome_unknown" });
+    const claimId = (await store.get("campaign-1"))?.externalActionClaims[0]?.id;
+    if (claimId === undefined) throw new Error("missing completion claim");
+    expect((await app.inject({ method: "POST", url: "/api/campaigns/campaign-1/publication/reconcile", payload: { claimId, disposition: "confirmed_not_completed" } })).json()).toMatchObject({ version: 7, status: "contribution_approval" });
+    const snapshot = await store.get("campaign-1");
+    expect(snapshot?.externalReferences.filter(({ kind }) => kind === "branch")).toEqual([]);
+    expect(snapshot?.externalActionClaims[0]).toMatchObject({ status: "reconciled", disposition: "confirmed_not_completed" });
     await app.close();
   });
 
