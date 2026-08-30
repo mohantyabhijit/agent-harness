@@ -18,7 +18,7 @@ The default local composition supports the product flow but deliberately does no
 
 | Integration | What to configure |
 |---|---|
-| Model provider | An OpenAI API key for the checked-in `openai/gpt-5-6-luna` agent, or update the agent manifest to another TrueForge-supported model. |
+| Model provider | An OpenAI API key for the checked-in `openai/gpt-5-6-luna` agent. |
 | GitHub MCP | The only required MCP. Authorize it with GitHub OAuth or a suitably scoped GitHub token. The OpenQuest agent enables only `@read-only` tools; external writes remain a separate approval-gated server action. |
 | Daytona | A Daytona API key and a sandbox provider whose status is `ready`. |
 | Qodo | Optional for the base local app. Install and authorize Qodo on the GitHub repository, then use its verified bot login in `QODO_BOT_IDENTITIES`. Qodo is not an MCP, and the default container does not include production review/repair authority. |
@@ -47,7 +47,7 @@ npm exec -- tsx scripts/register-openquest-agent.ts
 npm run dev
 ```
 
-Open [http://127.0.0.1:5173/](http://127.0.0.1:5173/) and start with the TrueForge chat. Run `npm exec -- tsx scripts/demo.ts --strict` to verify TrueForge, the GitHub MCP, Daytona, and agent registration before a demo.
+Open [http://127.0.0.1:5173/](http://127.0.0.1:5173/) and start with the TrueForge chat. Run `npm exec -- tsx scripts/demo.ts` to inspect TrueForge, the GitHub MCP, Daytona, and agent registration before a demo. Use `--strict` only after production Qodo review authority and repair verification are configured and ready.
 
 For local verification:
 
