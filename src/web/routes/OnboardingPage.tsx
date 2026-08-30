@@ -5,12 +5,11 @@ import { DiscoveryAgentChat } from "../components/DiscoveryAgentChat.js";
 import { SpaceCard } from "../components/SpaceCard.js";
 
 interface OnboardingPageProps {
-  readonly api: Pick<OpenQuestApi, "getSpaces">;
+  readonly api: Pick<OpenQuestApi, "getSpaces" | "classifyDiscoveryIntent">;
   readonly navigate: (destination: string) => void;
-  readonly trueForgeBaseUrl?: string;
 }
 
-export function OnboardingPage({ api, navigate, trueForgeBaseUrl }: OnboardingPageProps) {
+export function OnboardingPage({ api, navigate }: OnboardingPageProps) {
   const [availableSpaces, setAvailableSpaces] = useState<readonly SpaceOption[]>([]);
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
 
@@ -48,7 +47,7 @@ export function OnboardingPage({ api, navigate, trueForgeBaseUrl }: OnboardingPa
         <h1 id="onboarding-title" tabIndex={-1}>What kind of open source pulls you in?</h1>
         <p>Talk naturally with OpenQuest or use a category as a quick start. Every recommendation is checked against live GitHub evidence.</p>
       </section>
-      <DiscoveryAgentChat {...(trueForgeBaseUrl === undefined ? {} : { trueForgeBaseUrl })} />
+      <DiscoveryAgentChat api={api} onSelect={selectSpace} />
       {status === "loading" ? <p aria-live="polite">Loading open-source spaces…</p> : null}
       {status === "error" ? <section className="state-card" role="alert"><p>We could not load spaces.</p><button onClick={loadSpaces} type="button">Try again</button></section> : null}
       {status === "ready" ? (

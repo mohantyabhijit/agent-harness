@@ -18,7 +18,7 @@ The safety boundary is deliberate: repository text and tool output are untrusted
 
 ## What is implemented
 
-- Conversation-first repository discovery through the embedded `openquest` TrueForge agent, plus five quick-start categories: AI & agents, Developer tools, Web & apps, Data & infrastructure, and Civic, science & social impact.
+- Conversation-first repository discovery through the embedded TrueForge chat, plus five one-click category choices: AI & agents, Developer tools, Web & apps, Data & infrastructure, and Civic, science & social impact. Chat clarifies intent, but authoritative repository and issue recommendations appear only in the validated discovery cards.
 - A deterministic top-eight recommendation boundary ranked by popularity plus contribution readiness, strict source-linked GitHub repository/issue validation, and Easy Win versus Long-Term Challenge issue lanes.
 - Durable one-issue/one-campaign orchestration with a campaign state machine, resumable parent TrueForge sessions, fresh child sessions, Daytona sandbox requirements, static preflight, structured implementation, and structured verification.
 - SQLite-backed campaign persistence, migrations, ordered events, leases, optimistic version and identity fencing, restart recovery, external-action claims, outcome reconciliation, and sanitized public projections.

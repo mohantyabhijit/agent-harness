@@ -36,7 +36,7 @@ If demonstrating only implemented campaign behavior, continue with the readiness
 1. Open the exact browser URL printed by the preflight.
 2. Enter the operator capability without exposing it. Explain that it stays only in page memory and disappears on reload, close, or **Disconnect**.
 3. Describe a contribution interest in **Talk to OpenQuest**, or click a quick-start category such as **Developer tools** to navigate immediately to structured discovery.
-4. Explain that chat recommendations and repository/issue cards use live TrueForge/GitHub read results with validated canonical source URLs. Background seeds are leads, not pre-verified results, and there is no Exa runtime or fixture fallback.
+4. Explain that the TrueForge chat clarifies which structured category fits, while authoritative repository and issue recommendations appear only in cards backed by validated canonical GitHub source URLs. Background seeds are leads, not pre-verified results, and there is no Exa runtime or fixture fallback.
 5. Open source evidence in a separate tab and confirm repository identity, license/activity evidence, and issue URL match the card before selecting it.
 6. Start an **Easy Win** or **Long-Term Challenge**. The resulting URL contains the durable campaign ID. Record that ID in the private demo notes only if it contains no sensitive information.
 7. Reload the campaign URL. Show that SQLite restores the issue identity, status, timeline, evidence, parent session ID, Qodo state, and any current approval surface.

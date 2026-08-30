@@ -427,6 +427,24 @@ describe("OpenQuest API", () => {
     await app.close();
   });
 
+  it("uses a bounded TrueForge turn to classify conversational discovery", async () => {
+    const harness = new FakeHarness();
+    harness.enqueueResult("discover", { summary: "classified", artifacts: [], output: { kind: "category", space: "data" } });
+    const { app } = buildTestApp({ harness });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/discovery/classify",
+      payload: { message: "I want database infrastructure projects", history: [] },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ kind: "category", space: "data" });
+    expect(harness.operations).toEqual(["discover"]);
+    expect(harness.packets[0]?.goal).toMatch(/Do not.*search GitHub.*recommend repositories.*perform writes/is);
+    await app.close();
+  });
+
   it("resolves an opaque review locator through the injected authority and idempotently replays it", async () => {
     const head = "a".repeat(40);
     const batch = reviewBatch({ commitSha: head });

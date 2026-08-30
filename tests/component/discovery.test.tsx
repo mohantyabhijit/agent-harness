@@ -6,6 +6,19 @@ import { afterEach, describe, expect, it } from "vitest";
 import { RepositoryCard } from "../../src/web/components/RepositoryCard.js";
 import { DiscoverPage } from "../../src/web/routes/DiscoverPage.js";
 
+function verificationEvidence(repository: string) {
+  const retrievedAt = "2026-08-26T00:00:00Z";
+  return [
+    { id: "visibility", sourceUrl: `https://github.com/${repository}`, retrievedAt, observation: "Repository is public.", kind: "direct" as const, claim: "visibility" as const, verifiedValue: { visibility: "public" as const } },
+    { id: "license", sourceUrl: `https://github.com/${repository}/blob/main/LICENSE`, retrievedAt, observation: "Apache license file.", kind: "direct" as const, claim: "license" as const, verifiedValue: { spdxId: "Apache-2.0", path: "LICENSE" } },
+    { id: "activity", sourceUrl: `https://github.com/${repository}/commit/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`, retrievedAt, observation: "Recent commit.", kind: "direct" as const, claim: "recent_activity" as const, verifiedValue: { commitSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", committedAt: "2026-08-25T00:00:00Z" } },
+    { id: "policy", sourceUrl: `https://github.com/${repository}/blob/main/CONTRIBUTING.md`, retrievedAt, observation: "Contribution guide.", kind: "direct" as const, claim: "contribution_policy" as const, verifiedValue: { path: "CONTRIBUTING.md" } },
+    { id: "external-pr", sourceUrl: `https://github.com/${repository}/pull/42`, retrievedAt, observation: "Merged external pull request.", kind: "direct" as const, claim: "external_pr_acceptance" as const, verifiedValue: { pullRequestNumber: 42, mergedAt: "2026-08-24T00:00:00Z", authorAssociation: "CONTRIBUTOR" as const } },
+  ];
+}
+
+const healthyEvidence = verificationEvidence("friendly/healthy-contributor");
+
 const healthyRepository = {
   repository: {
     fullName: "friendly/healthy-contributor",
@@ -23,31 +36,15 @@ const healthyRepository = {
       topicMatch: 1,
       maintainerResponse: 0.9,
     },
-    evidence: [
-      {
-        id: "guide",
-        sourceUrl: "https://github.com/friendly/healthy-contributor/blob/main/CONTRIBUTING.md",
-        retrievedAt: "2026-08-26T00:00:00Z",
-        observation: "Contribution guide is present.",
-        kind: "direct" as const,
-      },
-    ],
+    evidence: healthyEvidence,
   },
   score: 0.9,
   explanation: {
     inputSignals: {} as never,
     weightedContributions: [],
-    evidence: [
-      {
-        id: "guide",
-        sourceUrl: "https://github.com/friendly/healthy-contributor/blob/main/CONTRIBUTING.md",
-        retrievedAt: "2026-08-26T00:00:00Z",
-        observation: "Contribution guide is present.",
-        kind: "direct" as const,
-      },
-    ],
-    sourceUrls: ["https://github.com/friendly/healthy-contributor/blob/main/CONTRIBUTING.md"],
-    retrievedAt: ["2026-08-26T00:00:00Z"],
+    evidence: healthyEvidence,
+    sourceUrls: healthyEvidence.map((item) => item.sourceUrl),
+    retrievedAt: healthyEvidence.map((item) => item.retrievedAt),
   },
 };
 
@@ -75,13 +72,7 @@ const longTermIssue = {
   estimatedHours: 20,
 };
 
-const secondEvidence = {
-  id: "guide",
-  sourceUrl: "https://github.com/friendly/second-project/blob/main/CONTRIBUTING.md",
-  retrievedAt: "2026-08-26T00:00:00Z",
-  observation: "Contribution guide is present.",
-  kind: "direct" as const,
-};
+const secondEvidence = verificationEvidence("friendly/second-project");
 
 const secondRepository = {
   ...healthyRepository,
@@ -89,12 +80,12 @@ const secondRepository = {
     ...healthyRepository.repository,
     fullName: "friendly/second-project",
     url: "https://github.com/friendly/second-project",
-    evidence: [secondEvidence],
+    evidence: secondEvidence,
   },
   explanation: {
     ...healthyRepository.explanation,
-    evidence: [secondEvidence],
-    sourceUrls: ["https://github.com/friendly/second-project/blob/main/CONTRIBUTING.md"],
+    evidence: secondEvidence,
+    sourceUrls: secondEvidence.map((item) => item.sourceUrl),
   },
 };
 

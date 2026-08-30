@@ -1,17 +1,7 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
-const trueForgeUiCalls = vi.hoisted(() => vi.fn());
-const trueForgeUiState = vi.hoisted(() => ({ throws: false }));
-vi.mock("@truefoundry/trueforge-ui", () => ({
-  TrueForgeUI: (props: unknown) => {
-    trueForgeUiCalls(props);
-    if (trueForgeUiState.throws) throw new Error("TrueForge unavailable");
-    return <div>OpenQuest discovery chat</div>;
-  },
-}));
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { OnboardingPage } from "../../src/web/routes/OnboardingPage.js";
 
@@ -25,55 +15,47 @@ const spaces = [
 
 const fakeApi = {
   getSpaces: async () => spaces,
-  discoverRepositories: async () => [],
-  getIssues: async () => [],
-  createCampaign: async () => ({ id: "campaign-1" }),
+  classifyDiscoveryIntent: async () => ({ kind: "clarification" as const, question: "Choose one category." }),
 };
 
 describe("OnboardingPage", () => {
-  beforeEach(() => { trueForgeUiCalls.mockClear(); trueForgeUiState.throws = false; });
   afterEach(() => {
     cleanup();
     window.history.replaceState({}, "", "/");
   });
 
-  it("offers natural-language discovery through the locked OpenQuest agent", async () => {
-    render(<OnboardingPage api={fakeApi} navigate={() => undefined} />);
+  it("routes only after server-side conversational classification", async () => {
+    const destinations: string[] = [];
+    const classifyDiscoveryIntent = vi.fn(async () => ({ kind: "category" as const, space: "data" as const }));
+    render(<OnboardingPage api={{ ...fakeApi, classifyDiscoveryIntent }} navigate={(destination) => destinations.push(destination)} />);
 
-    expect(await screen.findByRole("heading", { name: /talk to openquest/i })).toBeVisible();
-    expect(screen.getByText(/describe what you want to contribute to/i)).toBeVisible();
-    expect(screen.getByText(/or choose a category/i)).toBeVisible();
-    expect(trueForgeUiCalls).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByRole("textbox", { name: /what would you like to contribute to/i }), { target: { value: "I enjoy database infrastructure" } });
+    fireEvent.click(screen.getByRole("button", { name: /find repositories/i }));
 
-    fireEvent.click(screen.getByRole("button", { name: /start talking to openquest/i }));
-
-    expect(screen.getByText("OpenQuest discovery chat")).toBeVisible();
-    expect(trueForgeUiCalls).toHaveBeenCalledWith(expect.objectContaining({
-      agentConfig: { mode: "SingleAgent", name: "openquest" },
-      server: { type: "trueforge", baseUrl: "http://localhost:8790" },
-    }));
+    await vi.waitFor(() => { expect(destinations).toEqual(["/discover?spaces=data"]); });
+    expect(classifyDiscoveryIntent).toHaveBeenCalledWith("I enjoy database infrastructure", []);
   });
 
-  it("keeps category discovery available when the chat runtime fails", async () => {
-    trueForgeUiState.throws = true;
+  it("keeps clarification history and never navigates from an ambiguous response", async () => {
+    const destinations: string[] = [];
+    const classifyDiscoveryIntent = vi.fn()
+      .mockResolvedValueOnce({ kind: "clarification", question: "Choose one of the five categories." })
+      .mockResolvedValueOnce({ kind: "category", space: "web" });
+    render(<OnboardingPage api={{ ...fakeApi, classifyDiscoveryIntent }} navigate={(destination) => destinations.push(destination)} />);
 
-    render(<OnboardingPage api={fakeApi} navigate={() => undefined} />);
-    fireEvent.click(await screen.findByRole("button", { name: /start talking to openquest/i }));
+    fireEvent.change(screen.getByRole("textbox", { name: /what would you like to contribute to/i }), { target: { value: "I want an AI web app" } });
+    fireEvent.click(screen.getByRole("button", { name: /find repositories/i }));
+    expect(await screen.findByText(/choose one of the five categories/i)).toBeVisible();
+    expect(destinations).toEqual([]);
 
-    expect(await screen.findByRole("alert")).toHaveTextContent(/chat could not connect/i);
-    expect(screen.getByRole("button", { name: /developer tools/i })).toBeVisible();
-  });
+    fireEvent.change(screen.getByRole("textbox", { name: /what would you like to contribute to/i }), { target: { value: "Web and browser apps" } });
+    fireEvent.click(screen.getByRole("button", { name: /find repositories/i }));
 
-  it("unmounts a failed chat runtime while preserving category discovery", async () => {
-    render(<OnboardingPage api={fakeApi} navigate={() => undefined} />);
-    fireEvent.click(await screen.findByRole("button", { name: /start talking to openquest/i }));
-    const props = trueForgeUiCalls.mock.calls.at(-1)?.[0] as { onError?: () => void } | undefined;
-
-    props?.onError?.();
-
-    expect(await screen.findByRole("alert")).toHaveTextContent(/chat could not connect/i);
-    expect(screen.queryByText("OpenQuest discovery chat")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /developer tools/i })).toBeVisible();
+    await vi.waitFor(() => { expect(destinations).toEqual(["/discover?spaces=web"]); });
+    expect(classifyDiscoveryIntent).toHaveBeenLastCalledWith("Web and browser apps", [
+      { role: "user", content: "I want an AI web app" },
+      { role: "assistant", content: "Choose one of the five categories." },
+    ]);
   });
 
   it("shows exactly five broad categories and navigates on one click", async () => {

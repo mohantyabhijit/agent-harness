@@ -2,6 +2,7 @@ import { z } from "zod";
 import { isExactMultilineText, isExactSingleLineText } from "../domain/exact-text.js";
 
 import type { DiscoveredRepository } from "../application/discover.js";
+import type { DiscoveryConversationMessage, DiscoveryIntentResult } from "../application/ports/intent-classifier.js";
 import type { ApprovalAction } from "../domain/approval.js";
 import type { Campaign } from "../domain/campaign.js";
 import { spaces, type IssueCandidate, type Space } from "../domain/discovery.js";
@@ -31,6 +32,7 @@ export interface CampaignSnapshot extends Campaign {
 }
 export interface OpenQuestApi {
   getSpaces(signal?: AbortSignal): Promise<readonly SpaceOption[]>;
+  classifyDiscoveryIntent(message: string, history: readonly DiscoveryConversationMessage[], signal?: AbortSignal): Promise<DiscoveryIntentResult>;
   discoverRepositories(spaces: readonly Space[], signal?: AbortSignal): Promise<readonly DiscoveredRepository[]>;
   getIssues(repository: string, signal?: AbortSignal): Promise<readonly IssueCandidate[]>;
   createCampaign(input: CreateCampaignRequest, signal?: AbortSignal): Promise<Pick<Campaign, "id">>;
@@ -59,13 +61,31 @@ const timestamp = z.iso.datetime({ offset: true });
 const digest = z.string().regex(/^sha256:[0-9a-f]{64}$/u);
 const campaignStatus = z.enum(["policy_review", "coordination_pending", "preflight", "quarantined", "baseline", "implementation", "verification", "contribution_approval", "pull_request_open", "qodo_review", "repair", "human_escalation", "merged", "closed", "withdrawn"]);
 const approvalAction = z.enum(["post_issue_comment", "request_assignment", "push_branch", "create_pr", "update_pr"]);
+const conversationMessage = z.object({ role: z.enum(["user", "assistant"]), content: z.string().trim().min(1).max(500) }).strict();
+const discoveryIntent = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("category"), space: z.enum(spaces) }).strict(),
+  z.object({ kind: z.literal("clarification"), question: z.string().trim().min(1).max(240) }).strict(),
+]);
+const commitSha = z.string().regex(/^[0-9a-f]{40}$/u);
 const evidence = z.object({ id: identifier, sourceUrl: githubUrl, retrievedAt: timestamp, observation: text, kind: z.enum(["direct", "inference"]) }).strict();
+const repositoryEvidenceFields = { id: identifier, sourceUrl: githubUrl, retrievedAt: timestamp, observation: text, kind: z.literal("direct") } as const;
+const repositoryEvidence = z.discriminatedUnion("claim", [
+  z.object({ ...repositoryEvidenceFields, claim: z.literal("visibility"), verifiedValue: z.object({ visibility: z.literal("public") }).strict() }).strict(),
+  z.object({ ...repositoryEvidenceFields, claim: z.literal("license"), verifiedValue: z.object({ spdxId: z.string().trim().min(1).max(100), path: z.string().trim().min(1).max(500) }).strict() }).strict(),
+  z.object({ ...repositoryEvidenceFields, claim: z.literal("recent_activity"), verifiedValue: z.object({ commitSha, committedAt: timestamp }).strict() }).strict(),
+  z.object({ ...repositoryEvidenceFields, claim: z.literal("contribution_policy"), verifiedValue: z.object({ path: z.string().trim().min(1).max(500) }).strict() }).strict(),
+  z.object({ ...repositoryEvidenceFields, claim: z.literal("external_pr_acceptance"), verifiedValue: z.object({ pullRequestNumber: finite.int().positive(), mergedAt: timestamp, authorAssociation: z.enum(["CONTRIBUTOR", "FIRST_TIME_CONTRIBUTOR", "FIRST_TIMER", "NONE"]) }).strict() }).strict(),
+]);
 const signals = z.object({ stars: finite.int().nonnegative().max(2_000_000_000), recentActivity: rate, contributionGuide: z.boolean(), ciHealthy: z.boolean(), externalPrAcceptance: rate, topicMatch: rate, maintainerResponse: rate }).strict();
-const repository = z.object({ fullName: repositoryName, url: githubUrl, description: z.string().max(2_000), spaces: z.array(z.enum(spaces)).min(1).max(spaces.length), license: z.string().trim().min(1).max(100).nullable(), isPublic: z.literal(true), signals, evidence: z.array(evidence).min(1).max(100) }).strict().superRefine((item, ctx) => { if (!repoUrl(item.url, item.fullName) || item.evidence.some((entry) => !repoEvidence(entry.sourceUrl, item.fullName))) ctx.addIssue({ code: "custom", message: "Repository identity mismatch" }); });
-const discovered = z.object({ repository, score: rate, explanation: z.object({ inputSignals: signals, weightedContributions: z.array(z.object({ signal: z.string().max(100), weight: rate, value: rate, contribution: rate }).strict()).max(20), evidence: z.array(evidence).min(1).max(100), sourceUrls: z.array(githubUrl).min(1).max(100), retrievedAt: z.array(timestamp).min(1).max(100) }).strict() }).strict().superRefine((item, ctx) => { for (const entry of item.explanation.evidence) { const canonical = item.repository.evidence.find((source) => source.id === entry.id); if (canonical === undefined || canonical.sourceUrl !== entry.sourceUrl || canonical.observation !== entry.observation || canonical.retrievedAt !== entry.retrievedAt || canonical.kind !== entry.kind) ctx.addIssue({ code: "custom", message: "Explanation evidence does not match repository evidence" }); } });
+const repository = z.object({ fullName: repositoryName, url: githubUrl, description: z.string().max(2_000), spaces: z.array(z.enum(spaces)).min(1).max(spaces.length), license: z.string().trim().min(1).max(100), isPublic: z.literal(true), signals, evidence: z.array(repositoryEvidence).length(5) }).strict().superRefine((item, ctx) => {
+  if (!repoUrl(item.url, item.fullName) || item.evidence.some((entry) => !repoEvidence(entry.sourceUrl, item.fullName))) ctx.addIssue({ code: "custom", message: "Repository identity mismatch" });
+  const claims = new Map(item.evidence.map((entry) => [entry.claim, entry]));
+  const licenseEvidence = item.evidence.find((entry) => entry.claim === "license");
+  if (claims.size !== 5 || licenseEvidence?.verifiedValue.spdxId !== item.license || item.signals.recentActivity <= 0 || !item.signals.contributionGuide || item.signals.externalPrAcceptance <= 0) ctx.addIssue({ code: "custom", message: "Repository verification is incomplete" });
+});
+const discovered = z.object({ repository, score: rate, explanation: z.object({ inputSignals: signals, weightedContributions: z.array(z.object({ signal: z.string().max(100), weight: rate, value: rate, contribution: rate }).strict()).max(20), evidence: z.array(repositoryEvidence).min(5).max(100), sourceUrls: z.array(githubUrl).min(1).max(100), retrievedAt: z.array(timestamp).min(1).max(100) }).strict() }).strict().superRefine((item, ctx) => { for (const entry of item.explanation.evidence) { const canonical = item.repository.evidence.find((source) => source.id === entry.id); if (canonical === undefined || canonical.sourceUrl !== entry.sourceUrl || canonical.observation !== entry.observation || canonical.retrievedAt !== entry.retrievedAt || canonical.claim !== entry.claim || JSON.stringify(canonical.verifiedValue) !== JSON.stringify(entry.verifiedValue)) ctx.addIssue({ code: "custom", message: "Explanation evidence does not match repository evidence" }); } });
 const issue = z.object({ repository: repositoryName, number: finite.int().positive().max(2_000_000_000), title: text, url: githubUrl, clarity: rate, affectedAreas: finite.int().nonnegative().max(10_000), testComplexity: rate, dependencyRisk: rate, estimatedHours: finite.nonnegative().max(100_000), maintainerSignals: z.array(text).max(50) }).strict().superRefine((item, ctx) => { if (!issueUrl(item.url, item.repository, item.number)) ctx.addIssue({ code: "custom", message: "Issue identity mismatch" }); });
 const branch = z.string().min(1).max(255).regex(/^(?![./])(?!.*(?:\.\.|\/\/|@\{|\\))[A-Za-z0-9._/-]+(?<![./])$/u);
-const commitSha = z.string().regex(/^[0-9a-f]{40}$/u);
 const baseAction = { repository: repositoryName, issueNumber: finite.int().positive().max(Number.MAX_SAFE_INTEGER) };
 const approvalActionSummary = z.discriminatedUnion("action", [
   z.object({ action: z.literal("post_issue_comment"), ...baseAction, body: actionText }).strict(), z.object({ action: z.literal("request_assignment"), ...baseAction, assignee: z.string().min(1).max(39).regex(/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/u) }).strict(), z.object({ action: z.literal("push_branch"), ...baseAction, branch, sourceCommitSha: commitSha, targetCommitSha: commitSha }).strict(), z.object({ action: z.literal("create_pr"), ...baseAction, branch, baseBranch: branch, commitSha, title: actionTitle, body: actionText }).strict(), z.object({ action: z.literal("update_pr"), ...baseAction, pullRequest: githubUrl, branch, commitSha, body: actionText }).strict(),
@@ -103,7 +123,8 @@ export function createOpenQuestApi(options: OpenQuestApiOptions): OpenQuestApi {
   const baseUrl = options.baseUrl ?? "";
   return {
     async getSpaces(signal) { const body = await request(options.fetch, `${baseUrl}/api/spaces`, withSignal({}, signal)); const ids = parsed(z.object({ spaces: z.array(z.enum(spaces)).length(spaces.length) }).strict(), body, "Spaces could not be loaded").spaces; if (new Set(ids).size !== ids.length) throw new OpenQuestApiError("Spaces could not be loaded"); return ids.map((id) => ({ id, ...metadata[id] })); },
-    async discoverRepositories(selected, signal) { const body = await request(options.fetch, `${baseUrl}/api/discovery/repositories`, withSignal({ method: "POST", headers: authenticatedHeaders(options.operatorCapability), body: JSON.stringify({ spaces: selected }) }, signal)); return parsed(z.object({ repositories: z.array(discovered).max(8) }).strict(), body, "Recommendations could not be loaded").repositories as readonly DiscoveredRepository[]; },
+    async classifyDiscoveryIntent(message, history, signal) { const input = parsed(z.object({ message: z.string().trim().min(1).max(500), history: z.array(conversationMessage).max(10) }).strict(), { message, history }, "Conversation could not be continued"); const body = await request(options.fetch, `${baseUrl}/api/discovery/classify`, withSignal({ method: "POST", headers: authenticatedHeaders(options.operatorCapability), body: JSON.stringify(input) }, signal)); return parsed(discoveryIntent, body, "Conversation could not be continued"); },
+    async discoverRepositories(selected, signal) { const validSpaces = parsed(z.array(z.enum(spaces)).length(1), selected, "Recommendations could not be loaded"); const body = await request(options.fetch, `${baseUrl}/api/discovery/repositories`, withSignal({ method: "POST", headers: authenticatedHeaders(options.operatorCapability), body: JSON.stringify({ spaces: validSpaces }) }, signal)); return parsed(z.object({ repositories: z.array(discovered).max(8) }).strict(), body, "Recommendations could not be loaded").repositories as readonly DiscoveredRepository[]; },
     async getIssues(name, signal) { const [owner, repo, extra] = name.split("/"); if (owner === undefined || repo === undefined || extra !== undefined || !repositoryName.safeParse(name).success) throw new OpenQuestApiError("Issues could not be loaded"); const body = await request(options.fetch, `${baseUrl}/api/discovery/repositories/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues`, withSignal({}, signal)); const values = parsed(z.object({ issues: z.array(issue).max(200) }).strict(), body, "Issues could not be loaded").issues; if (values.some((value) => value.repository !== name)) throw new OpenQuestApiError("Issues could not be loaded"); return values; },
     async createCampaign(input, signal) { const body = await request(options.fetch, `${baseUrl}/api/campaigns`, withSignal({ method: "POST", headers: authenticatedHeaders(options.operatorCapability), body: JSON.stringify(input) }, signal)); const response = parsed(campaignResponse, body, "Campaign could not be started"); return { id: response.id }; },
     async getCampaign(id, signal) { const validId = parsed(campaignId, id, "Campaign could not be loaded"); const body = await request(options.fetch, `${baseUrl}/api/campaigns/${encodeURIComponent(validId)}`, withSignal({}, signal)); return parsed(campaignSnapshotResponse, body, "Campaign could not be loaded") as CampaignSnapshot; },

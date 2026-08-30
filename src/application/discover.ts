@@ -1,5 +1,6 @@
 import {
   explainRepositoryScore,
+  hasValidRepositoryVerification,
   isKnownSpace,
   scoreRepository,
   type RepositoryCandidate,
@@ -15,7 +16,10 @@ export interface DiscoveredRepository {
 }
 
 export class DiscoverRepositories {
-  constructor(private readonly catalog: GithubCatalogPort) {}
+  constructor(
+    private readonly catalog: GithubCatalogPort,
+    private readonly clock: () => Date = () => new Date(),
+  ) {}
 
   async execute(selectedSpaces: readonly Space[]): Promise<readonly DiscoveredRepository[]> {
     if (selectedSpaces.length !== 1 || selectedSpaces.some((space) => !isKnownSpace(space))) {
@@ -23,8 +27,16 @@ export class DiscoverRepositories {
     }
 
     const repositories = await this.catalog.listRepositories(selectedSpaces);
+    const referenceTime = this.clock();
+    const seenRepositories = new Set<string>();
     return repositories
-      .filter(isDiscoverable)
+      .filter((repository) => isDiscoverable(repository, referenceTime))
+      .filter((repository) => {
+        const identity = repository.fullName.toLowerCase();
+        if (seenRepositories.has(identity)) return false;
+        seenRepositories.add(identity);
+        return true;
+      })
       .map((repository) => ({
         repository,
         score: scoreRepository(repository.signals),
@@ -37,13 +49,13 @@ export class DiscoverRepositories {
   }
 }
 
-function isDiscoverable(repository: RepositoryCandidate): boolean {
+function isDiscoverable(repository: RepositoryCandidate, referenceTime: Date): boolean {
   // Catalog adapters are untrusted at runtime; only an explicit true is public.
   // eslint-disable-next-line @typescript-eslint/no-unnecessary-boolean-literal-compare
   return repository.isPublic === true &&
-    repository.license !== null &&
     repository.signals.recentActivity > 0 &&
     repository.signals.contributionGuide &&
     repository.signals.externalPrAcceptance > 0 &&
+    hasValidRepositoryVerification(repository, referenceTime) &&
     repository.fullName.toLowerCase() !== "openai/codex";
 }
