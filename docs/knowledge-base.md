@@ -8,7 +8,7 @@ The feature audit covers the complete `main` history through `4191fc2`, includin
 
 ## Change and review operating rule
 
-Every repository change must be reflected in the root [TODO.md](../TODO.md) checklist and its pull-request evidence: focused branch and issue when applicable, clear scope and rationale, executed verification, Qodo review of the final commit, documented findings/dispositions, required checks, and a human merge. The public README links the representative Qodo-reviewed implementation PR; local checks or a local Qodo client are not substitutes for that GitHub evidence. Documentation-only changes still update the checklist and verification record; the scope of the checks may be proportionate to the change.
+Every repository change must be reflected in the root [TODO.md](../TODO.md) checklist and its pull-request evidence: focused branch and issue when applicable, clear scope and rationale, executed verification, Qodo review of the final commit, documented findings/dispositions, required checks, and an authorized maintainer merge. The maintainer may be a human or an agent explicitly authorized by the user for that merge. The public README links the representative Qodo-reviewed implementation PR; local checks or a local Qodo client are not substitutes for that GitHub evidence. Documentation-only changes still update the checklist and verification record; the scope of the checks may be proportionate to the change.
 
 ## Product boundary
 

@@ -10,7 +10,7 @@ This file is the operating checklist for every repository change. It turns the p
 - [ ] Run the applicable local checks and include their exact results in the PR. For most code changes: `npm run typecheck`, `npm run lint`, `npm run build`, `npm test`, and `git diff --check`.
 - [ ] Confirm Qodo reviewed the latest PR commit. Resolve every valid High-severity finding; respond in the Qodo thread when a finding is incorrect, deferred, or intentional, with the reason recorded there.
 - [ ] Push repairs, then trigger or wait for a follow-up Qodo review against the final code. Medium and Low findings remain an engineering decision, but the decision must be visible.
-- [ ] Confirm required GitHub checks pass and leave the final merge decision to a human reviewer.
+- [ ] Confirm required GitHub checks pass and leave the final merge decision to an authorized maintainer (a human or an explicitly user-authorized agent).
 - [ ] After merge, update this queue, the PR, and any affected README or operational documentation with durable, non-secret evidence.
 
 ## Current work queue
@@ -26,4 +26,4 @@ This file is the operating checklist for every repository change. It turns the p
 
 ## Evidence standard
 
-Use links and concise facts, not credentials, tokens, raw provider logs, or screenshots containing secrets. A healthy local service, an open PR, or a configured local Qodo client is not by itself proof that production providers, Qodo review, CI, and a human merge are complete.
+Use links and concise facts, not credentials, tokens, raw provider logs, or screenshots containing secrets. A healthy local service, an open PR, or a configured local Qodo client is not by itself proof that production providers, Qodo review, CI, and an authorized merge are complete.

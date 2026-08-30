@@ -110,11 +110,11 @@ npm test
 
 The repository also defines targeted integration and Playwright commands, but Task 11 does not add or alter tests. The quality workflow installs with `npm ci` and runs type-check, lint, build, and the existing test suite on pushes and pull requests with read-only repository permissions.
 
-## Qodo code review evidence
+## Qodo Code Review Evidence
 
-Every repository change follows the [change checklist](TODO.md): a focused branch and PR, recorded verification, Qodo review of the latest commit, resolution or documented disposition of findings, a follow-up Qodo review after repairs, passing GitHub checks, and a human merge decision. Direct pushes to `main` do not count as reviewed work.
+Every repository change follows the [change checklist](TODO.md): a focused branch and PR, recorded verification, Qodo review of the latest commit, resolution or documented disposition of findings, a follow-up Qodo review after repairs, passing GitHub checks, and an authorized maintainer merge. Direct pushes to `main` do not count as reviewed work.
 
-[PR #3: Fix TrueForge discovery stream hangs](https://github.com/mohantyabhijit/agent-harness/pull/3) is the representative merged implementation PR. Qodo raised a cleanup-timeout reliability bug, the branch added an abort-on-cleanup repair, and the final commit received a follow-up Qodo update before merge. The [pull-request template](.github/pull_request_template.md) makes the same evidence and decision trail required for future changes.
+[PR #16: Conversation-first repository discovery](https://github.com/mohantyabhijit/agent-harness/pull/16) is the representative merged implementation PR. Qodo surfaced unvalidated chat recommendations, insufficient claim-specific repository evidence, ranking and conversation races, and transient-session lifecycle defects; the final code fixed those findings and received an [exact-head follow-up review](https://github.com/mohantyabhijit/agent-harness/pull/16#issuecomment-5468824110) before merge. One Medium observability recommendation was [intentionally deferred with its reason recorded in the Qodo thread](https://github.com/mohantyabhijit/agent-harness/pull/16#discussion_r3889579536): cleanup remains best-effort and outcome-preserving, while durable cleanup metrics wait for a repository-wide telemetry sink rather than ad-hoc console logging. The [pull-request template](.github/pull_request_template.md) makes the same evidence and decision trail required for future changes.
 
 ## Repository map
 

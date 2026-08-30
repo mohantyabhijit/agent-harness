@@ -25,7 +25,7 @@ Closes #
 - [ ] I resolved every valid High-severity finding, or recorded a reason in the relevant Qodo thread.
 - [ ] I pushed any repair and obtained a follow-up Qodo review of the final code.
 - [ ] Any Medium/Low finding has a visible engineering decision.
-- [ ] Required GitHub checks pass; a human reviewer will make the merge decision.
+- [ ] Required GitHub checks pass; an authorized maintainer (human or explicitly user-authorized agent) will make the merge decision.
 - [ ] I updated [TODO.md](../TODO.md) and any affected README or operational documentation with non-secret evidence.
 
 Qodo review link:
