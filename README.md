@@ -122,6 +122,8 @@ Every repository change follows the [change checklist](TODO.md): a focused branc
 
 [PR #20: Local contribution-flow completion](https://github.com/mohantyabhijit/agent-harness/pull/20) records the end-to-end QA closeout and its Qodo decision trail. The [initial exact-head review](https://github.com/mohantyabhijit/agent-harness/pull/20#issuecomment-5469595618) found that a reconciled branch push could lose its follow-up pull-request proposal and that a lost browser response could misreport publication. Both findings were accepted: the backend now creates the next proposal atomically during reconciliation, and the browser reloads authoritative campaign facts after an ambiguous transport failure. Follow-up review also caught fake-store parity and missing-auth retry defects; those were fixed by mirroring production duplicate-ID rejection and distinguishing pre-request authority failure from an uncertain transport result. The PR history retains every repair and the final exact-head review; no finding was dismissed.
 
+[PR #22: Native TrueForge chat and OpenQuest redesign](https://github.com/mohantyabhijit/agent-harness/pull/22) records the local-first product repair and review evidence. The [initial exact-head Qodo review](https://github.com/mohantyabhijit/agent-harness/pull/22#issuecomment-5470066678) found that empty verified discovery was excluded, research seeds constrained the wider search, and the issue-brief response schema accepted URLs rejected by the domain validator. All three were repaired in commit [`aa9ddb9`](https://github.com/mohantyabhijit/agent-harness/commit/aa9ddb9), with each disposition recorded in its Qodo thread and follow-up review requested against the final code.
+
 ## Repository map
 
 ```text
