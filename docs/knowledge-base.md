@@ -1,6 +1,10 @@
 # OpenQuest knowledge base
 
-Updated 2026-08-28. This is a repository-owned record of implementation facts and reproducible verification evidence. It is not a claim that external provider credentials or maintainer approval are available.
+Updated 2026-08-30. This is a repository-owned record of implementation facts and reproducible verification evidence. It is not a claim that external provider credentials or maintainer approval are available.
+
+## Repository audit baseline
+
+The feature audit covers the complete `main` history through `4191fc2`, including the merged OpenQuest implementation branch and the later deployment, Qodo automation, TrueForge stream-cleanup, and authentication-classification commits. The current, commit-backed catalog is [FEATURES.md](../FEATURES.md). It distinguishes shipped code from external-provider readiness, unimplemented GitHub writes, and superseded bootstrap work.
 
 ## Product boundary
 
@@ -10,13 +14,17 @@ The safety boundary is deliberate: repository text and tool output are untrusted
 
 ## What is implemented
 
-- Domain rules for repository ranking, issue lanes, campaign transitions, evidence completeness, approval validity, and Qodo quality gates.
-- SQLite-backed campaign persistence, migrations, leases, restart recovery, sanitized public projections, and optimistic version fencing.
-- Fastify routes for spaces, discovery, campaigns, approval proposals, approval issuance, support/readiness, and authenticated review synchronization.
-- TrueForge-facing adapters and explicit unavailable-provider behavior for Qodo when no authenticated authority is configured.
-- React onboarding, discovery, campaign timeline, evidence, quality-gate, change-brief, and approval surfaces.
-- Fixture-friendly component and API tests plus browser coverage for onboarding-to-discovery.
-- UI polish pass retaining the graphite/purple/lime visual language, with provenance labeling, visible focus treatment, reduced-motion handling, responsive grids, and actionable issue controls.
+- Evidence-ranked discovery across nine curated spaces, strict source-linked GitHub repository/issue validation, and Easy Win versus Long-Term Challenge issue lanes.
+- Durable one-issue/one-campaign orchestration with a campaign state machine, resumable parent TrueForge sessions, fresh child sessions, Daytona sandbox requirements, static preflight, structured implementation, and structured verification.
+- SQLite-backed campaign persistence, migrations, ordered events, leases, optimistic version and identity fencing, restart recovery, external-action claims, outcome reconciliation, and sanitized public projections.
+- Exact, server-owned approval proposals bound to payload digest, campaign/version/status, current commit, idempotency key, ten-minute expiry, and atomic single use.
+- Authenticated Qodo locator resolution, strict finding normalization, allowlisted bot identities, an independent repair-verification port, a fail-closed quality gate, at most three repair iterations, and durable human escalation.
+- Fastify routes for spaces, discovery, campaigns, `preflight`/`implement`/`verify`, approval issuance, authenticated review synchronization, liveness, and readiness, protected by separate operator and review-provider capabilities.
+- React onboarding, progressive discovery, resumable campaign timeline, evidence, quality-gate, change-brief, approval, and embedded TrueForge thread surfaces with stale-request and approval-race handling.
+- Commit-pinned TrueForge skill/agent registration with dependency preflight and rollback, plus bounded stream cleanup and preservation of late authentication failures.
+- `/openquest/` production hosting, same-origin embedded TrueForge proxying, Nginx and systemd configuration, read-only demo preflight, read-only CI, autonomous Qodo v2 PR review configuration, and layered automated tests.
+
+The exhaustive descriptions and introducing/hardening commit references live in [FEATURES.md](../FEATURES.md). Historical IncidentForge and the temporary standalone demo are recorded there as superseded rather than current product features.
 
 ## Verified repository evidence
 
@@ -43,7 +51,7 @@ npm audit --omit=dev
 git diff --check
 ```
 
-Current evidence from the latest independent pass: 416 unit tests and 127 integration tests pass; typecheck, lint, and build pass. Browser coverage was previously absent and is now represented by `tests/e2e/onboarding.spec.ts`; rerun the command after every UI change. The dependency audit reported two low and one moderate transitive advisory in the inspected worktree and remains a release follow-up.
+Current evidence from the 2026-08-30 repository audit: 418 tests in the full Vitest suite, 127 tests in the focused integration suite, and the onboarding/discovery Playwright test pass; typecheck, lint, and build pass. The dependency audit reported two low and one moderate transitive advisory in the previously inspected worktree and remains a release follow-up until `npm audit --omit=dev` is rerun.
 
 ## External MR/PR status
 
