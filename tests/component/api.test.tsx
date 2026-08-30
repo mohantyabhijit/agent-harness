@@ -171,6 +171,16 @@ describe("OpenQuest browser API", () => {
     }));
   });
 
+  it("starts only a declared campaign operation with the operator capability", async () => {
+    const fetcher = vi.fn<FetchLike>(async () => new Response(JSON.stringify(realCampaignResponse), { status: 200 }));
+    const api = createOpenQuestApi({ fetch: fetcher, operatorCapability: () => "runtime-only" });
+
+    await expect(api.runCampaignAction(":review.1", "preflight")).resolves.toEqual(realCampaignResponse);
+    expect(fetcher).toHaveBeenCalledWith("/api/campaigns/%3Areview.1/actions/preflight", expect.objectContaining({
+      method: "POST", headers: { "content-type": "application/json", authorization: "Bearer runtime-only" }, body: "{}",
+    }));
+  });
+
   it("rejects campaign responses with unexpected fields", async () => {
     const api = createOpenQuestApi({ fetch: async () => new Response(JSON.stringify({ ...realCampaignResponse, operatorToken: "not-for-client" }), { status: 201 }), operatorCapability: () => "runtime-only" });
 

@@ -6,6 +6,10 @@ Updated 2026-08-30. This is a repository-owned record of implementation facts an
 
 The feature audit covers the complete `main` history through `4191fc2`, including the merged OpenQuest implementation branch and the later deployment, Qodo automation, TrueForge stream-cleanup, and authentication-classification commits. The current, commit-backed catalog is [FEATURES.md](../FEATURES.md). It distinguishes shipped code from external-provider readiness, unimplemented GitHub writes, and superseded bootstrap work.
 
+## Change and review operating rule
+
+Every repository change must be reflected in the root [TODO.md](../TODO.md) checklist and its pull-request evidence: focused branch and issue when applicable, clear scope and rationale, executed verification, Qodo review of the final commit, documented findings/dispositions, required checks, and a human merge. The public README links the representative Qodo-reviewed implementation PR; local checks or a local Qodo client are not substitutes for that GitHub evidence. Documentation-only changes still update the checklist and verification record; the scope of the checks may be proportionate to the change.
+
 ## Product boundary
 
 OpenQuest is the contribution-campaign surface for Agent Harness. It helps a contributor move from repository discovery to a policy-aware, sandboxed, reviewable pull request proposal. GitHub, TrueForge, Daytona, and Qodo are injected ports; domain rules remain testable without live services.
@@ -20,7 +24,7 @@ The safety boundary is deliberate: repository text and tool output are untrusted
 - Exact, server-owned approval proposals bound to payload digest, campaign/version/status, current commit, idempotency key, ten-minute expiry, and atomic single use.
 - Authenticated Qodo locator resolution, strict finding normalization, allowlisted bot identities, an independent repair-verification port, a fail-closed quality gate, at most three repair iterations, and durable human escalation.
 - Fastify routes for spaces, discovery, campaigns, `preflight`/`implement`/`verify`, approval issuance, authenticated review synchronization, liveness, and readiness, protected by separate operator and review-provider capabilities.
-- React onboarding, progressive discovery, resumable campaign timeline, evidence, quality-gate, change-brief, approval, and embedded TrueForge thread surfaces with stale-request and approval-race handling.
+- React onboarding, progressive discovery, resumable campaign timeline, evidence, quality-gate, action controls for the next allowed preflight/implementation/verification step, change-brief, approval, and embedded TrueForge thread surfaces with stale-request and approval-race handling.
 - Commit-pinned TrueForge skill/agent registration with dependency preflight and rollback, plus bounded stream cleanup and preservation of late authentication failures.
 - `/openquest/` production hosting, same-origin embedded TrueForge proxying, Nginx and systemd configuration, read-only demo preflight, read-only CI, autonomous Qodo v2 PR review configuration, and layered automated tests.
 

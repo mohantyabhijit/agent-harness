@@ -37,8 +37,8 @@ const snapshot: CampaignSnapshot = {
   qualityEscalationReason: null,
 };
 
-function campaignApi(getCampaign: OpenQuestApi["getCampaign"]): Pick<OpenQuestApi, "getCampaign" | "issueApproval"> {
-  return { getCampaign, issueApproval: async () => { throw new Error("No proposal should be approvable"); } };
+function campaignApi(getCampaign: OpenQuestApi["getCampaign"]): Pick<OpenQuestApi, "getCampaign" | "runCampaignAction" | "issueApproval"> {
+  return { getCampaign, runCampaignAction: async () => { throw new Error("No operation should be available in this fixture"); }, issueApproval: async () => { throw new Error("No proposal should be approvable"); } };
 }
 
 describe("CampaignPage", () => {
@@ -57,6 +57,7 @@ describe("CampaignPage", () => {
     expect(screen.getByText("Iteration 2 of 3")).toBeVisible();
     expect(screen.getByText("Handle the empty response.")).toBeVisible();
     expect(screen.getByText(/proposal is pending/i)).toBeVisible();
+    expect(screen.getByRole("heading", { name: /awaiting the next verified state/i })).toBeVisible();
     expect(screen.queryByText(/chat transcript/i)).not.toBeInTheDocument();
   });
 

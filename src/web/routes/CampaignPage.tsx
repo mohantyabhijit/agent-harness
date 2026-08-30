@@ -2,13 +2,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { ApprovalConfirmation, CampaignSnapshot, OpenQuestApi } from "../api.js";
 import { CampaignTimeline } from "../components/CampaignTimeline.js";
+import { CampaignActions, type CampaignAction } from "../components/CampaignActions.js";
 import { ChangeBrief } from "../components/ChangeBrief.js";
 import { EvidencePanel } from "../components/EvidencePanel.js";
 import { OpenQuestAgentThread } from "../components/OpenQuestAgentThread.js";
 import { QualityGate } from "../components/QualityGate.js";
 
 interface CampaignPageProps {
-  readonly api: Pick<OpenQuestApi, "getCampaign" | "issueApproval">;
+  readonly api: Pick<OpenQuestApi, "getCampaign" | "issueApproval"> & Partial<Pick<OpenQuestApi, "runCampaignAction">>;
   readonly campaignId: string;
   readonly createIdempotencyKey?: () => string;
   readonly trueForgeBaseUrl?: string;
@@ -28,6 +29,8 @@ export function CampaignPage({ api, campaignId, createIdempotencyKey = defaultId
   const [refreshState, setRefreshState] = useState<RefreshState>();
   const [submittingRoute, setSubmittingRoute] = useState<object>();
   const [approvedProposal, setApprovedProposal] = useState<ApprovedProposal>();
+  const [runningAction, setRunningAction] = useState<CampaignAction>();
+  const [actionError, setActionError] = useState<{ readonly routeIdentity: object; readonly message: string }>();
   const campaignController = useRef<AbortController | undefined>(undefined);
   const campaignDeadline = useRef<{ readonly controller: AbortController; readonly timer: ReturnType<typeof globalThis.setTimeout> } | undefined>(undefined);
   const approvalController = useRef<AbortController | undefined>(undefined);
@@ -164,6 +167,25 @@ export function CampaignPage({ api, campaignId, createIdempotencyKey = defaultId
     });
   };
 
+  const runAction = (action: CampaignAction) => {
+    if (campaign === undefined || runningAction !== undefined || approvalLocked.current) return;
+    if (api.runCampaignAction === undefined) {
+      setActionError({ routeIdentity, message: "Campaign actions are unavailable in this view. Reconnect to the OpenQuest operator API before starting work." });
+      return;
+    }
+    const controller = new AbortController();
+    const epoch = routeEpoch.current;
+    setRunningAction(action);
+    setActionError(undefined);
+    void api.runCampaignAction(campaign.id, action, controller.signal).then(() => {
+      if (routeEpoch.current === epoch) refreshCampaign({ kind: "post" });
+    }).catch((reason: unknown) => {
+      if (!isAbort(reason) && routeEpoch.current === epoch) setActionError({ routeIdentity, message: "The campaign action could not be started. No external write was attempted; refresh and review the campaign state before retrying." });
+    }).finally(() => {
+      if (routeEpoch.current === epoch) setRunningAction(undefined);
+    });
+  };
+
   if (campaign === undefined || campaign.id !== campaignId) return <main className="state-card"><h1 tabIndex={-1}>Campaign created</h1>{error?.campaignId !== campaignId ? <p role="status">Loading durable campaign facts…</p> : <><p role="alert">{error.message}</p><button onClick={() => { setError(undefined); loadCampaign(); }} type="button">Try again</button></>}</main>;
   const proposal = campaign.approvalProposal;
   const currentRefresh = refreshState?.routeIdentity === routeIdentity ? refreshState : undefined;
@@ -173,7 +195,7 @@ export function CampaignPage({ api, campaignId, createIdempotencyKey = defaultId
   );
   return <main className="campaign-shell">
     <header className="campaign-hero"><p className="wordmark">OPENQUEST / CAMPAIGN</p><p className="eyebrow">{campaign.lane.replace("_", " ")} · {campaign.status.replaceAll("_", " ")}</p><h1 ref={heading} tabIndex={-1}>{campaign.repository} <span>#{campaign.issueNumber}</span></h1><p>One issue, one resumable agent session, and a durable record of every verified contribution decision.</p><a href={campaign.issueUrl} rel="noreferrer" target="_blank">View source issue</a></header>
-    <div className="campaign-layout"><div className="campaign-main"><CampaignTimeline approvals={campaign.approvals} events={campaign.events} /><EvidencePanel evidence={campaign.evidence} references={campaign.externalReferences} /><QualityGate escalationReason={campaign.qualityEscalationReason} findings={campaign.qodoFindings} iteration={campaign.qodoIteration} status={campaign.status} /></div><aside className="campaign-side" aria-label="Agent and approval controls"><OpenQuestAgentThread sessionId={campaign.parentSessionId} {...(trueForgeBaseUrl === undefined ? {} : { trueForgeBaseUrl })} />{currentRefresh?.status === "pending" ? <p aria-label="Refreshing campaign facts" className="campaign-error" role="status">Refreshing authoritative campaign facts…</p> : currentRefresh?.status === "failure" ? <div aria-label="Campaign facts refresh failed" className="campaign-error" role="alert"><p>Campaign facts could not be refreshed. The loaded campaign remains visible, but approval state is not authoritative.</p><button onClick={() => { refreshCampaign(currentRefresh.reason); }} type="button">Retry campaign refresh</button></div> : null}{proposal === null ? <section className="campaign-panel pending-proposal" aria-labelledby="proposal-pending-heading"><p className="eyebrow">Human approval boundary</p><h2 id="proposal-pending-heading">Exact proposal is pending</h2><p>The server has not published a current, validated action payload. Approval remains unavailable until a durable proposal matches this campaign and commit.</p><button disabled type="button">Approval unavailable</button></section> : <ChangeBrief approved={alreadyApproved} onApprove={approve} proposal={proposal} submitting={submittingRoute === routeIdentity} />}{approvalError?.routeIdentity !== routeIdentity ? null : <p className="campaign-error" role="alert">{approvalError.message}</p>}</aside></div>
+    <div className="campaign-layout"><div className="campaign-main"><CampaignActions onRun={runAction} {...(runningAction === undefined ? {} : { running: runningAction })} status={campaign.status} />{actionError?.routeIdentity !== routeIdentity ? null : <p className="campaign-error" role="alert">{actionError.message}</p>}<CampaignTimeline approvals={campaign.approvals} events={campaign.events} /><EvidencePanel evidence={campaign.evidence} references={campaign.externalReferences} /><QualityGate escalationReason={campaign.qualityEscalationReason} findings={campaign.qodoFindings} iteration={campaign.qodoIteration} status={campaign.status} /></div><aside className="campaign-side" aria-label="Agent and approval controls"><OpenQuestAgentThread sessionId={campaign.parentSessionId} {...(trueForgeBaseUrl === undefined ? {} : { trueForgeBaseUrl })} />{currentRefresh?.status === "pending" ? <p aria-label="Refreshing campaign facts" className="campaign-error" role="status">Refreshing authoritative campaign facts…</p> : currentRefresh?.status === "failure" ? <div aria-label="Campaign facts refresh failed" className="campaign-error" role="alert"><p>Campaign facts could not be refreshed. The loaded campaign remains visible, but approval state is not authoritative.</p><button onClick={() => { refreshCampaign(currentRefresh.reason); }} type="button">Retry campaign refresh</button></div> : null}{proposal === null ? <section className="campaign-panel pending-proposal" aria-labelledby="proposal-pending-heading"><p className="eyebrow">Human approval boundary</p><h2 id="proposal-pending-heading">Exact proposal is pending</h2><p>The server has not published a current, validated action payload. Approval remains unavailable until a durable proposal matches this campaign and commit.</p><button disabled type="button">Approval unavailable</button></section> : <ChangeBrief approved={alreadyApproved} onApprove={approve} proposal={proposal} submitting={submittingRoute === routeIdentity} />}{approvalError?.routeIdentity !== routeIdentity ? null : <p className="campaign-error" role="alert">{approvalError.message}</p>}</aside></div>
   </main>;
 }
 
