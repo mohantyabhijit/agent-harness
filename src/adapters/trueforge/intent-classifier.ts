@@ -21,7 +21,7 @@ export class TrueForgeIntentClassifier implements IntentClassifierPort {
       verifiedEvidence: [],
       approvals: [],
       context: { message, history },
-    }, "discover");
+    }, "discover", { sessionLifecycle: "transient" });
     try {
       const output = typeof result.output === "string" ? JSON.parse(result.output) as unknown : result.output;
       return resultSchema.parse(output);

@@ -167,10 +167,11 @@ export class TrueForgeHarness implements HarnessPort {
     operation: HarnessOperation,
     options?: HarnessRequestOptions,
   ): Promise<HarnessSessionResult> {
+    let sessionId: string | undefined;
     try {
       // A session owns its sandbox in TrueForge. Creating one here ensures every
       // milestone or repair runs in a fresh child context and fresh sandbox.
-      const sessionId = await this.createNamedSession(options);
+      sessionId = await this.createNamedSession(options);
       const streamAbortController = new AbortController();
       const streamOptions = options === undefined
         ? { signal: streamAbortController.signal }
@@ -254,6 +255,10 @@ export class TrueForgeHarness implements HarnessPort {
       return parseCompletedTurn(sessionId, terminalState);
     } catch (error) {
       throw normalizeSdkError(error);
+    } finally {
+      if (options?.sessionLifecycle === "transient" && sessionId !== undefined) {
+        await this.deleteSession(sessionId);
+      }
     }
   }
 

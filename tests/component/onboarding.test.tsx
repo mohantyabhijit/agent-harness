@@ -33,7 +33,7 @@ describe("OnboardingPage", () => {
     fireEvent.click(screen.getByRole("button", { name: /find repositories/i }));
 
     await vi.waitFor(() => { expect(destinations).toEqual(["/discover?spaces=data"]); });
-    expect(classifyDiscoveryIntent).toHaveBeenCalledWith("I enjoy database infrastructure", []);
+    expect(classifyDiscoveryIntent).toHaveBeenCalledWith("I enjoy database infrastructure", [], expect.any(AbortSignal));
   });
 
   it("keeps clarification history and never navigates from an ambiguous response", async () => {
@@ -55,7 +55,45 @@ describe("OnboardingPage", () => {
     expect(classifyDiscoveryIntent).toHaveBeenLastCalledWith("Web and browser apps", [
       { role: "user", content: "I want an AI web app" },
       { role: "assistant", content: "Choose one of the five categories." },
-    ]);
+    ], expect.any(AbortSignal));
+  });
+
+  it("keeps only the newest five complete clarification turns", async () => {
+    const classifyDiscoveryIntent = vi.fn(async (
+      _message: string,
+      _history: readonly { readonly role: "user" | "assistant"; readonly content: string }[],
+      _signal?: AbortSignal,
+    ) => {
+      void [_message, _history, _signal];
+      return { kind: "clarification" as const, question: "Please narrow that down." };
+    });
+    render(<OnboardingPage api={{ ...fakeApi, classifyDiscoveryIntent }} navigate={() => undefined} />);
+
+    for (let index = 0; index < 7; index += 1) {
+      fireEvent.change(screen.getByRole("textbox", { name: /what would you like to contribute to/i }), { target: { value: `Interest ${String(index)}` } });
+      fireEvent.click(screen.getByRole("button", { name: /find repositories/i }));
+      await vi.waitFor(() => { expect(classifyDiscoveryIntent).toHaveBeenCalledTimes(index + 1); });
+      await screen.findByText(/please narrow that down/i);
+    }
+
+    const lastHistory = classifyDiscoveryIntent.mock.calls.at(-1)?.[1];
+    expect(lastHistory).toHaveLength(10);
+    expect(lastHistory?.[0]).toEqual({ role: "user", content: "Interest 1" });
+    expect(lastHistory?.[9]).toEqual({ role: "assistant", content: "Please narrow that down." });
+  });
+
+  it("does not let a late classifier result override a manual category selection", async () => {
+    const destinations: string[] = [];
+    let resolveClassification: ((value: { kind: "category"; space: "data" }) => void) | undefined;
+    const classifyDiscoveryIntent = vi.fn(() => new Promise<{ kind: "category"; space: "data" }>((resolve) => { resolveClassification = resolve; }));
+    render(<OnboardingPage api={{ ...fakeApi, classifyDiscoveryIntent }} navigate={(destination) => destinations.push(destination)} />);
+
+    fireEvent.change(screen.getByRole("textbox", { name: /what would you like to contribute to/i }), { target: { value: "Something broad" } });
+    fireEvent.click(screen.getByRole("button", { name: /find repositories/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /developer tools/i }));
+    resolveClassification?.({ kind: "category", space: "data" });
+
+    await vi.waitFor(() => { expect(destinations).toEqual(["/discover?spaces=developer_tools"]); });
   });
 
   it("shows exactly five broad categories and navigates on one click", async () => {
