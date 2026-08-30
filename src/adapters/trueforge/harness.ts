@@ -257,7 +257,9 @@ export class TrueForgeHarness implements HarnessPort {
       throw normalizeSdkError(error);
     } finally {
       if (options?.sessionLifecycle === "transient" && sessionId !== undefined) {
-        await this.deleteSession(sessionId);
+        // Cleanup is best-effort: it must never replace the authoritative turn
+        // result or the original provider failure.
+        await this.deleteSession(sessionId).catch(() => undefined);
       }
     }
   }
