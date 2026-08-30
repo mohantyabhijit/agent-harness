@@ -21,6 +21,7 @@ const realCampaignResponse = {
 } as const;
 const realCampaignSnapshot: CampaignSnapshot = {
   ...realCampaignResponse,
+  nextAllowedAction: null,
   evidence: [],
   events: [{ id: "created", eventType: "campaign_created", occurredAt: "2026-08-26T00:00:00Z", sequence: 1, facts: {} }],
   approvals: [],

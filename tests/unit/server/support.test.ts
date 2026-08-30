@@ -37,6 +37,32 @@ function snapshot(): CampaignSnapshot {
 }
 
 describe("public campaign support", () => {
+  it("projects only the action whose durable completion evidence authorizes it", () => {
+    const committed = "b".repeat(40);
+    const implementation = publicCampaignSnapshot({
+      ...snapshot(),
+      campaign: campaign({ status: "implementation", version: 8 }),
+      externalReferences: [{ kind: "commit", value: committed }],
+      events: [{ id: "implementation-complete", eventType: "campaign_operation_completed", occurredAt: "2026-08-26T00:01:00Z", sequence: 1, payload: { operation: "implement", resultingCampaignVersion: 8, output: { currentCommitSha: committed } } }],
+    }, Date.parse("2026-08-26T00:10:00Z"));
+    const pending = publicCampaignSnapshot({
+      ...snapshot(),
+      campaign: campaign({ status: "implementation", version: 8 }),
+      externalReferences: [{ kind: "commit", value: committed }],
+      events: [],
+    }, Date.parse("2026-08-26T00:10:00Z"));
+    const verification = publicCampaignSnapshot({
+      ...snapshot(),
+      campaign: campaign({ status: "verification", version: 9 }),
+      externalReferences: [{ kind: "commit", value: committed }],
+      events: [{ id: "verification-complete", eventType: "campaign_operation_completed", occurredAt: "2026-08-26T00:01:00Z", sequence: 1, payload: { operation: "verify", resultingCampaignVersion: 9, output: { currentCommitSha: committed } } }],
+    }, Date.parse("2026-08-26T00:10:00Z"));
+
+    expect(implementation.nextAllowedAction).toBe("verify");
+    expect(pending.nextAllowedAction).toBeNull();
+    expect(verification.nextAllowedAction).toBe("implement");
+  });
+
   it("keeps raw Qodo body and source location out of the public snapshot", () => {
     const source = snapshot();
     const finding = {

@@ -4,18 +4,10 @@ export type CampaignAction = "preflight" | "implement" | "verify";
 
 interface CampaignActionsProps {
   readonly status: Campaign["status"];
+  readonly action: CampaignAction | null;
   readonly onRun: (action: CampaignAction) => void;
   readonly running?: CampaignAction | undefined;
 }
-
-const nextAction: Readonly<Partial<Record<Campaign["status"], CampaignAction>>> = {
-  policy_review: "preflight",
-  coordination_pending: "preflight",
-  quarantined: "preflight",
-  baseline: "implement",
-  implementation: "verify",
-  verification: "implement",
-};
 
 const copy: Readonly<Record<CampaignAction, { readonly eyebrow: string; readonly title: string; readonly description: string; readonly button: string }>> = {
   preflight: {
@@ -38,9 +30,8 @@ const copy: Readonly<Record<CampaignAction, { readonly eyebrow: string; readonly
   },
 };
 
-export function CampaignActions({ status, onRun, running }: CampaignActionsProps) {
-  const action = nextAction[status];
-  if (action === undefined) {
+export function CampaignActions({ status, action, onRun, running }: CampaignActionsProps) {
+  if (action === null) {
     return <section className="campaign-panel action-panel" aria-labelledby="campaign-actions-heading">
       <p className="eyebrow">Campaign controls</p>
       <h2 id="campaign-actions-heading">Awaiting the next verified state</h2>
