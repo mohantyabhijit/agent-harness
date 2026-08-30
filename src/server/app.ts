@@ -22,6 +22,8 @@ import type { AuthorizationPolicy, Capability } from "./authorization.js";
 import type { QodoReviewJobHealth } from "./jobs/qodo-review-job.js";
 import type { QodoReviewPort } from "../application/ports/qodo-review.js";
 import type { RepairVerifierPort } from "../application/ports/repair-verifier.js";
+import type { PublisherPort } from "../application/ports/publisher.js";
+import { registerPublisherRoutes } from "./routes/publisher.js";
 
 const emptyQuerySchema = z.object({}).strict();
 
@@ -37,6 +39,7 @@ export interface AppDependencies {
   readonly repairVerifier?: RepairVerifierPort;
   readonly requireReviewHealth?: boolean;
   readonly reviewSyncTimeoutMs?: number;
+  readonly publisher?: PublisherPort;
 }
 
 export function buildApp(dependencies: AppDependencies): FastifyInstance {
@@ -81,6 +84,7 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
   registerCampaignRoutes(app, { createCampaign, finalizeCampaign, runCampaign, store: dependencies.store, clock: dependencies.clock });
   registerApprovalRoutes(app, { store: dependencies.store, clock: dependencies.clock, ids: dependencies.ids });
   registerReviewRoutes(app, { syncReview: authenticatedReview, ...(dependencies.reviewSyncTimeoutMs === undefined ? {} : { timeoutMs: dependencies.reviewSyncTimeoutMs }) });
+  if (dependencies.publisher !== undefined) registerPublisherRoutes(app, { runCampaign, publisher: dependencies.publisher });
   return app;
 }
 

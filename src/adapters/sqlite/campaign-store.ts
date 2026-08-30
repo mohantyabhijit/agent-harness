@@ -631,6 +631,7 @@ export class SqliteCampaignStore implements CampaignStore {
       if (changed) {
         this.#replaceCommit(campaignId, record.newCommitSha);
       }
+      if (record.publishedReference !== undefined) this.#recordPublishedReference(campaignId, payload, record.publishedReference);
       if (changed || returnsToReview) {
         const nextStatus = returnsToReview ? "qodo_review" : claim.claimedCampaignStatus;
         const updated = this.#database.prepare("UPDATE campaigns SET version = version + 1, status = ?, updated_at = ? WHERE id = ? AND version = ? AND status = ?").run(nextStatus, completedAt, campaignId, claim.claimedCampaignVersion, claim.claimedCampaignStatus);
@@ -813,6 +814,20 @@ export class SqliteCampaignStore implements CampaignStore {
       return expectedVersion + 1;
     });
     return replace.immediate();
+  }
+
+  #recordPublishedReference(campaignId: string, payload: ExternalActionPayload, reference: ExternalReference): void {
+    if (payload.action === "push_branch" && reference.kind === "branch" && reference.value === payload.branch) {
+      this.#database.prepare("INSERT INTO external_references (campaign_id, kind, value) VALUES (?, 'branch', ?) ON CONFLICT DO NOTHING").run(campaignId, reference.value);
+      return;
+    }
+    if (payload.action === "create_pr" && reference.kind === "pull_request" && isPullRequest(reference.value, payload.repository)) {
+      const current = this.#currentPullRequest(campaignId);
+      if (current !== undefined && current !== reference.value) throw new Error("Campaign already has a different pull request");
+      if (current === undefined) this.#replacePullRequest(campaignId, reference.value);
+      return;
+    }
+    throw new Error("Published reference does not match the claimed external action");
   }
 
   #assertClaim(campaignId: string, expectedVersion: number, expectedStatus: CampaignStatus): void {

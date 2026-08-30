@@ -77,6 +77,7 @@ export interface ExternalActionCompletionRecord {
   readonly completedAt: string;
   readonly completedEvent: CampaignEventInput;
   readonly newCommitSha?: string;
+  readonly publishedReference?: ExternalReference;
 }
 
 export interface ExternalActionOutcomeUnknownRecord {

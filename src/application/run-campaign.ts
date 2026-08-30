@@ -4,7 +4,7 @@ import {
 } from "../domain/approval.js";
 import { transitionCampaign, type Campaign } from "../domain/campaign.js";
 import type { Clock, IdGenerator } from "./create-campaign.js";
-import type { CampaignEventInput, CampaignSnapshot, CampaignStore } from "./ports/campaign-store.js";
+import type { CampaignEventInput, CampaignSnapshot, CampaignStore, ExternalReference } from "./ports/campaign-store.js";
 import type { ExternalActionDisposition } from "./ports/campaign-store.js";
 import type {
   CampaignPacket,
@@ -122,6 +122,7 @@ export class RunCampaign {
     campaignId: string,
     request: ExternalActionApproval,
     action: (authorized: Readonly<AuthorizedExternalAction>) => Promise<T>,
+    completionReference?: (result: T, authorized: Readonly<AuthorizedExternalAction>) => ExternalReference | undefined,
   ): Promise<T> {
     validateExternalActionPayload(request.payload);
     const snapshot = await this.requiredSnapshot(campaignId);
@@ -175,8 +176,10 @@ export class RunCampaign {
     });
 
     let result: T;
+    let publishedReference: ExternalReference | undefined;
     try {
       result = await action(authorized);
+      publishedReference = completionReference?.(result, authorized);
     } catch {
       await this.markOutcomeUnknown(campaignId, claimId, approval.action, approval.actionDigest, snapshot);
       throw new Error("External action outcome is unknown; reconciliation required");
@@ -199,6 +202,7 @@ export class RunCampaign {
           occurredAt: this.clock.now(),
         },
         ...(newCommitSha === undefined ? {} : { newCommitSha }),
+        ...(publishedReference === undefined ? {} : { publishedReference }),
       });
     } catch {
       await this.markOutcomeUnknown(campaignId, claimId, approval.action, approval.actionDigest, snapshot);

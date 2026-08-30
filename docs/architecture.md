@@ -73,7 +73,7 @@ The server accepts only five external-action payload shapes: issue comment, assi
 
 The UI displays every exact field and requires the operator to confirm review. `POST /api/campaigns/:id/approvals` requires the operator capability, an idempotency key, proposal ID, exact digest, and expected campaign version. The store issues one active approval, expires it after ten minutes, and invalidates mismatched, replayed, stale, or already-consumed authority. External execution first atomically consumes the approval and records a claim. An unknown callback outcome is fenced for explicit reconciliation rather than retried blindly.
 
-The current HTTP composition stops at approval issuance. There is no route or production GitHub-write adapter wired to `executeApprovedExternalAction`, so comments, assignment requests, pushes, pull-request creation, and pull-request updates cannot be executed by this release. This distinction is deliberate: approval is authority, not evidence that an action occurred.
+The server-only publisher boundary exposes only `push_branch` and `create_pr` through `POST /api/campaigns/:id/publish`. Each request carries the complete exact-approved payload and approval ID; `RunCampaign.executeApprovedExternalAction` performs the existing digest, version, status, replay, claim, and unknown-outcome fencing before calling the injected publisher port. Push and PR creation therefore require separate scoped approvals. The TrueForge agent remains read-only. PR bodies must include the canonical issue link, verified tests, risks, rollback, and AI disclosure, and the route accepts exactly one canonical commit or pull-request URL as evidence.
 
 ## Qodo quality gate
 
@@ -100,6 +100,7 @@ Key routes are:
 - `GET /api/campaigns/:id`: sanitized durable campaign projection.
 - `POST /api/campaigns/:id/actions/:action`: authenticated `preflight`, `implement`, or `verify` execution.
 - `POST /api/campaigns/:id/approvals`: authenticated exact-approval issuance only.
+- `POST /api/campaigns/:id/publish`: authenticated server-only execution of an exact-approved branch push or pull-request creation.
 - `POST /api/campaigns/:id/reviews/sync`: separately authenticated Qodo locator ingestion.
 
 The web UI exposes onboarding, discovery, campaign creation, campaign reading, and approval issuance. It does not currently expose controls for the three campaign action routes or review synchronization.
