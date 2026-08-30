@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { describe, expect, it, vi } from "vitest";
 
 import type { CampaignPacket } from "../../../../src/application/ports/harness.js";
+import { campaignOperationResponseSchemas } from "../../../../src/application/ports/harness.js";
 import {
   HarnessAuthRequired,
   HarnessExecutionFailed,
@@ -83,12 +84,33 @@ describe("TrueForgeHarness", () => {
     expect(client.sessions.createTurnStream).toHaveBeenCalledWith(
       "child-session-1",
       {
-        input: [{ type: "user.message", content: JSON.stringify({ operation: "implement", packet }) }],
+        input: [{ type: "user.message", content: JSON.stringify({ operation: "implement", packet, responseSchema: campaignOperationResponseSchemas.implement }) }],
         previousTurnId: "auto",
       },
       { abortSignal: expect.any(AbortSignal) },
     );
     expect(consumed).toBe(events.length);
+  });
+
+  it("prompts production verification turns with the exact strict output contract", async () => {
+    const client = {
+      sessions: {
+        create: vi.fn().mockResolvedValue({ data: { id: "child-session-1" } }),
+        createTurnStream: vi.fn().mockResolvedValue(stream(await loadSessionEvents())),
+      },
+    };
+    const harness = new TrueForgeHarness(client as never);
+
+    await harness.runChildSession({ ...packet, currentCommitSha: "a".repeat(40) }, "verify");
+
+    const request = client.sessions.createTurnStream.mock.calls[0]?.[1] as { input?: readonly { content?: string }[] } | undefined;
+    const prompt = JSON.parse(request?.input?.[0]?.content ?? "{}") as { responseSchema?: unknown };
+    expect(prompt.responseSchema).toEqual(campaignOperationResponseSchemas.verify);
+    expect(prompt.responseSchema).toMatchObject({
+      type: "object",
+      additionalProperties: false,
+      required: ["testsPassed", "currentCommitSha", "tests", "uncertainty"],
+    });
   });
 
   it("deletes transient child sessions after success", async () => {

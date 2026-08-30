@@ -11,6 +11,8 @@ describe("OpenQuest project configuration", () => {
     expect(manifest.instructions).toMatch(/public.*license.*recent activity.*contribution policy.*external pull request acceptance/is);
     expect(manifest.instructions).toMatch(/background.*seeds.*leads/is);
     expect(manifest.instructions).toMatch(/exclude openai\/codex.*does not accept external code contributions/is);
+    expect(manifest.instructions).toMatch(/implementation turns.*status.*commitSha.*changedAreas.*tests.*uncertainty.*before.*after.*no extra fields/is);
+    expect(manifest.instructions).toMatch(/verification turns.*testsPassed.*currentCommitSha.*tests.*uncertainty.*no extra fields/is);
     expect(manifest.instructions).toMatch(/untrusted.*never.*write/is);
   });
 
