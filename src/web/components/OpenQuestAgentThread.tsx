@@ -1,9 +1,9 @@
 import { Component, useCallback, useState, type ReactNode } from "react";
 import { OpenQuestTrueForgeUI } from "./OpenQuestTrueForgeUI.js";
 
-interface OpenQuestAgentThreadProps { readonly sessionId: string; readonly trueForgeBaseUrl?: string; }
+interface OpenQuestAgentThreadProps { readonly operatorCapability?: string | undefined; readonly sessionId: string; readonly trueForgeBaseUrl?: string; }
 
-export function OpenQuestAgentThread({ sessionId, trueForgeBaseUrl }: OpenQuestAgentThreadProps) {
+export function OpenQuestAgentThread({ operatorCapability, sessionId, trueForgeBaseUrl }: OpenQuestAgentThreadProps) {
   const [error, setError] = useState(false);
   const handleError = useCallback(() => { setError(true); }, []);
   return <section aria-labelledby="agent-thread-heading" className="campaign-panel agent-thread" data-session-id={sessionId} data-testid="agent-thread">
@@ -18,6 +18,7 @@ export function OpenQuestAgentThread({ sessionId, trueForgeBaseUrl }: OpenQuestA
         <OpenQuestTrueForgeUI
           initialSessionId={sessionId}
           onError={handleError}
+          operatorCapability={operatorCapability}
           {...(trueForgeBaseUrl === undefined ? {} : { trueForgeBaseUrl })}
         />
       </AgentWorkspaceBoundary>

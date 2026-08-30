@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createOpenQuestApi, type CampaignSnapshot, type FetchLike } from "../../src/web/api.js";
@@ -282,25 +282,21 @@ describe("OpenQuest browser API", () => {
   });
 });
 
-describe("operator connection", () => {
+describe("operator access", () => {
   afterEach(() => {
     cleanup();
     window.history.replaceState({}, "", "/");
   });
 
-  it("requires a local runtime connection and clears it on disconnect", () => {
+  it("does not block local development behind a capability screen", () => {
     render(<App />);
 
-    expect(screen.getByRole("heading", { name: /connect an operator capability/i })).toBeVisible();
-    const field = screen.getByLabelText(/operator capability/i);
-    fireEvent.change(field, { target: { value: "runtime-secret" } });
-    fireEvent.click(screen.getByRole("button", { name: /^connect$/i }));
-    expect(screen.getByRole("button", { name: /disconnect/i })).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: /disconnect/i }));
-    expect(screen.getByRole("heading", { name: /connect an operator capability/i })).toBeVisible();
+    expect(screen.getByRole("heading", { name: /find work that is worth shipping/i })).toBeVisible();
+    expect(screen.getByRole("heading", { name: /tell openquest what you want to build/i })).toBeVisible();
+    expect(screen.queryByLabelText(/operator capability/i)).not.toBeInTheDocument();
   });
 
-  it("disconnects from a campaign route and focuses each route heading", async () => {
+  it("keeps an injected capability connected and focuses the route heading", async () => {
     window.history.replaceState({}, "", "/campaigns/campaign-1");
     render(<App operatorCapability={() => "runtime-only"} />);
 
@@ -308,12 +304,6 @@ describe("operator connection", () => {
     await vi.waitFor(() => {
       expect(campaignHeading).toHaveFocus();
     });
-    fireEvent.click(screen.getByRole("button", { name: /disconnect/i }));
-
-    expect(window.location.pathname).toBe("/");
-    const connectionHeading = screen.getByRole("heading", { name: /connect an operator capability/i });
-    await vi.waitFor(() => {
-      expect(connectionHeading).toHaveFocus();
-    });
+    expect(screen.queryByRole("button", { name: /disconnect/i })).not.toBeInTheDocument();
   });
 });

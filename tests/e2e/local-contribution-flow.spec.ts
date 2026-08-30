@@ -67,8 +67,6 @@ test("completes the local campaign flow through separate push and pull-request p
   await page.route("**/api/campaigns", async (route) => route.fulfill({ status: 201, json: campaignCore("policy_review", 1) }));
 
   await page.goto("/");
-  await page.getByLabel("Operator capability").fill("fixture-capability");
-  await page.getByRole("button", { name: "Connect" }).click();
   await page.getByRole("button", { name: /developer tools/i }).click();
   await expect(page).toHaveURL(/\/discover\?spaces=developer_tools/);
   await expect(page.getByRole("button", { name: /start with handle an empty dependency response/i })).toBeVisible();

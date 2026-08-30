@@ -38,6 +38,19 @@ describe("CreateCampaign", () => {
     expect(harness.operations).toEqual(["policy"]);
     expect(harness.deletedSessions).toEqual(["session-2"]);
     expect(harness.requestOptions).toEqual([{ sessionLifecycle: "transient", sessionProfile: "policy" }]);
+    expect(harness.packets[0]?.context?.responseSchema).toMatchObject({
+      properties: {
+        evidence: {
+          items: {
+            properties: {
+              sourceUrl: {
+                pattern: expect.stringContaining("owner/repo"),
+              },
+            },
+          },
+        },
+      },
+    });
   });
 
   it("fails closed and cleans up when TrueForge returns a malformed issue brief", async () => {

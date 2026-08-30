@@ -1,10 +1,15 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import type { PropsWithChildren } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@truefoundry/trueforge-ui", () => ({
-  TrueForgeUI: ({ initialSessionId }: { initialSessionId?: string }) => <div>TrueForge session {initialSessionId}</div>,
+  ServerProvider: ({ children }: PropsWithChildren) => <>{children}</>,
+  SlotsProvider: ({ children }: PropsWithChildren) => <>{children}</>,
+  Thread: () => null,
+  TrueForgeUI: () => <div>TrueForge UI</div>,
+  TrueFoundryChatProvider: ({ children, initialSessionId }: PropsWithChildren<{ initialSessionId?: string }>) => <><div>TrueForge session {initialSessionId}</div>{children}</>,
 }));
 
 import type { CampaignSnapshot, OpenQuestApi } from "../../src/web/api.js";
