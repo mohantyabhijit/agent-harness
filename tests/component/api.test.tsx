@@ -292,7 +292,7 @@ describe("operator access", () => {
     render(<App />);
 
     expect(screen.getByRole("heading", { name: /find work that is worth shipping/i })).toBeVisible();
-    expect(screen.getByRole("heading", { name: /tell openquest what you want to build/i })).toBeVisible();
+    expect(screen.getByRole("heading", { name: /chat with openquest/i })).toBeVisible();
     expect(screen.queryByLabelText(/operator capability/i)).not.toBeInTheDocument();
   });
 
