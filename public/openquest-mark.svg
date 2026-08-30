@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="OpenQuest">
+  <defs>
+    <linearGradient id="oq" x1="3" y1="3" x2="29" y2="29" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#635bff"/>
+      <stop offset="1" stop-color="#00d4ff"/>
+    </linearGradient>
+  </defs>
+  <rect width="32" height="32" rx="9" fill="url(#oq)"/>
+  <path d="M9 10.5h14v8.8a4 4 0 0 1-4 4h-1.6l-3.6 3v-3H13a4 4 0 0 1-4-4v-8.8Z" fill="none" stroke="#fff" stroke-width="2.2" stroke-linejoin="round"/>
+  <path d="m13 16 2 2 4-4" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

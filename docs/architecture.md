@@ -39,7 +39,7 @@ One public GitHub issue maps to one campaign. Creation checks for an existing re
 
 The browser does not hold authoritative campaign memory. It reloads a sanitized projection from SQLite. The embedded TrueForge panel resumes the parent session, while every discovery or campaign operation uses a fresh child session. Child packets contain the single campaign's identity, verified direct evidence, approval digests and statuses, current commit when known, a bounded goal, and operation-specific context. They do not inherit another campaign's SQLite record or approval authority.
 
-This is local durable memory, not a multi-user or distributed persistence system. Browser operator capability is memory-only React state and disappears on reload, close, or disconnect.
+This is local durable memory, not a multi-user or distributed persistence system. Local Vite development injects the operator capability into `/api` requests at the proxy boundary; the value is not bundled into browser code. Outside development, browser-entered operator capability remains memory-only React state and disappears on reload, close, or disconnect.
 
 ## Live discovery and read-only chat
 

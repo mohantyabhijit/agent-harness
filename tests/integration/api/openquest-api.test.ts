@@ -159,6 +159,9 @@ describe("OpenQuest API", () => {
     expect((await app.inject({ method: "POST", url: "/api/campaigns", headers: { authorization: "Bearer wrong" }, payload })).statusCode).toBe(403);
     expect((await app.inject({ method: "POST", url: "/api/campaigns", headers: { authorization: "Bearer operator-secret-token-value-000001" }, payload })).statusCode).toBe(201);
     expect((await app.inject({ method: "POST", url: "/api/campaigns/campaign-1/reviews/sync", headers: { authorization: "Bearer operator-secret-token-value-000001" }, payload: reviewBatch() })).statusCode).toBe(403);
+    expect((await app.inject({ method: "GET", url: "/api/operator-session" })).statusCode).toBe(401);
+    expect((await app.inject({ method: "GET", url: "/api/operator-session", headers: { authorization: "Bearer wrong" } })).statusCode).toBe(403);
+    expect((await app.inject({ method: "GET", url: "/api/operator-session", headers: { authorization: "Bearer operator-secret-token-value-000001" } })).statusCode).toBe(204);
     expect((await app.inject({ method: "GET", url: "/api/healthz" })).statusCode).toBe(200);
     await app.close();
   });

@@ -1,28 +1,31 @@
 import { expect, test } from "@playwright/test";
 
-test("lets a contributor choose a space and reach discovery", async ({ page }) => {
-  await page.route("**/api/spaces", async (route) => route.fulfill({ json: { spaces: ["ai_ml", "developer_tools", "web", "data", "social_impact"] } }));
+const spaces = { spaces: ["ai_ml", "developer_tools", "web", "data", "social_impact"] };
+
+test("opens directly into native TrueForge chat and validated quick starts", async ({ page }) => {
+  await page.route("**/api/spaces", async (route) => route.fulfill({ json: spaces }));
   await page.route("**/api/discovery/repositories", async (route) => route.fulfill({ json: { repositories: [] } }));
   await page.goto("/");
-  await page.getByLabel("Operator capability").fill("fixture-capability");
-  await page.getByRole("button", { name: "Connect" }).click();
-  await expect(page.getByRole("heading", { name: /what kind of open source/i })).toBeVisible();
+
+  await expect(page.getByRole("heading", { name: /find work that is worth shipping/i })).toBeVisible();
+  await expect(page.getByRole("heading", { name: /tell openquest what you want to build/i })).toBeVisible();
+  await expect(page.getByText(/trueforge native workspace/i)).toBeVisible();
+  await expect(page.getByLabel(/operator capability/i)).toHaveCount(0);
+
   await page.getByRole("button", { name: /developer tools/i }).click();
   await expect(page).toHaveURL(/\/discover\?spaces=developer_tools/);
-  await expect(page.getByRole("heading", { name: /find a project worth your next pull request/i })).toBeVisible();
+  await expect(page.getByRole("heading", { name: /find your next contribution/i })).toBeVisible();
   await expect(page.getByText(/no recommendations yet/i)).toBeVisible();
-  await expect(page.getByRole("status")).not.toContainText("LIVE EVIDENCE");
 });
 
-test("classifies conversational intake before verified discovery", async ({ page }) => {
-  await page.route("**/api/spaces", async (route) => route.fulfill({ json: { spaces: ["ai_ml", "developer_tools", "web", "data", "social_impact"] } }));
-  await page.route("**/api/discovery/classify", async (route) => route.fulfill({ json: { kind: "category", space: "data" } }));
-  await page.route("**/api/discovery/repositories", async (route) => route.fulfill({ json: { repositories: [] } }));
-  await page.goto("/");
-  await page.getByLabel("Operator capability").fill("fixture-capability");
-  await page.getByRole("button", { name: "Connect" }).click();
+test("fails closed and lets the user return to native chat", async ({ page }) => {
+  await page.route("**/api/spaces", async (route) => route.fulfill({ json: spaces }));
+  await page.route("**/api/discovery/repositories", async (route) => route.fulfill({ status: 503, json: { code: "harness_unavailable", message: "Agent harness is unavailable" } }));
+  await page.goto("/discover?spaces=data");
 
-  await page.getByRole("textbox", { name: /what would you like to contribute to/i }).fill("I want database infrastructure projects");
-  await page.getByRole("button", { name: /find repositories/i }).click();
-  await expect(page).toHaveURL(/\/discover\?spaces=data/);
+  await expect(page.getByRole("heading", { name: /verification did not finish/i })).toBeVisible();
+  await expect(page.getByText(/no unverified recommendations were shown/i)).toBeVisible();
+  await page.getByRole("button", { name: /back to chat/i }).last().click();
+  await expect(page).toHaveURL(/\/$/);
+  await expect(page.getByRole("heading", { name: /tell openquest what you want to build/i })).toBeVisible();
 });

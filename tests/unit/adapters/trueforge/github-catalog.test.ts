@@ -26,9 +26,32 @@ describe("TrueForgeGithubCatalog", () => {
         issueNumber: 0,
         verifiedEvidence: [],
         approvals: [],
+        context: {
+          responseSchema: expect.objectContaining({
+            type: "object",
+            properties: expect.objectContaining({
+              items: expect.objectContaining({ maxItems: 8 }),
+            }),
+          }),
+        },
       }),
       "discover",
     );
+  });
+
+  it("normalizes a numeric CI confidence to a conservative false boolean", async () => {
+    const [repository] = await loadFixture<readonly Record<string, unknown>[]>("repositories.json");
+    if (repository === undefined) throw new Error("Repository fixture is empty");
+    const candidate = verifiedRepository(repository, ["web"]);
+    const signals = { ...(candidate.signals as Record<string, unknown>), ciHealthy: 0.9 };
+    const { harness } = harnessReturning({
+      kind: "repositories",
+      items: [{ ...candidate, signals }],
+    });
+
+    await expect(createCatalog(harness).listRepositories(["web"])).resolves.toEqual([
+      expect.objectContaining({ signals: expect.objectContaining({ ciHealthy: false }) }),
+    ]);
   });
 
   it("allows a repository to match the selected category plus other known categories", async () => {
@@ -177,15 +200,16 @@ describe("TrueForgeGithubCatalog", () => {
     expect(request?.goal).toMatch(/background research.*seeds/i);
     expect(request?.goal).toContain("nanocoai/nanoclaw");
     expect(request?.goal).toContain("tinyfish-io/tinyfish-cookbook");
-    expect(request?.goal).toContain("openclaw/openclaw");
-    expect(request?.goal).toContain("NousResearch/hermes-agent");
     expect(request?.goal).toContain("NVIDIA/NeMo-Agent-Toolkit");
-    expect(request?.goal).toContain("openai/openai-agents-python");
-    expect(request?.goal).toContain("microsoft/agent-framework");
-    expect(request?.goal).toContain("agentscope-ai/agentscope");
     expect(request?.goal).toMatch(/freshly verify.*public visibility.*license.*recent activity.*contribution guide.*external pull request acceptance/i);
     expect(request?.goal).toMatch(/exclude openai\/codex.*does not accept external code contributions/i);
-    expect(request?.goal).toMatch(/at most 8/i);
+    expect(request?.goal).toMatch(/(?:no|never) return more than 8/i);
+    expect(request?.goal).toMatch(/up to 8 fully verified repositories/i);
+    expect(request?.goal).toMatch(/prefer fewer complete results/i);
+    expect(request?.goal).toMatch(/never use booleans or null for numeric signals/i);
+    expect(request?.goal).toMatch(/claim and verifiedValue as top-level fields/i);
+    expect(request?.goal).toMatch(/observation must be a plain non-empty string/i);
+    expect(request?.goal).toMatch(/trueforge final envelope with exactly summary, artifacts, and output/i);
     expect(request?.goal).toMatch(/GitHub read tools only/i);
   });
 

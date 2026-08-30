@@ -56,8 +56,8 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
     emptyQuerySchema.parse(request.query);
   });
   app.addHook("onRequest", async (request) => {
-    if (request.method === "GET" || request.method === "HEAD") return;
     const routeConfig = request.routeOptions.config as { capability?: Capability };
+    if ((request.method === "GET" || request.method === "HEAD") && routeConfig.capability === undefined) return;
     dependencies.authorization.require(request, routeConfig.capability ?? "operator");
   });
   app.setErrorHandler((error, _request, reply) => {
@@ -79,6 +79,7 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
     }
     return reply.send({ status: "ready" });
   });
+  app.get("/api/operator-session", { config: { capability: "operator" } }, async (_request, reply) => reply.code(204).send());
   registerSpaceRoutes(app);
   registerDiscoveryRoutes(app, { discover, catalog: dependencies.catalog, intentClassifier: new TrueForgeIntentClassifier(dependencies.harness) });
   registerCampaignRoutes(app, { createCampaign, finalizeCampaign, runCampaign, store: dependencies.store, clock: dependencies.clock });
