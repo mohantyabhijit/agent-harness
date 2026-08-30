@@ -4,13 +4,14 @@ import {
   Thread,
   TrueForgeUI,
   TrueFoundryChatProvider,
+  type WelcomeScreenProps,
 } from "@truefoundry/trueforge-ui";
 import { createTrueForgeAgentUIServer } from "@truefoundry/trueforge-ui/plugins/trueforge-agent-server-adapter";
 import { useMemo } from "react";
 
 interface OpenQuestTrueForgeUIProps {
   readonly initialSessionId?: string;
-  readonly layout?: "sidebar" | "drawer" | "dock" | "widget";
+  readonly layout?: "sidebar" | "drawer" | "dock" | "widget" | "thread";
   readonly onError: () => void;
   readonly operatorCapability?: string | undefined;
   readonly trueForgeBaseUrl?: string;
@@ -42,11 +43,23 @@ export function OpenQuestTrueForgeUI({
 
   return <TrueForgeUI
     agentConfig={agentConfig}
-    layout={layout}
+    layout={layout === "thread" ? SimpleChatLayout : layout}
     onError={onError}
+    {...(layout === "thread" ? { overrides: { WelcomeScreen: SimpleChatWelcome } } : {})}
     server={server}
     theme={theme}
   />;
+}
+
+function SimpleChatLayout({ className }: { readonly className?: string }) {
+  return <div className={["simple-chat-layout", className].filter(Boolean).join(" ")}><Thread /></div>;
+}
+
+function SimpleChatWelcome({ className }: WelcomeScreenProps) {
+  return <div className={["simple-chat-welcome", className].filter(Boolean).join(" ")}>
+    <strong>What would you like to build?</strong>
+    <p>Describe your interests and OpenQuest will find a contribution worth making.</p>
+  </div>;
 }
 
 function OpenQuestTrueForgeSession({

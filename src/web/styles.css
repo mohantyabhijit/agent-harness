@@ -35,18 +35,17 @@ h3 { margin-bottom:.65rem; font-size:1.2rem; letter-spacing:-.025em; }
 .trust-list { display:grid; gap:.9rem; margin:0; padding:0; list-style:none; }
 .trust-list li { display:flex; gap:.7rem; align-items:center; color:var(--muted); font-size:.9rem; font-weight:700; }
 .trust-list li::before { display:grid; width:1.35rem; height:1.35rem; place-items:center; border-radius:50%; color:#fff; background:var(--green); content:"✓"; font-size:.72rem; }
-.native-chat { position:relative; overflow:hidden; padding:clamp(1rem,2.5vw,1.75rem); border:1px solid rgba(99,91,255,.2); border-radius:1.35rem; background:rgba(255,255,255,.95); box-shadow:var(--shadow); }
-.native-chat::before { position:absolute; top:0; right:0; left:0; height:.25rem; background:linear-gradient(90deg,var(--purple),#8b5cf6 50%,#00d4ff); content:""; }
-.native-chat__header { display:flex; justify-content:space-between; gap:1.5rem; align-items:start; }
-.native-chat__header h2 { max-width:16ch; font-size:clamp(1.8rem,4vw,3rem); }
-.native-chat__intro { max-width:50rem; margin:0 0 1.2rem; }
-.live-badge { display:inline-flex; flex:0 0 auto; gap:.45rem; align-items:center; padding:.42rem .65rem; border:1px solid #b7dfd0; border-radius:999px; color:var(--green); background:#effaf6; font-size:.75rem; font-weight:800; }
-.live-badge span { width:.48rem; height:.48rem; border-radius:50%; background:#17b26a; box-shadow:0 0 0 .2rem rgba(23,178,106,.14); }
+.native-chat { width:min(48rem,100%); margin:0 auto; }
 .native-chat__fallback { margin-bottom:1rem; padding:1rem; border-left:.25rem solid var(--danger); border-radius:.4rem; background:#fff4f2; }
 .native-chat__fallback p { margin-bottom:0; }
 .trueforge-frame { min-height:31rem; height:min(38rem,70svh); margin:1rem -.6rem -.6rem; overflow:hidden; border:1px solid var(--line); border-radius:.9rem; background:#fff; }
-.trueforge-frame.discovery-chat__frame { min-height:35rem; height:min(44rem,72svh); margin:0; }
+.trueforge-frame.discovery-chat__frame { min-height:30rem; height:min(36rem,68svh); margin:0; border-radius:1rem; box-shadow:0 .75rem 2rem rgba(50,50,93,.08); }
 .trueforge-frame>* { height:100%; }
+.simple-chat-layout { min-width:0; height:100%; }
+.simple-chat-layout>* { height:100%; }
+.simple-chat-welcome { display:grid; max-width:28rem; margin:auto; padding:2rem; place-items:center; text-align:center; }
+.simple-chat-welcome strong { color:var(--ink); font-size:clamp(1.35rem,3vw,1.8rem); letter-spacing:-.025em; }
+.simple-chat-welcome p { max-width:26rem; margin:.55rem 0 0; }
 .category-section { padding-top:clamp(4rem,8vw,7rem); }
 .section-heading { max-width:44rem; margin:4.25rem 0 1.3rem; }
 .section-heading--compact { margin-top:0; }
@@ -127,6 +126,6 @@ dd { margin:.2rem 0 0; color:var(--ink); font-weight:700; }
 .action-note { margin:.9rem 0 0; color:var(--subtle); font-size:.82rem; }
 .publication-details { margin-bottom:1rem; }
 @media (max-width:62rem) { .campaign-layout,.onboarding-hero { grid-template-columns:1fr; } .campaign-side { position:static; } .trust-list { grid-template-columns:repeat(3,1fr); } .space-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
-@media (max-width:44rem) { .operator-access { position:static; grid-template-columns:1fr; } .trust-list,.loading-grid { grid-template-columns:1fr; } .native-chat__header { display:block; } .live-badge { margin-bottom:1rem; } .trueforge-frame.discovery-chat__frame { min-height:32rem; height:68svh; } }
+@media (max-width:44rem) { .operator-access { position:static; grid-template-columns:1fr; } .trust-list,.loading-grid { grid-template-columns:1fr; } .trueforge-frame.discovery-chat__frame { min-height:28rem; height:64svh; } }
 @media (max-width:31rem) { h1 { font-size:clamp(2.65rem,15vw,4rem); } .space-grid,.signal-grid,.issue-signals,.quality-counts { grid-template-columns:1fr; } .space-card { min-height:8rem; } .panel-heading { display:block; } .status-pill,.fact-count { display:inline-block; margin-bottom:.8rem; } }
 @media (prefers-reduced-motion:reduce) { *,*::before,*::after { scroll-behavior:auto!important; transition-duration:.01ms!important; animation-duration:.01ms!important; animation-iteration-count:1!important; } }
