@@ -6,10 +6,11 @@ interface PublicationActionProps {
   readonly onPublish: () => void;
   readonly result?: PublicationResult;
   readonly error?: "unknown" | "generic";
+  readonly errorMessage?: string;
   readonly submitting?: boolean;
 }
 
-export function PublicationAction({ action, approvalId, onPublish, result, error, submitting = false }: PublicationActionProps) {
+export function PublicationAction({ action, approvalId, onPublish, result, error, errorMessage, submitting = false }: PublicationActionProps) {
   const approved = approvalId !== undefined;
   return <section aria-labelledby="publication-action-heading" className="campaign-panel publication-action">
     <div className="panel-heading"><div><p className="eyebrow">Separate execution step</p><h2 id="publication-action-heading">Execute approved action</h2></div><span className="status-pill">{action.action === "push_branch" ? "Branch push" : "Pull request"}</span></div>
@@ -21,7 +22,7 @@ export function PublicationAction({ action, approvalId, onPublish, result, error
     </dl>
     {!approved ? <p role="status">Execution is locked until this exact proposal has an active approval.</p> : result === undefined && error === undefined ? <><p>Review the approval above, then execute the one authorized GitHub write.</p><button className="primary-action" disabled={submitting} onClick={onPublish} type="button">{submitting ? "Publishing exact action…" : action.action === "push_branch" ? "Push approved branch" : "Create approved pull request"}</button></> : null}
     {result === undefined || error !== undefined ? null : <PublicationResultView action={action} result={result} />}
-    {error === "unknown" ? <div className="campaign-error" role="alert"><strong>Publication outcome unknown.</strong> The provider did not prove whether the write completed. Reconciliation is required; execution is locked until authoritative campaign facts are reconciled.</div> : error === "generic" ? <div className="campaign-error" role="alert"><p>The approved action was not published. Correct the reported problem, then retry the still-active approval.</p><button className="primary-action" disabled={submitting} onClick={onPublish} type="button">Retry approved action</button></div> : null}
+    {error === "unknown" ? <div className="campaign-error" role="alert"><strong>Publication outcome unknown.</strong> The provider did not prove whether the write completed. Reconciliation is required; execution is locked until authoritative campaign facts are reconciled.</div> : error === "generic" ? <div className="campaign-error" role="alert"><p>{errorMessage ?? "The approved action was not published. Correct the reported problem, then retry the still-active approval."}</p><button className="primary-action" disabled={submitting} onClick={onPublish} type="button">Retry approved action</button></div> : null}
   </section>;
 }
 

@@ -75,7 +75,7 @@ describe("Campaign publication UX", () => {
     render(<CampaignPage api={baseApi(async () => snapshot(), publishApprovedAction)} campaignId="campaign-1" />);
 
     fireEvent.click(await screen.findByRole("button", { name: /create approved pull request/i }));
-    expect(await screen.findByText(/approved action was not published/i)).toBeVisible();
+    expect(await screen.findByText(/connect an operator capability/i)).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: /retry approved action/i }));
     expect(await screen.findByText(/pull request opened/i)).toBeVisible();
     expect(publishApprovedAction).toHaveBeenCalledTimes(2);
