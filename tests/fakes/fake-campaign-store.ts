@@ -74,6 +74,12 @@ export class FakeCampaignStore implements CampaignStore {
 
   async finalizeCampaign(campaignId: string, brief: IssueBrief, expectedVersion: number, event: CampaignEventInput): Promise<Campaign> {
     const snapshot = this.#required(campaignId);
+    const requestedKey = isRecord(event.payload) ? event.payload.idempotencyKey : undefined;
+    const prior = snapshot.events.find((candidate) => candidate.eventType === "campaign_finalized" && isRecord(candidate.payload) && candidate.payload.idempotencyKey === requestedKey);
+    if (prior !== undefined) {
+      if (!isRecord(prior.payload) || prior.payload.expectedVersion !== expectedVersion) throw new CampaignVersionConflict(campaignId, expectedVersion);
+      return structuredClone(snapshot.campaign);
+    }
     if (snapshot.campaign.version !== expectedVersion || snapshot.campaign.status !== "policy_review") throw new CampaignVersionConflict(campaignId, expectedVersion);
     this.#assertEventAvailable(event.id);
     if (this.failNextEvent) { this.failNextEvent = false; throw new Error("Campaign finalization persistence failed"); }

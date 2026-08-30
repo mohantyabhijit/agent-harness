@@ -158,6 +158,27 @@ describe("SqliteCampaignStore", () => {
     expect((await store.get("campaign-1"))?.events).toHaveLength(2);
   });
 
+  it("serializes same-key finalization retries and binds the original version", async () => {
+    const { storeA, storeB, databaseA } = openTwoConnectionStore("openquest-finalization-");
+    const issueBrief = {
+      problem: "The boundary result is incorrect.", likelyCause: "A guard is missing.", smallestFix: "Add the guard and regression test.",
+      affectedAreas: ["src/boundary.ts"], tests: ["Run the regression test."], risks: ["Invalid callers may surface."], uncertainty: "Call sites require inspection.",
+      evidence: [{ sourceUrl: "https://github.com/owner/repo/issues/42", observation: "The issue documents expected behavior." }],
+    };
+    await storeA.create(campaign({ status: "policy_review", version: 1 }), { id: "created-concurrent-finalize", eventType: "campaign_created", occurredAt: "2026-08-30T00:00:00Z", payload: { issueBrief } });
+    const event = (id: string) => ({ id, eventType: "campaign_finalized", occurredAt: "2026-08-30T00:01:00Z", payload: { idempotencyKey: "same-concurrent-key", expectedVersion: 1 } });
+
+    const results = await Promise.all([
+      storeA.finalizeCampaign("campaign-1", issueBrief, 1, event("finalized-a")),
+      storeB.finalizeCampaign("campaign-1", issueBrief, 1, event("finalized-b")),
+    ]);
+
+    expect(results.map(({ version }) => version)).toEqual([2, 2]);
+    expect((await storeA.get("campaign-1"))?.events.filter(({ eventType }) => eventType === "campaign_finalized")).toHaveLength(1);
+    await expect(storeB.finalizeCampaign("campaign-1", issueBrief, 2, event("finalized-mismatch"))).rejects.toBeInstanceOf(CampaignVersionConflict);
+    databaseA.close();
+  });
+
   it("rolls back terminal Qodo status when SQLite cannot persist escalation evidence", async () => {
     const { database, store } = openMemoryStore();
     const current = campaign({ status: "qodo_review", version: 1, qodoIteration: 3 });

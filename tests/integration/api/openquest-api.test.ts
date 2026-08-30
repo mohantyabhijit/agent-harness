@@ -263,6 +263,14 @@ describe("OpenQuest API", () => {
     });
     const campaignId = (await app.inject({ method: "GET", url: "/api/campaigns/campaign-1" })).json().id as string;
 
+    const blocked = await app.inject({ method: "POST", url: `/api/campaigns/${campaignId}/actions/preflight`, payload: {} });
+    expect(blocked.statusCode).toBe(422);
+    const finalized = await app.inject({
+      method: "POST",
+      url: `/api/campaigns/${campaignId}/finalize`,
+      payload: { expectedVersion: 1, idempotencyKey: "finalize-api-flow-0001" },
+    });
+    expect(finalized.statusCode).toBe(200);
     const preflight = await app.inject({ method: "POST", url: `/api/campaigns/${campaignId}/actions/preflight`, payload: {} });
     expect(preflight.statusCode).toBe(200);
     expect(preflight.json()).toMatchObject({ status: "baseline" });

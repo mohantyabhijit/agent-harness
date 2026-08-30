@@ -1,7 +1,7 @@
 import type { CampaignStore } from "./ports/campaign-store.js";
 import type { HarnessPort } from "./ports/harness.js";
 import type { Campaign } from "../domain/campaign.js";
-import { isSourceBackedIssueBrief } from "../domain/issue-brief.js";
+import { isIssueBriefFor } from "../domain/issue-brief.js";
 import { ApplicationError } from "./errors.js";
 
 export interface Clock {
@@ -52,12 +52,11 @@ export class CreateCampaign {
         campaignId,
         repository: input.repository,
         issueNumber: input.issueNumber,
-        goal: "Explain the GitHub issue and propose the smallest safe fix. Return only the strict issue brief object requested by the OpenQuest agent instructions.",
+        goal: "Explain the GitHub issue and propose the smallest safe fix. Return the standard TrueForge final envelope with the strict issue brief in its output field.",
         verifiedEvidence: [{ sourceUrl: input.issueUrl, observation: "Selected GitHub issue to analyze before any repository clone or execution." }],
         approvals: [],
-      }, "policy");
-      await this.harness.deleteSession(analysis.sessionId);
-      if (!isSourceBackedIssueBrief(analysis.output)) throw new Error("Invalid issue brief");
+      }, "policy", { sessionLifecycle: "transient", sessionProfile: "policy" });
+      if (!isIssueBriefFor(analysis.output, input.repository, input.issueNumber)) throw new Error("Invalid issue brief");
       issueBrief = structuredClone(analysis.output);
     } catch {
       try {

@@ -37,6 +37,21 @@ describe("FinalizeCampaign", () => {
     expect((await store.get("campaign-1"))?.events.filter(({ eventType }) => eventType === "campaign_finalized")).toHaveLength(1);
   });
 
+  it("atomically replays concurrent requests with the same bound key", async () => {
+    const store = await seededStore();
+    const finalize = service(store);
+    const results = await Promise.all([
+      finalize.execute({ campaignId: "campaign-1", expectedVersion: 1, idempotencyKey: "concurrent-finalize" }),
+      finalize.execute({ campaignId: "campaign-1", expectedVersion: 1, idempotencyKey: "concurrent-finalize" }),
+    ]);
+    expect(results).toEqual([
+      expect.objectContaining({ status: "coordination_pending", version: 2 }),
+      expect.objectContaining({ status: "coordination_pending", version: 2 }),
+    ]);
+    expect((await store.get("campaign-1"))?.events.filter(({ eventType }) => eventType === "campaign_finalized")).toHaveLength(1);
+    await expect(finalize.execute({ campaignId: "campaign-1", expectedVersion: 2, idempotencyKey: "concurrent-finalize" })).rejects.toMatchObject({ code: "campaign_conflict" });
+  });
+
   it("does not advance when the atomic event write fails", async () => {
     const store = await seededStore();
     store.failNextEvent = true;

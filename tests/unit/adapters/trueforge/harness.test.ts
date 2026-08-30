@@ -105,6 +105,30 @@ describe("TrueForgeHarness", () => {
     expect(client.sessions.delete).toHaveBeenCalledWith("child-session-1");
   });
 
+  it("creates policy turns with an inline read-only sandbox-disabled agent", async () => {
+    const client = {
+      sessions: {
+        create: vi.fn().mockResolvedValue({ data: { id: "child-session-1" } }),
+        createTurnStream: vi.fn().mockResolvedValue(stream(await loadSessionEvents())),
+        delete: vi.fn().mockResolvedValue(undefined),
+      },
+    };
+    const harness = new TrueForgeHarness(client as never);
+
+    await harness.runChildSession(packet, "policy", { sessionLifecycle: "transient", sessionProfile: "policy" });
+
+    expect(client.sessions.create).toHaveBeenCalledWith({
+      agent: {
+        spec: expect.objectContaining({
+          instructions: expect.stringMatching(/final envelope.*output.*issue brief/is),
+          mcpServers: [expect.objectContaining({ enableTools: ["@read-only"] })],
+          config: expect.objectContaining({ sandbox: { enabled: false, fileDownloads: false } }),
+        }),
+      },
+    }, {});
+    expect(client.sessions.delete).toHaveBeenCalledWith("child-session-1");
+  });
+
   it("deletes transient child sessions when execution fails after allocation", async () => {
     const client = {
       sessions: {

@@ -30,6 +30,25 @@ export function isSourceBackedIssueBrief(value: unknown): value is IssueBrief {
   });
 }
 
+export function isIssueBriefFor(value: unknown, repository: string, issueNumber: number): value is IssueBrief {
+  if (!isSourceBackedIssueBrief(value)) return false;
+  const [owner, name, extra] = repository.split("/");
+  if (owner === undefined || name === undefined || extra !== undefined || !Number.isSafeInteger(issueNumber) || issueNumber < 1) return false;
+  const repositoryRoot = `/${owner}/${name}/`;
+  const selectedIssuePath = `${repositoryRoot}issues/${String(issueNumber)}`;
+  let selectedIssueCited = false;
+  for (const item of value.evidence) {
+    const url = new URL(item.sourceUrl);
+    if (url.search !== "" || !url.pathname.toLowerCase().startsWith(repositoryRoot.toLowerCase())) return false;
+    const path = url.pathname.replace(/\/$/u, "");
+    const isSelectedIssue = path.toLowerCase() === selectedIssuePath.toLowerCase() && (url.hash === "" || /^#issuecomment-\d+$/u.test(url.hash));
+    const isRelevantRepositorySource = /^\/(?:[^/]+)\/(?:[^/]+)\/(?:pull\/\d+|commit\/[0-9a-f]{40}|blob\/[^/]+\/.+)$/u.test(path) && url.hash === "";
+    if (!isSelectedIssue && !isRelevantRepositorySource) return false;
+    selectedIssueCited ||= isSelectedIssue;
+  }
+  return selectedIssueCited;
+}
+
 function boundedText(value: unknown): value is string {
   return typeof value === "string" && value.trim().length >= 3 && value.length <= 2_000;
 }

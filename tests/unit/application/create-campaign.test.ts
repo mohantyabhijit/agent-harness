@@ -37,6 +37,7 @@ describe("CreateCampaign", () => {
     expect(harness.parentSessions).toEqual(["session-1"]);
     expect(harness.operations).toEqual(["policy"]);
     expect(harness.deletedSessions).toEqual(["session-2"]);
+    expect(harness.requestOptions).toEqual([{ sessionLifecycle: "transient", sessionProfile: "policy" }]);
   });
 
   it("fails closed and cleans up when TrueForge returns a malformed issue brief", async () => {
@@ -171,11 +172,11 @@ describe("CreateCampaign", () => {
       lane: "easy_win",
     });
     await expect(result).rejects.toEqual(
-      new Error("Issue analysis failed; unused session cleanup required"),
+      new Error("Campaign creation failed; unused session cleanup required"),
     );
     await expect(result).rejects.not.toThrow(/top-secret/u);
     expect(await store.get("campaign-1")).toBeUndefined();
-    expect(harness.deleteAttempts).toBe(2);
+    expect(harness.deleteAttempts).toBe(1);
   });
 
   it("matches SQLite global campaign-event identity semantics", async () => {

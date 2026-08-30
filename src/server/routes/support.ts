@@ -3,7 +3,7 @@ import { z } from "zod";
 import { currentApprovalProposal, proposalActionSummary } from "../../application/approval-proposal.js";
 import type { CampaignSnapshot } from "../../application/ports/campaign-store.js";
 import type { Approval } from "../../domain/approval.js";
-import { isSourceBackedIssueBrief } from "../../domain/issue-brief.js";
+import { isIssueBriefFor } from "../../domain/issue-brief.js";
 
 export const campaignIdSchema = z.string().min(1).max(128).regex(/^[A-Za-z0-9._:-]+$/u);
 export const repositoryPartSchema = z.string().min(1).max(100).regex(/^[A-Za-z0-9_.-]+$/u);
@@ -58,12 +58,12 @@ export function publicCampaignSnapshot(snapshot: CampaignSnapshot, now: number):
 }
 
 function publicIssueBrief(snapshot: CampaignSnapshot): unknown {
-  const finalized = snapshot.events.find((item) => item.eventType === "campaign_finalized" && isRecord(item.payload) && isSourceBackedIssueBrief(item.payload.brief));
-  const created = snapshot.events.find((item) => item.eventType === "campaign_created" && isRecord(item.payload) && isSourceBackedIssueBrief(item.payload.issueBrief));
+  const finalized = snapshot.events.find((item) => item.eventType === "campaign_finalized" && isRecord(item.payload) && isIssueBriefFor(item.payload.brief, snapshot.campaign.repository, snapshot.campaign.issueNumber));
+  const created = snapshot.events.find((item) => item.eventType === "campaign_created" && isRecord(item.payload) && isIssueBriefFor(item.payload.issueBrief, snapshot.campaign.repository, snapshot.campaign.issueNumber));
   const finalizedBrief = finalized !== undefined && isRecord(finalized.payload) ? finalized.payload.brief : undefined;
   const createdBrief = created !== undefined && isRecord(created.payload) ? created.payload.issueBrief : undefined;
   const brief = finalizedBrief ?? createdBrief;
-  if (!isSourceBackedIssueBrief(brief)) return null;
+  if (!isIssueBriefFor(brief, snapshot.campaign.repository, snapshot.campaign.issueNumber)) return null;
   return structuredClone(brief);
 }
 

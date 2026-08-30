@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { isSourceBackedIssueBrief } from "../../../src/domain/issue-brief.js";
+import { isIssueBriefFor, isSourceBackedIssueBrief } from "../../../src/domain/issue-brief.js";
 
 const brief = {
   problem: "The issue describes an incorrect boundary result.",
@@ -16,6 +16,15 @@ const brief = {
 describe("issue brief", () => {
   it("accepts only a complete source-backed brief", () => {
     expect(isSourceBackedIssueBrief(brief)).toBe(true);
+    expect(isIssueBriefFor(brief, "owner/repo", 42)).toBe(true);
+  });
+
+  it.each([
+    ["another repository", { ...brief, evidence: [{ ...brief.evidence[0], sourceUrl: "https://github.com/other/repo/issues/42" }] }],
+    ["another issue", { ...brief, evidence: [{ ...brief.evidence[0], sourceUrl: "https://github.com/owner/repo/issues/99" }] }],
+    ["an arbitrary repository page", { ...brief, evidence: [{ ...brief.evidence[0], sourceUrl: "https://github.com/owner/repo/settings" }] }],
+  ])("rejects evidence bound to %s", (_label, value) => {
+    expect(isIssueBriefFor(value, "owner/repo", 42)).toBe(false);
   });
 
   it.each([
