@@ -11,7 +11,7 @@ OpenQuest is an approval-gated, evidence-first harness for open-source contribut
 - **Fail-closed live GitHub discovery.** TrueForge returns strictly validated repository and issue envelopes. OpenQuest rejects private repositories, missing or invalid evidence, canonical-identity mismatches, cross-repository issue URLs, duplicates, and malformed provider output instead of silently substituting fixtures. (`200aab6`, `4a7453d`, `e470867`, `d1b0c14`)
 - **Issue lanes.** Issues are classified as **Easy Wins** or **Long-Term Challenges** from scope clarity, affected areas, test complexity, dependency risk, and estimated effort. (`200aab6`)
 - **Progressive and recoverable discovery UI.** Repository results render before every issue request completes; individual issue loads can be retried, stale responses are fenced, duplicate repositories are removed, and unmounted requests are cancelled. (`9ff9269`, `62118f6`, `aab306f`, `daf1505`, `ce0e93b`, `341ed22`)
-- **One campaign per public issue.** Selecting an issue creates or resumes its durable campaign rather than producing duplicate work for the same repository and issue. (`b0b4322`, `8d174a3`)
+- **One campaign per public issue.** Campaign creation enforces a unique repository/issue pair and rejects duplicate attempts, preventing parallel durable records for the same issue. (`b0b4322`, `8d174a3`)
 
 ## Campaign orchestration and isolation
 
