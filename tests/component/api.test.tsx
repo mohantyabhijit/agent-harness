@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createOpenQuestApi, type CampaignSnapshot, type FetchLike } from "../../src/web/api.js";
@@ -74,9 +74,9 @@ function repositoryResponse(explanationEvidence: Evidence = canonicalEvidence) {
 }
 
 describe("OpenQuest browser API", () => {
-  it("maps the Task 7 spaces contract without browser credentials", async () => {
+  it("maps the Task 7 spaces contract and keeps capabilities off GET requests", async () => {
     const fetcher = vi.fn<FetchLike>(async () => new Response(JSON.stringify(realSpacesResponse), { status: 200 }));
-    const api = createOpenQuestApi({ fetch: fetcher, baseUrl: "https://openquest.test" });
+    const api = createOpenQuestApi({ fetch: fetcher, baseUrl: "https://openquest.test", operatorCapability: () => "runtime-only" });
 
     await expect(api.getSpaces()).resolves.toEqual([
       expect.objectContaining({ id: "developer_tools", name: "Developer tools" }),
@@ -93,14 +93,14 @@ describe("OpenQuest browser API", () => {
   });
 
   it("accepts the strict Task 7 campaign response and projects its navigation id", async () => {
-    const api = createOpenQuestApi({ fetch: async () => new Response(JSON.stringify(realCampaignResponse), { status: 201 }) });
+    const api = createOpenQuestApi({ fetch: async () => new Response(JSON.stringify(realCampaignResponse), { status: 201 }), operatorCapability: () => "runtime-only" });
 
     await expect(api.createCampaign({ repository: "owner/repo", issueNumber: 1, issueUrl: "https://github.com/owner/repo/issues/1", lane: "easy_win" })).resolves.toEqual({ id: ":review.1" });
   });
 
-  it("loads a strictly validated durable campaign snapshot without credentials", async () => {
+  it("loads a strictly validated durable campaign snapshot without sending a capability", async () => {
     const fetcher = vi.fn<FetchLike>(async () => new Response(JSON.stringify(realCampaignSnapshot), { status: 200 }));
-    const api = createOpenQuestApi({ fetch: fetcher, baseUrl: "https://openquest.test" });
+    const api = createOpenQuestApi({ fetch: fetcher, baseUrl: "https://openquest.test", operatorCapability: () => "runtime-only" });
 
     await expect(api.getCampaign(":review.1")).resolves.toEqual(realCampaignSnapshot);
     expect(fetcher).toHaveBeenCalledWith("https://openquest.test/api/campaigns/%3Areview.1", expect.not.objectContaining({ headers: expect.anything() }));
@@ -162,28 +162,28 @@ describe("OpenQuest browser API", () => {
     const confirmation = { proposalId: "proposal-1", actionDigest: `sha256:${"b".repeat(64)}`, expectedCampaignVersion: 7 };
     const approval = { id: "approval-1", action: "create_pr", actionDigest: `sha256:${"b".repeat(64)}`, status: "approved", issuedAt: "2026-08-26T00:00:00Z", proposalId: "proposal-1", expectedCampaignVersion: 7, isActive: true } as const;
     const fetcher = vi.fn<FetchLike>(async () => new Response(JSON.stringify({ approval }), { status: 201 }));
-    const api = createOpenQuestApi({ fetch: fetcher });
+    const api = createOpenQuestApi({ fetch: fetcher, operatorCapability: () => "runtime-only" });
 
     await expect(api.issueApproval(":review.1", confirmation, "approval-click-0001")).resolves.toEqual(approval);
     expect(fetcher).toHaveBeenCalledWith("/api/campaigns/%3Areview.1/approvals", expect.objectContaining({
       method: "POST",
-      headers: { "content-type": "application/json", "idempotency-key": "approval-click-0001" },
+      headers: { "content-type": "application/json", authorization: "Bearer runtime-only", "idempotency-key": "approval-click-0001" },
       body: JSON.stringify(confirmation),
     }));
   });
 
-  it("starts only a declared campaign operation without browser credentials", async () => {
+  it("starts only a declared campaign operation with the operator capability", async () => {
     const fetcher = vi.fn<FetchLike>(async () => new Response(JSON.stringify(realCampaignResponse), { status: 200 }));
-    const api = createOpenQuestApi({ fetch: fetcher });
+    const api = createOpenQuestApi({ fetch: fetcher, operatorCapability: () => "runtime-only" });
 
     await expect(api.runCampaignAction(":review.1", "preflight")).resolves.toEqual(realCampaignResponse);
     expect(fetcher).toHaveBeenCalledWith("/api/campaigns/%3Areview.1/actions/preflight", expect.objectContaining({
-      method: "POST", headers: { "content-type": "application/json" }, body: "{}",
+      method: "POST", headers: { "content-type": "application/json", authorization: "Bearer runtime-only" }, body: "{}",
     }));
   });
 
   it("rejects campaign responses with unexpected fields", async () => {
-    const api = createOpenQuestApi({ fetch: async () => new Response(JSON.stringify({ ...realCampaignResponse, operatorToken: "not-for-client" }), { status: 201 }) });
+    const api = createOpenQuestApi({ fetch: async () => new Response(JSON.stringify({ ...realCampaignResponse, operatorToken: "not-for-client" }), { status: 201 }), operatorCapability: () => "runtime-only" });
 
     await expect(api.createCampaign({ repository: "owner/repo", issueNumber: 1, issueUrl: "https://github.com/owner/repo/issues/1", lane: "easy_win" })).rejects.toThrow(/campaign/i);
   });
@@ -192,33 +192,44 @@ describe("OpenQuest browser API", () => {
     ["retrieval timestamp", { ...canonicalEvidence, retrievedAt: "2026-08-26T00:01:00Z" }],
     ["evidence kind", { ...canonicalEvidence, kind: "inference" as const }],
   ])("rejects explanation evidence with a mismatched %s", async (_label, explanationEvidence) => {
-    const api = createOpenQuestApi({ fetch: async () => new Response(JSON.stringify(repositoryResponse(explanationEvidence)), { status: 200 }) });
+    const api = createOpenQuestApi({ fetch: async () => new Response(JSON.stringify(repositoryResponse(explanationEvidence)), { status: 200 }), operatorCapability: () => "runtime-only" });
 
     await expect(api.discoverRepositories(["developer_tools"])).rejects.toThrow(/recommendations/i);
   });
 });
 
-describe("public browser entry", () => {
+describe("operator connection", () => {
   afterEach(() => {
     cleanup();
     window.history.replaceState({}, "", "/");
   });
 
-  it("opens onboarding without asking for a capability", () => {
+  it("requires a local runtime connection and clears it on disconnect", () => {
     render(<App />);
 
-    expect(screen.getByRole("heading", { name: /what kind of open source/i })).toBeVisible();
-    expect(screen.queryByLabelText(/operator capability/i)).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /connect an operator capability/i })).toBeVisible();
+    const field = screen.getByLabelText(/operator capability/i);
+    fireEvent.change(field, { target: { value: "runtime-secret" } });
+    fireEvent.click(screen.getByRole("button", { name: /^connect$/i }));
+    expect(screen.getByRole("button", { name: /disconnect/i })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: /disconnect/i }));
+    expect(screen.getByRole("heading", { name: /connect an operator capability/i })).toBeVisible();
   });
 
-  it("opens a campaign route without a connection step", async () => {
+  it("disconnects from a campaign route and focuses each route heading", async () => {
     window.history.replaceState({}, "", "/campaigns/campaign-1");
-    render(<App />);
+    render(<App operatorCapability={() => "runtime-only"} />);
 
     const campaignHeading = screen.getByRole("heading", { name: /campaign created/i });
     await vi.waitFor(() => {
       expect(campaignHeading).toHaveFocus();
     });
-    expect(screen.queryByRole("button", { name: /disconnect/i })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /disconnect/i }));
+
+    expect(window.location.pathname).toBe("/");
+    const connectionHeading = screen.getByRole("heading", { name: /connect an operator capability/i });
+    await vi.waitFor(() => {
+      expect(connectionHeading).toHaveFocus();
+    });
   });
 });

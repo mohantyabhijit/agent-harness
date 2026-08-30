@@ -10,6 +10,7 @@ import { SyncReview } from "../../../src/application/sync-review.js";
 import { buildApp, type AppDependencies } from "../../../src/server/app.js";
 import { createOpenQuestApi, type FetchLike } from "../../../src/web/api.js";
 import { parseConfig } from "../../../src/server/config.js";
+import { bearerAuthorizationPolicy } from "../../../src/server/authorization.js";
 import {
   createQodoReviewJob,
   HarnessQodoReviewSource,
@@ -23,26 +24,32 @@ import { FakeCampaignStore } from "../../fakes/fake-campaign-store.js";
 import { FakeHarness } from "../../fakes/fake-harness.js";
 
 describe("OpenQuest API", () => {
-  it("allows campaign API requests without an operator capability", async () => {
-    const qodoReview: QodoReviewPort = { getReview: async () => { throw new HarnessUnavailable(); } };
-    const { app } = buildTestApp({ qodoReview });
+  it("fails closed across operator and review-provider capabilities", async () => {
+    const authorization = bearerAuthorizationPolicy({ operator: "operator-secret-token-value-000001", reviewProvider: "review-provider-token-value-000002" });
+    const { app } = buildTestApp({ authorization });
     const payload = { repository: "owner/repo", issueNumber: 42, issueUrl: "https://github.com/owner/repo/issues/42", lane: "easy_win" };
-    expect((await app.inject({ method: "POST", url: "/api/campaigns", payload })).statusCode).toBe(201);
+    expect((await app.inject({ method: "POST", url: "/api/campaigns", payload })).statusCode).toBe(401);
+    expect((await app.inject({ method: "POST", url: "/api/campaigns", headers: { authorization: "Bearer wrong" }, payload })).statusCode).toBe(403);
+    expect((await app.inject({ method: "POST", url: "/api/campaigns", headers: { authorization: "Bearer operator-secret-token-value-000001" }, payload })).statusCode).toBe(201);
+    expect((await app.inject({ method: "POST", url: "/api/campaigns/campaign-1/reviews/sync", headers: { authorization: "Bearer operator-secret-token-value-000001" }, payload: reviewBatch() })).statusCode).toBe(403);
     expect((await app.inject({ method: "GET", url: "/api/healthz" })).statusCode).toBe(200);
     await app.close();
   });
 
-  it("validates the optional repository-review route before processing it", async () => {
-    const qodoReview: QodoReviewPort = { getReview: async () => { throw new HarnessUnavailable(); } };
-    const { app, store } = buildTestApp({ qodoReview });
+  it("binds review-provider authorization to the matched route before query validation", async () => {
+    const authorization = bearerAuthorizationPolicy({ operator: "operator-secret-token-value-000001", reviewProvider: "review-provider-token-value-000002" });
+    const { app, store } = buildTestApp({ authorization });
     const head = "a".repeat(40);
     store.seed(campaign({ status: "qodo_review", version: 1, qodoIteration: 0 }));
     store.seedExternalReference("campaign-1", { kind: "commit", value: head });
     store.seedExternalReference("campaign-1", { kind: "pull_request", value: "https://github.com/owner/repo/pull/7" });
-    const unknownQuery = await app.inject({ method: "POST", url: "/api/campaigns/campaign-1/reviews/sync?debug=1", payload: reviewBatch() });
+    const providerHeaders = { authorization: "Bearer review-provider-token-value-000002" };
+
+    const unknownQuery = await app.inject({ method: "POST", url: "/api/campaigns/campaign-1/reviews/sync?debug=1", headers: providerHeaders, payload: reviewBatch() });
     expect(unknownQuery.statusCode).toBe(400);
     expect(unknownQuery.json()).toEqual({ code: "invalid_request", message: "Request validation failed" });
-    expect((await app.inject({ method: "POST", url: "/api/campaigns/campaign-1/reviews/sync", payload: reviewBatch() })).statusCode).toBe(400);
+    expect((await app.inject({ method: "POST", url: "/api/campaigns/campaign-1/reviews/sync", headers: { authorization: "Bearer operator-secret-token-value-000001" }, payload: reviewBatch() })).statusCode).toBe(403);
+    expect((await app.inject({ method: "POST", url: "/api/campaigns/campaign-1/reviews/sync", headers: providerHeaders, payload: reviewBatch() })).statusCode).toBe(400);
     await app.close();
   });
 
@@ -93,7 +100,7 @@ describe("OpenQuest API", () => {
       const injected = await app.inject({ method, url, headers: Object.fromEntries(new Headers(init?.headers).entries()), ...(typeof init?.body === "string" ? { payload: init.body } : {}) });
       return new Response(injected.body, { status: injected.statusCode, headers: new Headers(injected.headers as Record<string, string>) });
     };
-    const api = createOpenQuestApi({ fetch: fetcher });
+    const api = createOpenQuestApi({ fetch: fetcher, operatorCapability: () => "runtime-only" });
     const confirmation = { proposalId: "proposal-roundtrip", actionDigest: externalActionDigest(payload), expectedCampaignVersion: 7 };
 
     const approval = await api.issueApproval("campaign-1", confirmation, "roundtrip-confirmation");
@@ -452,8 +459,7 @@ describe("OpenQuest API", () => {
   });
 
   it("rejects forged review-provider facts at the HTTP trust boundary", async () => {
-    const qodoReview: QodoReviewPort = { getReview: async () => { throw new HarnessUnavailable(); } };
-    const { app, store } = buildTestApp({ qodoReview });
+    const { app, store } = buildTestApp();
     const head = "a".repeat(40);
     store.seed(campaign({ status: "qodo_review", version: 1, qodoIteration: 0 }));
     store.seedExternalReference("campaign-1", { kind: "commit", value: head });
@@ -621,12 +627,22 @@ describe("Qodo review job", () => {
 });
 
 describe("server configuration", () => {
-  it("applies safe defaults without runtime capabilities", () => {
-    expect(parseConfig({})).toEqual({
+  it("applies safe defaults and rejects an unsafe polling interval", () => {
+    const environment = { OPERATOR_BEARER_TOKEN: "operator-A7z!capability-token-0001", REVIEW_PROVIDER_BEARER_TOKEN: "review-B8y@capability-token-000002" };
+    expect(() => parseConfig(environment)).toThrow();
+    const configured = { ...environment, QODO_BOT_IDENTITIES: "qodo-merge-pro[bot]" };
+    expect(parseConfig(configured)).toEqual({
       PORT: 8788,
       DATABASE_PATH: "openquest.sqlite",
       TRUEFORGE_BASE_URL: "http://localhost:8790",
+      QODO_BOT_IDENTITIES: ["qodo-merge-pro[bot]"],
+      QODO_POLL_INTERVAL_MS: 60_000,
+      QODO_SHUTDOWN_TIMEOUT_MS: 5_000,
+      ...environment,
     });
+    expect(() => parseConfig({ ...configured, QODO_POLL_INTERVAL_MS: "9999" })).toThrow();
+    expect(parseConfig({ ...environment, QODO_BOT_IDENTITIES: "qodo-merge-pro[bot],qodo-ai[bot]" }).QODO_BOT_IDENTITIES).toEqual(["qodo-merge-pro[bot]", "qodo-ai[bot]"]);
+    expect(() => parseConfig({ ...environment, QODO_BOT_IDENTITIES: "qodo-merge-pro[bot],../../attacker" })).toThrow();
   });
 });
 
@@ -643,6 +659,7 @@ function buildTestApp(overrides: Partial<AppDependencies> = {}) {
     },
     clock: overrides.clock ?? { now: () => "2026-08-26T00:00:00Z" },
     ids: overrides.ids ?? { next: () => `campaign-${String(++id)}` },
+    authorization: overrides.authorization ?? { require: () => undefined },
     ...(overrides.qodoReview === undefined ? {} : { qodoReview: overrides.qodoReview }),
     ...(overrides.reviewHealth === undefined ? {} : { reviewHealth: overrides.reviewHealth }),
   };

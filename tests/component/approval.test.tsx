@@ -122,7 +122,7 @@ describe("ChangeBrief", () => {
         ...(fixture.head === undefined ? {} : { expectedCurrentCommitSha: fixture.head }),
         brief: proposal.brief,
       } });
-      const app = buildApp({ store, harness: new FakeHarness(), catalog: { listRepositories: async () => [], listIssues: async () => [] }, clock: { now: () => "2026-08-26T00:00:00Z" }, ids: { next: () => "unused-id" } });
+      const app = buildApp({ store, harness: new FakeHarness(), catalog: { listRepositories: async () => [], listIssues: async () => [] }, clock: { now: () => "2026-08-26T00:00:00Z" }, ids: { next: () => "unused-id" }, authorization: { require: () => undefined } });
       const fetcher: FetchLike = async (input, init) => {
         const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
         const response = await app.inject({ method: init?.method === "POST" ? "POST" : "GET", url, headers: Object.fromEntries(new Headers(init?.headers).entries()), ...(typeof init?.body === "string" ? { payload: init.body } : {}) });
@@ -153,7 +153,7 @@ describe("ChangeBrief", () => {
         externalActionClaims: [],
       }),
     };
-    const app = buildApp({ store: routeStore as never, harness: new FakeHarness(), catalog: { listRepositories: async () => [], listIssues: async () => [] }, clock: { now: () => "2026-08-26T00:00:00Z" }, ids: { next: () => "unused-id" } });
+    const app = buildApp({ store: routeStore as never, harness: new FakeHarness(), catalog: { listRepositories: async () => [], listIssues: async () => [] }, clock: { now: () => "2026-08-26T00:00:00Z" }, ids: { next: () => "unused-id" }, authorization: { require: () => undefined } });
     const fetcher: FetchLike = async (input, init) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
       const response = await app.inject({ method: "GET", url, headers: Object.fromEntries(new Headers(init?.headers).entries()) });

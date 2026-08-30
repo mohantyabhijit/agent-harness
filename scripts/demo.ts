@@ -48,7 +48,7 @@ async function main(): Promise<void> {
   }
   report("Web UI", web.state, web.statusCode === undefined ? undefined : `HTTP ${String(web.statusCode)}`);
   report("API liveness", health.state, probeDetail(health));
-  report("API readiness", readiness.state, probeDetail(readiness));
+  report("API readiness / Qodo", readiness.state, probeDetail(readiness));
   report("TrueForge", registration.trueforge.reachable ? "ready" : "unavailable");
   report("GitHub MCP read access", registration.githubMcp.ready ? "ready" : "not-ready", registration.githubMcp.configured ? (registration.githubMcp.authorized ? "configured and authorized" : "configured; authorization required") : "not configured");
   report("Daytona sandbox provider", registration.daytona.ready ? "ready" : "not-ready", registration.daytona.configured ? `status ${registration.daytona.status}` : "not configured");

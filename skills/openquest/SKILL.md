@@ -31,7 +31,7 @@ Never use a shell-side token or credential to bypass the GitHub MCP approval bou
 
 ### 4. Provision Daytona before cloning
 
-For every discovery milestone, policy check, preflight, implementation milestone, or verification run, start a fresh child TrueForge session and a fresh Daytona sandbox. Provision the sandbox before cloning or downloading repository content. Associate the child session ID and sandbox ID with the single issue parent session. Do not reuse a child session, sandbox, working tree, dependency cache, or mutable artifact across milestones.
+For every discovery milestone, policy check, preflight, implementation milestone, verification run, Qodo synchronization, or repair, start a fresh child TrueForge session and a fresh Daytona sandbox. Provision the sandbox before cloning or downloading repository content. Associate the child session ID and sandbox ID with the single issue parent session. Do not reuse a child session, sandbox, working tree, dependency cache, or mutable artifact across milestones or repair cycles.
 
 Copy only the minimum public, non-secret material required for that milestone. If a fresh isolated sandbox is unavailable, quarantine the campaign and stop.
 
@@ -63,10 +63,10 @@ For every milestone, return a concise verified summary, source URLs, commands an
 
 Clearly disclose that AI assisted with investigation, implementation, testing, and drafting. Do not imply a human manually performed evidence collection or validation that the agent performed. Follow the repository's disclosure policy when it is stricter.
 
-### 11. Leave pull-request review to maintainers
+### 11. Limit Qodo repair cycles
 
-Do not run, trigger, wait for, or report Qodo as part of an OpenQuest campaign. After a pull request is created, maintainer review and merge decisions remain human-owned. Any future repair begins only from a separately chosen issue or explicitly approved follow-up campaign; each remote update or reviewer reply remains a separate exact GitHub write requiring fresh approval.
+Run Qodo review only after local verification. Classify findings against repository policy and observed evidence. Use a fresh child session and fresh Daytona sandbox for every repair cycle. Never exceed three Qodo repair cycles for one issue campaign. Each remote update or reviewer reply remains a separate exact GitHub write requiring fresh approval. After the third cycle, stop and present unresolved findings rather than continuing automatically.
 
 ## Completion contract
 
-A campaign is ready for user review only when the parent session links every child session, static preflight preceded all installs or scripts, the patch is minimal, required checks have observed results, evidence is source-linked, artifacts are sanitized and accessible, AI assistance is disclosed, and no GitHub write occurred without an exact matching approval digest.
+A campaign is ready for user review only when the parent session links every child session, static preflight preceded all installs or scripts, the patch is minimal, required checks have observed results, evidence is source-linked, artifacts are sanitized and accessible, AI assistance is disclosed, Qodo cycles are at most three, and no GitHub write occurred without an exact matching approval digest.
