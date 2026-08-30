@@ -12,6 +12,7 @@ import { CampaignPage } from "../../src/web/routes/CampaignPage.js";
 
 const snapshot: CampaignSnapshot = {
   issueBrief: null,
+  fixExplanation: null,
   id: "campaign-1",
   repository: "owner/repo",
   issueNumber: 42,
@@ -150,6 +151,23 @@ describe("CampaignPage", () => {
     render(<CampaignPage api={campaignApi(async () => ({ ...snapshot, status: "human_escalation", qodoIteration: 3, qualityEscalationReason: "tests_failed" }))} campaignId="campaign-1" />);
     expect(await screen.findByText(/durable quality record says verification tests failed/i)).toBeVisible();
     expect(screen.queryByText(/repair limit was reached/i)).not.toBeInTheDocument();
+  });
+
+  it("shows the durable before-and-after fix explanation beside the resumed agent", async () => {
+    render(<CampaignPage api={campaignApi(async () => ({ ...snapshot, fixExplanation: {
+      commitSha: "b".repeat(40),
+      before: "The boundary returned the wrong result.",
+      after: "The boundary now handles the documented case.",
+      changedAreas: ["src/boundary.ts"],
+      tests: ["npm test -- boundary"],
+      uncertainty: "No known uncertainty remains.",
+    } }))} campaignId="campaign-1" />);
+
+    expect(await screen.findByRole("heading", { name: /what changed and why/i })).toBeVisible();
+    expect(screen.getByText("The boundary returned the wrong result.")).toBeVisible();
+    expect(screen.getByText("The boundary now handles the documented case.")).toBeVisible();
+    expect(screen.getByText("src/boundary.ts")).toBeVisible();
+    expect(screen.getByText("TrueForge session session-42")).toBeVisible();
   });
 
   it("uses durable sequence, not descending timestamps, for event causality", async () => {

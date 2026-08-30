@@ -107,6 +107,44 @@ describe("public campaign support", () => {
     expect(JSON.stringify(response.events)).not.toContain("do-not-project");
   });
 
+  it("projects only an implementation explanation bound to the current head", () => {
+    const implementation = {
+      operation: "implement",
+      resultingCampaignVersion: 8,
+      output: {
+        status: "completed",
+        currentCommitSha: action.commitSha,
+        before: "The issue was reproducible.",
+        after: "The focused fix now passes.",
+        changedAreas: ["src/fix.ts"],
+        tests: ["npm test"],
+        uncertainty: "No known uncertainty.",
+      },
+    };
+    const projected = publicCampaignSnapshot({
+      ...snapshot(),
+      events: [{ id: "implementation", eventType: "campaign_operation_completed", occurredAt: "2026-08-26T00:01:00Z", sequence: 2, payload: implementation }],
+    }, Date.parse("2026-08-26T00:10:00Z"));
+    expect(projected.fixExplanation).toMatchObject({ commitSha: action.commitSha, before: implementation.output.before });
+
+    const staleAfterHeadRotation = publicCampaignSnapshot({
+      ...snapshot(),
+      externalReferences: [{ kind: "commit", value: "b".repeat(40) }],
+      events: [
+        { id: "implementation", eventType: "campaign_operation_completed", occurredAt: "2026-08-26T00:01:00Z", sequence: 2, payload: implementation },
+        { id: "repair", eventType: "campaign_operation_completed", occurredAt: "2026-08-26T00:02:00Z", sequence: 3, payload: { operation: "repair", resultingCampaignVersion: 9, output: { status: "verified", commitSha: "b".repeat(40) } } },
+      ],
+    }, Date.parse("2026-08-26T00:10:00Z"));
+    expect(staleAfterHeadRotation.fixExplanation).toBeNull();
+
+    const mismatchedHead = publicCampaignSnapshot({
+      ...snapshot(),
+      externalReferences: [{ kind: "commit", value: "b".repeat(40) }],
+      events: [{ id: "implementation", eventType: "campaign_operation_completed", occurredAt: "2026-08-26T00:01:00Z", sequence: 2, payload: implementation }],
+    }, Date.parse("2026-08-26T00:10:00Z"));
+    expect(mismatchedHead.fixExplanation).toBeNull();
+  });
+
   it("projects only validated external reconciliation facts", () => {
     const source = snapshot();
     const response = publicCampaignSnapshot({ ...source, events: [

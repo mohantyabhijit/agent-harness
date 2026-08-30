@@ -54,7 +54,27 @@ export function publicCampaignSnapshot(snapshot: CampaignSnapshot, now: number):
     approvalProposal: proposal === null ? null : publicApprovalProposal(proposal),
     qualityEscalationReason: qualityEscalationReason(snapshot),
     issueBrief: publicIssueBrief(snapshot),
+    fixExplanation: publicFixExplanation(snapshot),
   };
+}
+
+function publicFixExplanation(snapshot: CampaignSnapshot): unknown {
+  const commits = snapshot.externalReferences.filter(({ kind }) => kind === "commit");
+  const currentCommit = commits.length === 1 && /^[0-9a-f]{40}$/u.test(commits[0]?.value ?? "") ? commits[0]?.value : undefined;
+  if (currentCommit === undefined) return null;
+  const completed = [...snapshot.events].reverse().find((event) => event.eventType === "campaign_operation_completed" && isRecord(event.payload) && event.payload.operation === "implement" && isRecord(event.payload.output) && event.payload.output.currentCommitSha === currentCommit);
+  if (completed === undefined || !isRecord(completed.payload) || !isRecord(completed.payload.output)) return null;
+  const output = completed.payload.output;
+  if (typeof output.currentCommitSha !== "string" || !/^[0-9a-f]{40}$/u.test(output.currentCommitSha) ||
+    typeof output.before !== "string" || output.before.trim().length === 0 || output.before.length > 2_000 ||
+    typeof output.after !== "string" || output.after.trim().length === 0 || output.after.length > 2_000 ||
+    typeof output.uncertainty !== "string" || output.uncertainty.trim().length === 0 || output.uncertainty.length > 2_000 ||
+    !boundedStringList(output.changedAreas) || !boundedStringList(output.tests)) return null;
+  return { commitSha: output.currentCommitSha, before: output.before, after: output.after, changedAreas: output.changedAreas, tests: output.tests, uncertainty: output.uncertainty };
+}
+
+function boundedStringList(value: unknown): value is string[] {
+  return Array.isArray(value) && value.length > 0 && value.length <= 100 && value.every((item) => typeof item === "string" && item.trim().length > 0 && item.length <= 2_000);
 }
 
 function publicIssueBrief(snapshot: CampaignSnapshot): unknown {

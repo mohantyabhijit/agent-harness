@@ -8,6 +8,7 @@ import type {
   HarnessSessionResult,
   HarnessRequestOptions,
 } from "../../application/ports/harness.js";
+import { campaignOperationResponseSchemas } from "../../application/ports/harness.js";
 import { HarnessAuthRequired, HarnessExecutionFailed, HarnessOutputInvalid, HarnessUnavailable } from "../../application/ports/harness.js";
 
 const TERMINAL_STREAM_GRACE_MS = 250;
@@ -272,7 +273,20 @@ export class TrueForgeHarness implements HarnessPort {
   ): Promise<AsyncIterable<unknown>> {
     try {
       const input = {
-        input: [{ type: "user.message" as const, content: JSON.stringify({ operation, packet }) }],
+        input: [{
+          type: "user.message" as const,
+          // The named production agent is intentionally generic. Put the
+          // operation-specific strict contract in every implementation and
+          // verification prompt so a configured agent cannot guess a shape
+          // the application will later reject.
+          content: JSON.stringify({
+            operation,
+            packet,
+            ...(operation === "implement" || operation === "verify"
+              ? { responseSchema: campaignOperationResponseSchemas[operation] }
+              : {}),
+          }),
+        }],
         previousTurnId: "auto",
       };
       const sdkStream = options === undefined

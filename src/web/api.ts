@@ -22,6 +22,7 @@ export interface ApprovalConfirmation { readonly proposalId: string; readonly ac
 export interface PublicApproval { readonly id: string; readonly action: ApprovalAction; readonly actionDigest: string; readonly status: "pending" | "approved" | "rejected" | "consumed"; readonly issuedAt: string; readonly expiresAt?: string; readonly consumedAt?: string; readonly proposalId?: string; readonly expectedCampaignVersion?: number; readonly isActive: boolean; }
 export interface CampaignSnapshot extends Campaign {
   readonly issueBrief: IssueBrief | null;
+  readonly fixExplanation: Readonly<{ readonly commitSha: string; readonly before: string; readonly after: string; readonly changedAreas: readonly string[]; readonly tests: readonly string[]; readonly uncertainty: string }> | null;
   readonly nextAllowedAction: "preflight" | "implement" | "verify" | null;
   readonly evidence: readonly { readonly id: string; readonly sourceUrl: string; readonly retrievedAt: string; readonly observation: string; readonly kind: "direct" | "inference" }[];
   readonly events: readonly { readonly id: string; readonly eventType: string; readonly occurredAt: string; readonly sequence: number; readonly facts: Readonly<Record<string, string | number | boolean>> }[];
@@ -70,6 +71,7 @@ const discoveryIntent = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("clarification"), question: z.string().trim().min(1).max(240) }).strict(),
 ]);
 const commitSha = z.string().regex(/^[0-9a-f]{40}$/u);
+const fixExplanation = z.object({ commitSha, before: text, after: text, changedAreas: z.array(text).min(1).max(100), tests: z.array(text).min(1).max(100), uncertainty: text }).strict();
 const evidence = z.object({ id: identifier, sourceUrl: githubUrl, retrievedAt: timestamp, observation: text, kind: z.enum(["direct", "inference"]) }).strict();
 const repositoryEvidenceFields = { id: identifier, sourceUrl: githubUrl, retrievedAt: timestamp, observation: text, kind: z.literal("direct") } as const;
 const repositoryEvidence = z.discriminatedUnion("claim", [
@@ -115,7 +117,7 @@ const publicEvent = z.object({ id: identifier, eventType: publicEventType, occur
 });
 const qualityEscalationReason = z.enum(["maximum_qodo_iterations", "tests_failed", "repair_child_failed", "repair_cancelled", "operation_result_not_safely_recorded", "operator_recovered_interrupted_operation"]);
 const issueBrief = z.object({ problem: longText, likelyCause: longText, smallestFix: longText, affectedAreas: z.array(longText).min(1).max(50), tests: z.array(longText).min(1).max(50), risks: z.array(longText).min(1).max(50), uncertainty: longText, evidence: z.array(z.object({ sourceUrl: githubUrl, observation: longText }).strict()).min(1).max(50) }).strict();
-const campaignSnapshotResponse = campaignCore.extend({ nextAllowedAction: z.enum(["preflight", "implement", "verify"]).nullable(), issueBrief: issueBrief.nullable(), evidence: z.array(evidence).max(10_000), events: z.array(publicEvent).max(10_000), approvals: z.array(publicApproval).max(1_000), qodoFindings: z.array(qodoFinding).max(10_000), externalReferences: z.array(externalReference).max(10_000), externalActionClaims: z.array(externalActionClaim).max(1_000), approvalProposal: approvalProposal.nullable(), qualityEscalationReason: qualityEscalationReason.nullable() }).strict().superRefine((value, context) => {
+const campaignSnapshotResponse = campaignCore.extend({ nextAllowedAction: z.enum(["preflight", "implement", "verify"]).nullable(), issueBrief: issueBrief.nullable(), fixExplanation: fixExplanation.nullable(), evidence: z.array(evidence).max(10_000), events: z.array(publicEvent).max(10_000), approvals: z.array(publicApproval).max(1_000), qodoFindings: z.array(qodoFinding).max(10_000), externalReferences: z.array(externalReference).max(10_000), externalActionClaims: z.array(externalActionClaim).max(1_000), approvalProposal: approvalProposal.nullable(), qualityEscalationReason: qualityEscalationReason.nullable() }).strict().superRefine((value, context) => {
   validateCampaignIdentity(value, context);
   const proposal = value.approvalProposal;
   if (proposal !== null && (proposal.action.repository !== value.repository || proposal.action.issueNumber !== value.issueNumber || proposal.expectedCampaignVersion !== value.version)) context.addIssue({ code: "custom", message: "Approval proposal identity mismatch" });

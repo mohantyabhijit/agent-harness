@@ -277,6 +277,18 @@ describe("OpenQuest API", () => {
     const repeated = await app.inject({ method: "POST", url: `/api/campaigns/${campaignId}/actions/preflight`, payload: {} });
     expect(repeated.statusCode).toBe(422);
     expect(repeated.json()).toEqual({ code: "invalid_transition", message: "Campaign transition is not allowed" });
+    const implementation = await app.inject({ method: "POST", url: `/api/campaigns/${campaignId}/actions/implement`, payload: {} });
+    expect(implementation.statusCode).toBe(200);
+    expect((await app.inject({ method: "GET", url: `/api/campaigns/${campaignId}` })).json()).toMatchObject({
+      fixExplanation: {
+        commitSha: "b".repeat(40),
+        before: expect.any(String),
+        after: expect.any(String),
+        changedAreas: ["src/example.ts"],
+        tests: ["npm test"],
+        uncertainty: expect.any(String),
+      },
+    });
     const externalBypass = await app.inject({ method: "POST", url: `/api/campaigns/${campaignId}/actions/create_pr`, payload: {} });
     expect(externalBypass.statusCode).toBe(400);
     await app.close();
