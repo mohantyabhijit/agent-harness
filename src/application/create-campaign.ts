@@ -30,7 +30,7 @@ function issueBriefResponseSchema(repository: string, issueNumber: number): Reco
             sourceUrl: {
               type: "string",
               format: "uri",
-              pattern: `^https://github\\.com/${repositoryPattern}/(?:issues/${String(issueNumber)}(?:#issuecomment-\\d+)?|pull/\\d+|commit/[0-9a-fA-F]{40}|blob/[^/]+/.+)$`,
+              pattern: `^https://github\\.com/${repositoryPattern}/(?:issues/${String(issueNumber)}(?:#issuecomment-\\d+)?|pull/\\d+|commit/[0-9a-f]{40}|blob/[^/?#]+/[^?#]+)$`,
             },
             observation: { type: "string", minLength: 3, maxLength: 2_000 },
           },
