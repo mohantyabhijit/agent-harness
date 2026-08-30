@@ -77,6 +77,7 @@ export interface ExternalActionCompletionRecord {
   readonly completedAt: string;
   readonly completedEvent: CampaignEventInput;
   readonly newCommitSha?: string;
+  readonly publishedReference?: ExternalReference;
 }
 
 export interface ExternalActionOutcomeUnknownRecord {
@@ -96,6 +97,7 @@ export interface ExternalActionReconciliationRecord {
   readonly claimId: string;
   readonly disposition: ExternalActionDisposition;
   readonly observedCanonicalHead?: string;
+  readonly observedPullRequest?: string;
   readonly reconciledAt: string;
   readonly event: CampaignEventInput;
 }

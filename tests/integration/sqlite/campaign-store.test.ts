@@ -1270,6 +1270,43 @@ describe("SqliteCampaignStore", () => {
     expect((await storeA.get("campaign-1"))?.approvals[0]?.status).toBe("consumed");
   });
 
+  it("atomically records exactly one canonical pull request with external completion", async () => {
+    const { storeA, databaseA } = openTwoConnectionStore("openquest-publisher-reference-");
+    await seedExternalActionCampaign(storeA, databaseA);
+    await storeA.claimExternalAction("campaign-1", externalClaimRecord());
+    const pullRequest = "https://github.com/owner/repo/pull/17";
+
+    await storeA.completeExternalAction("campaign-1", {
+      claimId: "claim-1",
+      completedAt: "2026-08-26T00:03:00Z",
+      completedEvent: { id: "completed-publication", eventType: "external_action_completed", payload: { claimedCampaignVersion: 7, resultingCampaignVersion: 8 }, occurredAt: "2026-08-26T00:03:00Z" },
+      publishedReference: { kind: "pull_request", value: pullRequest },
+    });
+
+    const snapshot = await storeA.get("campaign-1");
+    expect(snapshot?.campaign).toMatchObject({ status: "pull_request_open", version: 8 });
+    expect(snapshot?.externalReferences.filter(({ kind }) => kind === "pull_request")).toEqual([{ kind: "pull_request", value: pullRequest }]);
+    expect(snapshot?.externalActionClaims[0]?.status).toBe("completed");
+  });
+
+  it("rolls back completion when publication evidence does not match the claimed repository", async () => {
+    const { storeA, databaseA } = openTwoConnectionStore("openquest-publisher-reference-invalid-");
+    await seedExternalActionCampaign(storeA, databaseA);
+    await storeA.claimExternalAction("campaign-1", externalClaimRecord());
+
+    await expect(storeA.completeExternalAction("campaign-1", {
+      claimId: "claim-1",
+      completedAt: "2026-08-26T00:03:00Z",
+      completedEvent: { id: "completed-invalid-publication", eventType: "external_action_completed", payload: { claimedCampaignVersion: 7, resultingCampaignVersion: 8 }, occurredAt: "2026-08-26T00:03:00Z" },
+      publishedReference: { kind: "pull_request", value: "https://github.com/attacker/repo/pull/17" },
+    })).rejects.toThrow(/published reference/i);
+
+    const snapshot = await storeA.get("campaign-1");
+    expect(snapshot?.externalReferences.filter(({ kind }) => kind === "pull_request")).toEqual([]);
+    expect(snapshot?.externalActionClaims[0]?.status).toBe("active");
+    expect(snapshot?.events.some(({ id }) => id === "completed-invalid-publication")).toBe(false);
+  });
+
   it("compensates completion uncertainty to outcome unknown and reconciles without reusing approval", async () => {
     const { storeA, storeB, databaseA } = openTwoConnectionStore("openquest-external-reconcile-");
     await seedExternalActionCampaign(storeA, databaseA);
@@ -1297,13 +1334,15 @@ describe("SqliteCampaignStore", () => {
       disposition: "confirmed_completed",
       reconciledAt: "2026-08-26T00:05:00Z",
       event: { id: "reconcile-1", eventType: "external_action_reconciled", payload: { claimedCampaignVersion: 7, resultingCampaignVersion: 8 }, occurredAt: "2026-08-26T00:05:00Z" },
-      observedCanonicalHead: "b".repeat(40),
+      observedPullRequest: "https://github.com/owner/repo/pull/17",
     });
     expect(version).toBe(8);
     const reconciled = await storeA.get("campaign-1");
-    expect(reconciled?.externalActionClaims[0]).toMatchObject({ status: "reconciled", disposition: "confirmed_completed", observedCanonicalHead: "b".repeat(40) });
+    expect(reconciled?.campaign).toMatchObject({ status: "pull_request_open", version: 8 });
+    expect(reconciled?.externalReferences).toContainEqual({ kind: "pull_request", value: "https://github.com/owner/repo/pull/17" });
+    expect(reconciled?.externalActionClaims[0]).toMatchObject({ status: "reconciled", disposition: "confirmed_completed" });
     expect(reconciled?.approvals[0]?.status).toBe("consumed");
-    await expect(storeA.claimExternalAction("campaign-1", { ...externalClaimRecord(), claimId: "claim-reuse", expectedVersion: 8, expectedCurrentCommitSha: "b".repeat(40), attemptedEvent: { ...externalClaimRecord().attemptedEvent, id: "attempt-reuse", payload: { claimedCampaignVersion: 8, resultingCampaignVersion: 8 } } })).rejects.toThrow(/approval|unique|current campaign head/i);
+    await expect(storeA.claimExternalAction("campaign-1", { ...externalClaimRecord(), claimId: "claim-reuse", expectedVersion: 8, expectedStatus: "pull_request_open", attemptedEvent: { ...externalClaimRecord().attemptedEvent, id: "attempt-reuse", payload: { claimedCampaignVersion: 8, resultingCampaignVersion: 8 } } })).rejects.toThrow(/approval|unique|state|authority/i);
   });
 
   it("recovers a persisted stale active claim after restart, rejects late completion, and reconciles without restoring approval", async () => {

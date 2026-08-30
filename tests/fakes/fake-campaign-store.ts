@@ -23,7 +23,7 @@ import {
 import { parseQodoFinding } from "../../src/application/qodo-review-batch.js";
 import { currentApprovalProposal } from "../../src/application/approval-proposal.js";
 import { issueApproval as issueDomainApproval } from "../../src/domain/approval.js";
-import { canonicalExternalActionJson, externalActionDigest, isPullRequest, validateExternalActionPayload } from "../../src/application/external-action.js";
+import { canonicalExternalActionJson, externalActionDigest, isPullRequest, validateExternalActionPayload, type ExternalActionPayload } from "../../src/application/external-action.js";
 import {
   consumeApproval as consumeDomainApproval,
   isApprovalActionAllowed,
@@ -475,14 +475,17 @@ export class FakeCampaignStore implements CampaignStore {
     }
     const headVersion = this.#validatedExternalActionHeadVersion(claim, snapshot, record.newCommitSha);
     const returnsToReview = claim.payload.action === "update_pr";
-    const resultingVersion = returnsToReview ? snapshot.campaign.version + 1 : headVersion;
+    const opensPullRequest = claim.payload.action === "create_pr" && record.publishedReference?.kind === "pull_request";
+    const resultingVersion = returnsToReview || opensPullRequest ? snapshot.campaign.version + 1 : headVersion;
     assertExternalActionEventVersion(record.completedEvent.payload, claim.claimedCampaignVersion, resultingVersion);
     if (record.newCommitSha !== undefined && singletonCommit(snapshot) !== record.newCommitSha) {
       snapshot.externalReferences = snapshot.externalReferences.filter(({ kind }) => kind !== "commit");
       snapshot.externalReferences.push({ kind: "commit", value: record.newCommitSha });
       snapshot.campaign = { ...snapshot.campaign, version: resultingVersion };
     }
+    if (record.publishedReference !== undefined) this.#recordPublishedReference(snapshot, claim.payload, record.publishedReference);
     if (returnsToReview) snapshot.campaign = { ...snapshot.campaign, status: "qodo_review", version: resultingVersion };
+    if (opensPullRequest) snapshot.campaign = { ...snapshot.campaign, status: "pull_request_open", version: resultingVersion };
     this.#pushEvent(snapshot, record.completedEvent);
     this.#eventIds.add(record.completedEvent.id);
     Object.assign(claim, { status: "completed", closedAt: record.completedAt });
@@ -536,10 +539,14 @@ export class FakeCampaignStore implements CampaignStore {
     const preserveVerifiedRepair = record.disposition === "confirmed_not_completed" && claim.payload.action === "update_pr";
     const changed = !preserveVerifiedRepair && record.observedCanonicalHead !== undefined && record.observedCanonicalHead !== current;
     const confirmedUpdate = record.disposition === "confirmed_completed" && claim.payload.action === "update_pr";
+    const confirmedCreate = record.disposition === "confirmed_completed" && claim.payload.action === "create_pr";
     if (confirmedUpdate && (record.observedCanonicalHead !== claim.payload.commitSha || current !== claim.payload.commitSha || snapshot.campaign.status !== "repair" || singletonPullRequest(snapshot) !== claim.payload.pullRequest)) {
       throw new Error("Confirmed update_pr reconciliation does not match current authority");
     }
-    const resultingVersion = snapshot.campaign.version + (changed || confirmedUpdate ? 1 : 0);
+    if (confirmedCreate && (record.observedPullRequest === undefined || !isPullRequest(record.observedPullRequest, claim.payload.repository) || current !== claim.payload.commitSha || snapshot.campaign.status !== "contribution_approval")) {
+      throw new Error("Confirmed create_pr reconciliation does not match current authority");
+    }
+    const resultingVersion = snapshot.campaign.version + (changed || confirmedUpdate || confirmedCreate ? 1 : 0);
     assertExternalActionEventVersion(record.event.payload, snapshot.campaign.version, resultingVersion);
     if (this.failNextEvent) {
       this.failNextEvent = false;
@@ -549,7 +556,9 @@ export class FakeCampaignStore implements CampaignStore {
       snapshot.externalReferences = snapshot.externalReferences.filter(({ kind }) => kind !== "commit");
       snapshot.externalReferences.push({ kind: "commit", value: record.observedCanonicalHead });
     }
-    if (changed || confirmedUpdate) snapshot.campaign = { ...snapshot.campaign, version: resultingVersion, ...(confirmedUpdate ? { status: "qodo_review" as const } : {}) };
+    if (record.disposition === "confirmed_completed" && claim.payload.action === "push_branch") this.#recordPublishedReference(snapshot, claim.payload, { kind: "branch", value: claim.payload.branch });
+    if (confirmedCreate && record.observedPullRequest !== undefined) this.#recordPublishedReference(snapshot, claim.payload, { kind: "pull_request", value: record.observedPullRequest });
+    if (changed || confirmedUpdate || confirmedCreate) snapshot.campaign = { ...snapshot.campaign, version: resultingVersion, ...(confirmedUpdate ? { status: "qodo_review" as const } : confirmedCreate ? { status: "pull_request_open" as const } : {}) };
     this.#pushEvent(snapshot, record.event);
     this.#eventIds.add(record.event.id);
     Object.assign(claim, {
@@ -660,6 +669,20 @@ export class FakeCampaignStore implements CampaignStore {
     this.#eventIds.add(record.event.id);
     if (resultingVersion !== record.expectedVersion) snapshot.campaign = { ...snapshot.campaign, version: resultingVersion };
     return resultingVersion;
+  }
+
+  #recordPublishedReference(snapshot: MutableSnapshot, payload: ExternalActionPayload, reference: ExternalReference): void {
+    if (payload.action === "push_branch" && reference.kind === "branch" && reference.value === payload.branch) {
+      if (!snapshot.externalReferences.some((candidate) => candidate.kind === reference.kind && candidate.value === reference.value)) snapshot.externalReferences.push(structuredClone(reference));
+      return;
+    }
+    if (payload.action === "create_pr" && reference.kind === "pull_request" && isPullRequest(reference.value, payload.repository)) {
+      const current = singletonPullRequest(snapshot);
+      if (current !== undefined && current !== reference.value) throw new Error("Campaign already has a different pull request");
+      if (current === undefined) snapshot.externalReferences.push(structuredClone(reference));
+      return;
+    }
+    throw new Error("Published reference does not match the claimed external action");
   }
 
   #assertClaim(snapshot: MutableSnapshot, campaignId: string, expectedVersion: number, expectedStatus: CampaignStatus): void {
