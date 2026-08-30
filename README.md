@@ -4,6 +4,8 @@
 
 OpenQuest is a human-in-the-loop agent harness for open-source contributions. Its TrueForge chat helps a user choose a public repository and issue, prepares a source-backed plan, works in an isolated Daytona sandbox, explains the fix, and keeps every GitHub write behind an exact human approval.
 
+This project is my submission for the [TrueForge Hackathon by WeMakeDevs](https://www.wemakedevs.org/hackathons/trueforge).
+
 - [Watch the demo on YouTube](https://youtu.be/ehBBt39Bv4Q)
 - [View the demo post on X](https://x.com/mohantyabhijit/status/2094113731798335652?s=20)
 - [See an external contribution raised by the workflow](https://github.com/tinyfish-io/tinyfish-cookbook/pull/267)
