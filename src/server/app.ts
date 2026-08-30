@@ -1,6 +1,7 @@
 import Fastify, { type FastifyInstance } from "fastify";
 import { z } from "zod";
 
+import { TrueForgeIntentClassifier } from "../adapters/trueforge/intent-classifier.js";
 import { ApplicationError } from "../application/errors.js";
 import { CreateCampaign, type Clock, type IdGenerator } from "../application/create-campaign.js";
 import { DiscoverRepositories } from "../application/discover.js";
@@ -74,7 +75,7 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
     return reply.send({ status: "ready" });
   });
   registerSpaceRoutes(app);
-  registerDiscoveryRoutes(app, { discover, catalog: dependencies.catalog });
+  registerDiscoveryRoutes(app, { discover, catalog: dependencies.catalog, intentClassifier: new TrueForgeIntentClassifier(dependencies.harness) });
   registerCampaignRoutes(app, { createCampaign, runCampaign, store: dependencies.store, clock: dependencies.clock });
   registerApprovalRoutes(app, { store: dependencies.store, clock: dependencies.clock, ids: dependencies.ids });
   registerReviewRoutes(app, { syncReview: authenticatedReview, ...(dependencies.reviewSyncTimeoutMs === undefined ? {} : { timeoutMs: dependencies.reviewSyncTimeoutMs }) });

@@ -15,6 +15,11 @@ This file is the operating checklist for every repository change. It turns the p
 
 ## Current work queue
 
+- [ ] **Conversation-first discovery:** ship [issue #11](https://github.com/mohantyabhijit/agent-harness/issues/11) through a Qodo-reviewed PR, with TrueForge chat as the primary entry and structured category discovery as the fallback.
+- [ ] **Issue brief and finalization:** implement [issue #12](https://github.com/mohantyabhijit/agent-harness/issues/12) so an issue explanation and proposed fix remain discussable until the user explicitly finalizes the durable campaign plan.
+- [ ] **Finalized sandbox workflow:** implement [issue #13](https://github.com/mohantyabhijit/agent-harness/issues/13) so cloning and fix work begin only after finalization and remain inside fresh TrueForge/Daytona child sessions.
+- [ ] **Approved GitHub publication:** implement [issue #14](https://github.com/mohantyabhijit/agent-harness/issues/14) with separate exact approvals for branch publication and pull-request creation through a server-only publisher capability.
+- [ ] **Local contribution-flow QA:** complete [issue #15](https://github.com/mohantyabhijit/agent-harness/issues/15) with deterministic end-to-end and browser evidence; do not deploy as part of this work.
 - [ ] **Production provider readiness:** configure the production TrueForge tenant with secret-managed Daytona and model-provider credentials; register the OpenQuest agent from the immutable deployed ref; verify authenticated discovery and a non-`provider_unavailable` readiness result. See [docs/knowledge-base.md](docs/knowledge-base.md#hosted-runtime-verification-2026-08-28).
 - [ ] **Qodo operating proof:** for each new substantive PR, retain the review thread, findings/dispositions, repair commit (if any), and the follow-up review. The representative completed example is [PR #3](https://github.com/mohantyabhijit/agent-harness/pull/3).
 - [ ] **Dependency follow-up:** rerun `npm audit --omit=dev`, assess any remaining advisories, and track any remediation as a focused issue and PR.

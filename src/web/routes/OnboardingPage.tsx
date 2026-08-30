@@ -1,24 +1,24 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { OpenQuestApi, SpaceOption } from "../api.js";
+import { DiscoveryAgentChat } from "../components/DiscoveryAgentChat.js";
 import { SpaceCard } from "../components/SpaceCard.js";
 
 interface OnboardingPageProps {
-  readonly api: Pick<OpenQuestApi, "getSpaces">;
+  readonly api: Pick<OpenQuestApi, "getSpaces" | "classifyDiscoveryIntent">;
   readonly navigate: (destination: string) => void;
 }
 
 export function OnboardingPage({ api, navigate }: OnboardingPageProps) {
   const [availableSpaces, setAvailableSpaces] = useState<readonly SpaceOption[]>([]);
-  const [selectedSpaces, setSelectedSpaces] = useState<ReadonlySet<string>>(() => selectedFromLocation());
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
+  const selectedRef = useRef(false);
 
   const loadSpaces = useCallback(() => {
     setStatus("loading");
     void api.getSpaces().then(
       (spaces) => {
         setAvailableSpaces(spaces);
-        setSelectedSpaces((selected) => new Set([...selected].filter((space) => spaces.some(({ id }) => id === space))));
         setStatus("ready");
       },
       () => {
@@ -34,20 +34,9 @@ export function OnboardingPage({ api, navigate }: OnboardingPageProps) {
     };
   }, [loadSpaces]);
 
-  const toggleSpace = (space: string) => {
-    setSelectedSpaces((selected) => {
-      const next = new Set(selected);
-      if (next.has(space)) next.delete(space);
-      else next.add(space);
-      const ordered = availableSpaces.map(({ id }) => id).filter((id) => next.has(id));
-      const query = ordered.length === 0 ? "" : `?${new URLSearchParams({ spaces: ordered.join(",") }).toString()}`;
-      window.history.replaceState({}, "", `/${query}`);
-      return next;
-    });
-  };
-  const continueToDiscovery = () => {
-    const selected = availableSpaces.map(({ id }) => id).filter((id) => selectedSpaces.has(id));
-    const query = new URLSearchParams({ spaces: selected.join(",") });
+  const selectSpace = (space: SpaceOption["id"]) => {
+    selectedRef.current = true;
+    const query = new URLSearchParams({ spaces: space });
     const destination = `/discover?${query.toString()}`;
     navigate(destination);
   };
@@ -58,25 +47,21 @@ export function OnboardingPage({ api, navigate }: OnboardingPageProps) {
         <p className="wordmark">OPENQUEST</p>
         <p className="eyebrow">Your contribution mixtape</p>
         <h1 id="onboarding-title" tabIndex={-1}>What kind of open source pulls you in?</h1>
-        <p>Choose as many spaces as you like. We will match recognition with the evidence that a project welcomes new contributors.</p>
+        <p>Talk naturally with OpenQuest or use a category as a quick start. Every recommendation is checked against live GitHub evidence.</p>
       </section>
+      <DiscoveryAgentChat api={api} onSelect={(space) => { if (!selectedRef.current) selectSpace(space); }} />
       {status === "loading" ? <p aria-live="polite">Loading open-source spaces…</p> : null}
       {status === "error" ? <section className="state-card" role="alert"><p>We could not load spaces.</p><button onClick={loadSpaces} type="button">Try again</button></section> : null}
       {status === "ready" ? (
         <>
+          <p className="choice-divider">Or choose a category for immediate structured discovery.</p>
           <fieldset className="space-grid">
-            <legend>Choose one or more spaces</legend>
-            {availableSpaces.map((space) => <SpaceCard key={space.id} onToggle={toggleSpace} selected={selectedSpaces.has(space.id)} space={space} />)}
+            <legend>Choose a category</legend>
+            {availableSpaces.map((space) => <SpaceCard key={space.id} onSelect={selectSpace} space={space} />)}
           </fieldset>
           {availableSpaces.length === 0 ? <p className="state-card">No spaces are available yet. Please try again later.</p> : null}
-          <button className="primary-action" disabled={selectedSpaces.size === 0} onClick={continueToDiscovery} type="button">Continue to discovery</button>
         </>
       ) : null}
     </main>
   );
-}
-
-function selectedFromLocation(): ReadonlySet<string> {
-  const value = new URLSearchParams(window.location.search).get("spaces");
-  return new Set(value?.split(",").filter((space) => space !== "") ?? []);
 }

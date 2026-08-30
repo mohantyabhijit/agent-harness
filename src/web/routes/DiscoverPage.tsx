@@ -123,7 +123,7 @@ export function DiscoverPage({ api, spaces, navigate }: DiscoverPageProps) {
     <main className="discover-shell">
       <header className="discover-header">
         <p className="wordmark">OPENQUEST</p>
-        <p className="eyebrow">Selected spaces · {spaces.map((space) => space.replaceAll("_", " ")).join(", ") || "none"}</p>
+        <p className="eyebrow">Selected category · {spaces.map((space) => space.replaceAll("_", " ")).join(", ") || "none"}</p>
         <h1 tabIndex={-1}>Find a project worth your next pull request.</h1>
         <p>Every recommendation pairs visibility with evidence that a contribution can be thoughtfully reviewed.</p>
         <p className="evidence-mode" role="status"><strong>Demo evidence</strong> · public repository snapshot · no external writes from this surface</p>

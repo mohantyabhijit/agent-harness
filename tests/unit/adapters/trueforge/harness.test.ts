@@ -91,6 +91,60 @@ describe("TrueForgeHarness", () => {
     expect(consumed).toBe(events.length);
   });
 
+  it("deletes transient child sessions after success", async () => {
+    const client = {
+      sessions: {
+        create: vi.fn().mockResolvedValue({ data: { id: "child-session-1" } }),
+        createTurnStream: vi.fn().mockResolvedValue(stream(await loadSessionEvents())),
+        delete: vi.fn().mockResolvedValue(undefined),
+      },
+    };
+    const harness = new TrueForgeHarness(client as never);
+
+    await expect(harness.runChildSession(packet, "discover", { sessionLifecycle: "transient" })).resolves.toMatchObject({ sessionId: "child-session-1" });
+    expect(client.sessions.delete).toHaveBeenCalledWith("child-session-1");
+  });
+
+  it("deletes transient child sessions when execution fails after allocation", async () => {
+    const client = {
+      sessions: {
+        create: vi.fn().mockResolvedValue({ data: { id: "child-session-1" } }),
+        createTurnStream: vi.fn().mockRejectedValue(new Error("stream failed")),
+        delete: vi.fn().mockResolvedValue(undefined),
+      },
+    };
+    const harness = new TrueForgeHarness(client as never);
+
+    await expect(harness.runChildSession(packet, "discover", { sessionLifecycle: "transient" })).rejects.toBeInstanceOf(HarnessUnavailable);
+    expect(client.sessions.delete).toHaveBeenCalledWith("child-session-1");
+  });
+
+  it("does not let transient cleanup failure replace a successful result", async () => {
+    const client = {
+      sessions: {
+        create: vi.fn().mockResolvedValue({ data: { id: "child-session-1" } }),
+        createTurnStream: vi.fn().mockResolvedValue(stream(await loadSessionEvents())),
+        delete: vi.fn().mockRejectedValue(Object.assign(new Error("cleanup auth"), { statusCode: 401 })),
+      },
+    };
+    const harness = new TrueForgeHarness(client as never);
+
+    await expect(harness.runChildSession(packet, "discover", { sessionLifecycle: "transient" })).resolves.toMatchObject({ sessionId: "child-session-1" });
+  });
+
+  it("does not let transient cleanup failure mask the original execution error", async () => {
+    const client = {
+      sessions: {
+        create: vi.fn().mockResolvedValue({ data: { id: "child-session-1" } }),
+        createTurnStream: vi.fn().mockRejectedValue(new Error("stream failed")),
+        delete: vi.fn().mockRejectedValue(Object.assign(new Error("cleanup auth"), { statusCode: 401 })),
+      },
+    };
+    const harness = new TrueForgeHarness(client as never);
+
+    await expect(harness.runChildSession(packet, "discover", { sessionLifecycle: "transient" })).rejects.toBeInstanceOf(HarnessUnavailable);
+  });
+
   it("returns after a terminal event when the provider leaves the stream open", async () => {
     const client = {
       sessions: {

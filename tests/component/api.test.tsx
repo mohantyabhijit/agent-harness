@@ -5,9 +5,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createOpenQuestApi, type CampaignSnapshot, type FetchLike } from "../../src/web/api.js";
 import { App } from "../../src/web/App.js";
-import type { Evidence } from "../../src/domain/evidence.js";
 
-const realSpacesResponse = { spaces: ["developer_tools", "web"] };
+const realSpacesResponse = { spaces: ["ai_ml", "developer_tools", "web", "data", "social_impact"] };
 const realCampaignResponse = {
   id: ":review.1",
   repository: "owner/repo",
@@ -31,13 +30,13 @@ const realCampaignSnapshot: CampaignSnapshot = {
   approvalProposal: null,
   qualityEscalationReason: null,
 };
-const canonicalEvidence = {
-  id: "guide",
-  sourceUrl: "https://github.com/owner/repo/blob/main/CONTRIBUTING.md",
-  retrievedAt: "2026-08-26T00:00:00Z",
-  observation: "Contribution guide is present.",
-  kind: "direct" as const,
-};
+const canonicalEvidence = [
+  { id: "visibility", sourceUrl: "https://github.com/owner/repo", retrievedAt: "2026-08-26T00:00:00Z", observation: "Repository is public.", kind: "direct" as const, claim: "visibility" as const, verifiedValue: { visibility: "public" as const } },
+  { id: "license", sourceUrl: "https://github.com/owner/repo/blob/main/LICENSE", retrievedAt: "2026-08-26T00:00:00Z", observation: "MIT license is present.", kind: "direct" as const, claim: "license" as const, verifiedValue: { spdxId: "MIT", path: "LICENSE" } },
+  { id: "activity", sourceUrl: `https://github.com/owner/repo/commit/${"a".repeat(40)}`, retrievedAt: "2026-08-26T00:00:00Z", observation: "Recent commits are present.", kind: "direct" as const, claim: "recent_activity" as const, verifiedValue: { commitSha: "a".repeat(40), committedAt: "2026-08-25T00:00:00Z" } },
+  { id: "guide", sourceUrl: "https://github.com/owner/repo/blob/main/CONTRIBUTING.md", retrievedAt: "2026-08-26T00:00:00Z", observation: "Contribution guide is present.", kind: "direct" as const, claim: "contribution_policy" as const, verifiedValue: { path: "CONTRIBUTING.md" } },
+  { id: "external-pr", sourceUrl: "https://github.com/owner/repo/pull/123", retrievedAt: "2026-08-26T00:00:00Z", observation: "An external pull request was merged.", kind: "direct" as const, claim: "external_pr_acceptance" as const, verifiedValue: { pullRequestNumber: 123, mergedAt: "2026-08-20T00:00:00Z", authorAssociation: "CONTRIBUTOR" as const } },
+] as const;
 const repositorySignals = {
   stars: 100,
   recentActivity: 1,
@@ -48,7 +47,7 @@ const repositorySignals = {
   maintainerResponse: 0.9,
 };
 
-function repositoryResponse(explanationEvidence: Evidence = canonicalEvidence) {
+function repositoryResponse(explanationEvidence: readonly Record<string, unknown>[] = canonicalEvidence) {
   return {
     repositories: [{
       repository: {
@@ -59,15 +58,15 @@ function repositoryResponse(explanationEvidence: Evidence = canonicalEvidence) {
         license: "MIT",
         isPublic: true,
         signals: repositorySignals,
-        evidence: [canonicalEvidence],
+        evidence: canonicalEvidence,
       },
       score: 0.9,
       explanation: {
         inputSignals: repositorySignals,
         weightedContributions: [],
-        evidence: [explanationEvidence],
-        sourceUrls: [canonicalEvidence.sourceUrl],
-        retrievedAt: [canonicalEvidence.retrievedAt],
+        evidence: explanationEvidence,
+        sourceUrls: canonicalEvidence.map((entry) => entry.sourceUrl),
+        retrievedAt: canonicalEvidence.map((entry) => entry.retrievedAt),
       },
     }],
   };
@@ -79,8 +78,11 @@ describe("OpenQuest browser API", () => {
     const api = createOpenQuestApi({ fetch: fetcher, baseUrl: "https://openquest.test", operatorCapability: () => "runtime-only" });
 
     await expect(api.getSpaces()).resolves.toEqual([
-      expect.objectContaining({ id: "developer_tools", name: "Developer tools" }),
-      expect.objectContaining({ id: "web", name: "Web" }),
+      { id: "ai_ml", name: "AI & agents", description: "Contribute to models, agents, and intelligent systems." },
+      { id: "developer_tools", name: "Developer tools", description: "Improve the tools developers use to build and ship." },
+      { id: "web", name: "Web & apps", description: "Build open experiences for browsers, desktops, and mobile devices." },
+      { id: "data", name: "Data & infrastructure", description: "Strengthen data systems and the infrastructure behind them." },
+      { id: "social_impact", name: "Civic, science & social impact", description: "Support public-interest technology, research, and access." },
     ]);
     expect(fetcher).toHaveBeenCalledWith("https://openquest.test/api/spaces", expect.not.objectContaining({ headers: expect.anything() }));
     expect(fetcher.mock.calls[0]?.[1]?.headers).toBeUndefined();
@@ -90,6 +92,31 @@ describe("OpenQuest browser API", () => {
     const api = createOpenQuestApi({ fetch: async () => new Response(JSON.stringify({ spaces: ["developer_tools", "<script>"] }), { status: 200 }) });
 
     await expect(api.getSpaces()).rejects.toThrow(/spaces/i);
+  });
+
+  it("rejects retired category identifiers before rendering them", async () => {
+    const api = createOpenQuestApi({ fetch: async () => new Response(JSON.stringify({ spaces: ["mobile"] }), { status: 200 }) });
+
+    await expect(api.getSpaces()).rejects.toThrow(/spaces/i);
+  });
+
+  it("rejects an unbounded repository recommendation response", async () => {
+    const response = repositoryResponse();
+    const repositories = Array.from({ length: 9 }, () => response.repositories[0]);
+    const api = createOpenQuestApi({
+      fetch: async () => new Response(JSON.stringify({ repositories }), { status: 200 }),
+      operatorCapability: () => "runtime-only",
+    });
+
+    await expect(api.discoverRepositories(["developer_tools"])).rejects.toThrow(/recommendations/i);
+  });
+
+  it("rejects multi-category discovery before making a browser request", async () => {
+    const fetcher = vi.fn<FetchLike>();
+    const api = createOpenQuestApi({ fetch: fetcher, operatorCapability: () => "runtime-only" });
+
+    await expect(api.discoverRepositories(["developer_tools", "web"])).rejects.toThrow(/recommendations/i);
+    expect(fetcher).not.toHaveBeenCalled();
   });
 
   it("accepts the strict Task 7 campaign response and projects its navigation id", async () => {
@@ -188,9 +215,15 @@ describe("OpenQuest browser API", () => {
     await expect(api.createCampaign({ repository: "owner/repo", issueNumber: 1, issueUrl: "https://github.com/owner/repo/issues/1", lane: "easy_win" })).rejects.toThrow(/campaign/i);
   });
 
+  it("accepts claim-specific direct verification evidence for repository discovery", async () => {
+    const api = createOpenQuestApi({ fetch: async () => new Response(JSON.stringify(repositoryResponse()), { status: 200 }), operatorCapability: () => "runtime-only" });
+
+    await expect(api.discoverRepositories(["developer_tools"])).resolves.toHaveLength(1);
+  });
+
   it.each([
-    ["retrieval timestamp", { ...canonicalEvidence, retrievedAt: "2026-08-26T00:01:00Z" }],
-    ["evidence kind", { ...canonicalEvidence, kind: "inference" as const }],
+    ["retrieval timestamp", canonicalEvidence.map((entry, index) => index === 0 ? { ...entry, retrievedAt: "2026-08-26T00:01:00Z" } : entry)],
+    ["evidence kind", canonicalEvidence.map((entry, index) => index === 0 ? { ...entry, kind: "inference" as const } : entry)],
   ])("rejects explanation evidence with a mismatched %s", async (_label, explanationEvidence) => {
     const api = createOpenQuestApi({ fetch: async () => new Response(JSON.stringify(repositoryResponse(explanationEvidence)), { status: 200 }), operatorCapability: () => "runtime-only" });
 

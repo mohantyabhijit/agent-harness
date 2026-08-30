@@ -54,7 +54,7 @@ npm run dev
 
 Open `http://127.0.0.1:5173/`. The API listens on `http://127.0.0.1:8788/`; TrueForge normally listens on `http://127.0.0.1:8790/`.
 
-The UI asks for the operator capability before authenticated discovery. GitHub access in the embedded OpenQuest chat is read-only: the agent manifest enables only `@read-only` GitHub MCP tools. The campaign approval button issues time-limited authority for one exact server-owned proposal; it does not execute that action or write to GitHub.
+The UI asks for the operator capability before authenticated discovery. The onboarding conversation maps a user's interest to one of the five structured categories; repository results still come only from the verified discovery pipeline. GitHub access in the embedded campaign chat is read-only: the agent manifest enables only `@read-only` GitHub MCP tools. The campaign approval button issues time-limited authority for one exact server-owned proposal; it does not execute that action or write to GitHub.
 
 ## Repeatable demo preflight
 
@@ -76,14 +76,16 @@ OpenQuest currently has no runtime fixture mode. `fixtures/` supports existing a
 
 ## Campaign flow
 
-1. Choose one or more curated spaces.
-2. TrueForge uses GitHub read tools to return source-linked public repository and issue evidence.
+1. Describe a contribution interest in the embedded TrueForge chat, then choose one of five structured categories: AI & agents, Developer tools, Web & apps, Data & infrastructure, or Civic, science & social impact. The chat clarifies intent; authoritative repository results appear only in the validated discovery cards.
+2. TrueForge uses GitHub read tools live to return at most eight source-linked public repository recommendations ranked by popularity plus contribution readiness.
 3. Starting an issue creates a SQLite campaign and one parent TrueForge session in `policy_review`.
 4. Each `preflight`, `implement`, or `verify` operation creates a fresh child session. The OpenQuest agent configuration gives that session a Daytona sandbox.
 5. Static preflight must return all five required checks, a commit SHA, and proof that dependencies and repository scripts were not executed. Invalid or uncertain output quarantines the campaign.
 6. Durable evidence, child/sandbox references, campaign events, approvals, commits, Qodo findings, and escalation reasons remain isolated by campaign.
 7. A valid external-action proposal may be approved only for its exact payload digest and current campaign version. Approval expires after ten minutes and is single-use.
 8. After a real pull request exists, authenticated Qodo evidence may pass the gate, request a fresh isolated repair, or escalate. There is no fourth automatic repair iteration.
+
+Repository names retained from prior Exa-assisted research are search seeds only. They do not carry verified current stars or contribution readiness, do not guarantee display, and do not replace canonical GitHub checks for visibility, license, activity, contribution policy, and accepted external pull requests. The runtime has no Exa dependency. `openai/codex` is excluded from code-PR recommendations because its official policy rejects external code contributions.
 
 The HTTP action routes currently cover `preflight`, `implement`, and `verify`; the product UI displays the parent TrueForge session and durable record but does not expose buttons for those action routes. API `POST` requests require the operator bearer capability except review synchronization, which requires the distinct review-provider capability. `GET` and `HEAD` routes return sanitized, read-only projections without a bearer token.
 

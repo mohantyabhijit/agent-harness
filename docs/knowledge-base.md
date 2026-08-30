@@ -18,7 +18,8 @@ The safety boundary is deliberate: repository text and tool output are untrusted
 
 ## What is implemented
 
-- Evidence-ranked discovery across nine curated spaces, strict source-linked GitHub repository/issue validation, and Easy Win versus Long-Term Challenge issue lanes.
+- Conversation-first repository discovery through the embedded TrueForge chat, plus five one-click category choices: AI & agents, Developer tools, Web & apps, Data & infrastructure, and Civic, science & social impact. Chat clarifies intent, but authoritative repository and issue recommendations appear only in the validated discovery cards.
+- A deterministic top-eight recommendation boundary ranked by popularity plus contribution readiness, strict source-linked GitHub repository/issue validation, and Easy Win versus Long-Term Challenge issue lanes.
 - Durable one-issue/one-campaign orchestration with a campaign state machine, resumable parent TrueForge sessions, fresh child sessions, Daytona sandbox requirements, static preflight, structured implementation, and structured verification.
 - SQLite-backed campaign persistence, migrations, ordered events, leases, optimistic version and identity fencing, restart recovery, external-action claims, outcome reconciliation, and sanitized public projections.
 - Exact, server-owned approval proposals bound to payload digest, campaign/version/status, current commit, idempotency key, ten-minute expiry, and atomic single use.
@@ -29,6 +30,8 @@ The safety boundary is deliberate: repository text and tool output are untrusted
 - `/openquest/` production hosting, same-origin embedded TrueForge proxying, Nginx and systemd configuration, read-only demo preflight, read-only CI, autonomous Qodo v2 PR review configuration, and layered automated tests.
 
 The exhaustive descriptions and introducing/hardening commit references live in [FEATURES.md](../FEATURES.md). Historical IncidentForge and the temporary standalone demo are recorded there as superseded rather than current product features.
+
+The discovery pipeline keeps Exa-assisted background candidates only as search leads. It does not run Exa at runtime and never treats a seed, old star count, or prior research result as current evidence. Every displayed repository must be freshly checked with GitHub read tools for public visibility, explicit licensing, recent activity, contribution guidance, and evidence of accepted external pull requests. `openai/codex` is excluded from code-PR recommendations because its contribution policy rejects external code contributions.
 
 ## Verified repository evidence
 

@@ -2,32 +2,17 @@ import type { SpaceOption } from "../api.js";
 
 interface SpaceCardProps {
   readonly space: SpaceOption;
-  readonly selected: boolean;
-  readonly onToggle: (space: SpaceOption["id"]) => void;
+  readonly onSelect: (space: SpaceOption["id"]) => void;
 }
 
-export function SpaceCard({ space, selected, onToggle }: SpaceCardProps) {
+export function SpaceCard({ space, onSelect }: SpaceCardProps) {
   return (
-    <label className={`space-card${selected ? " is-selected" : ""}`}>
-      <input
-        checked={selected}
-        className="space-card__input"
-        onChange={() => {
-          onToggle(space.id);
-        }}
-        onKeyDown={(event) => {
-          if (event.key === " " || event.key === "Enter") {
-            event.preventDefault();
-            onToggle(space.id);
-          }
-        }}
-        type="checkbox"
-      />
-      <span className="space-card__check" aria-hidden="true">{selected ? "✓" : "+"}</span>
+    <button className="space-card" onClick={() => { onSelect(space.id); }} type="button">
+      <span className="space-card__check" aria-hidden="true">→</span>
       <span className="space-card__content">
         <span className="space-card__name">{space.name}</span>
         <span className="space-card__description">{space.description}</span>
       </span>
-    </label>
+    </button>
   );
 }
