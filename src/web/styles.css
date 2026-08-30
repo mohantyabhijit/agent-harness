@@ -110,6 +110,9 @@ dd { margin: .2rem 0 0; color: #fff; font-weight: 650; }
 .approval-confirmation { display: flex; gap: .65rem; align-items: flex-start; margin: 1.2rem 0; color: #fff; font-weight: 700; line-height: 1.4; }
 .approval-confirmation input { flex: 0 0 auto; width: 1.1rem; height: 1.1rem; margin-top: .12rem; accent-color: #9ff29c; }
 .approval-action { width: 100%; }
+.action-panel { border-color: #7460a9; background: linear-gradient(140deg, rgba(49, 38, 77, .98), rgba(24, 20, 39, .98)); }
+.action-panel .primary-action { margin-top: .35rem; }
+.action-note { margin: .9rem 0 0; color: #b9b1ca; font-size: .82rem; }
 @media (max-width: 44rem) { .space-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 62rem) { .campaign-layout { grid-template-columns: 1fr; } .campaign-side { position: static; } }
 @media (max-width: 31rem) { .space-grid, .signal-grid, .issue-signals, .quality-counts { grid-template-columns: 1fr; } .space-card { min-height: 8rem; } .onboarding-shell, .discover-shell, .campaign-shell { padding-top: 1.5rem; } .panel-heading { display: block; } .status-pill, .fact-count { display: inline-block; margin-bottom: .8rem; } }

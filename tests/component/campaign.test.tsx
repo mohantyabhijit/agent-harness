@@ -20,6 +20,7 @@ const snapshot: CampaignSnapshot = {
   status: "qodo_review",
   qodoIteration: 2,
   version: 8,
+  nextAllowedAction: null,
   evidence: [{ id: "policy", sourceUrl: "https://github.com/owner/repo/blob/main/CONTRIBUTING.md", retrievedAt: "2026-08-26T00:00:00Z", observation: "Maintainers require focused pull requests.", kind: "direct" }],
   events: [
     { id: "created", eventType: "campaign_created", occurredAt: "2026-08-26T00:00:00Z", sequence: 1, facts: {} },
@@ -37,8 +38,8 @@ const snapshot: CampaignSnapshot = {
   qualityEscalationReason: null,
 };
 
-function campaignApi(getCampaign: OpenQuestApi["getCampaign"]): Pick<OpenQuestApi, "getCampaign" | "issueApproval"> {
-  return { getCampaign, issueApproval: async () => { throw new Error("No proposal should be approvable"); } };
+function campaignApi(getCampaign: OpenQuestApi["getCampaign"]): Pick<OpenQuestApi, "getCampaign" | "runCampaignAction" | "issueApproval"> {
+  return { getCampaign, runCampaignAction: async () => { throw new Error("No operation should be available in this fixture"); }, issueApproval: async () => { throw new Error("No proposal should be approvable"); } };
 }
 
 describe("CampaignPage", () => {
@@ -57,6 +58,7 @@ describe("CampaignPage", () => {
     expect(screen.getByText("Iteration 2 of 3")).toBeVisible();
     expect(screen.getByText("Handle the empty response.")).toBeVisible();
     expect(screen.getByText(/proposal is pending/i)).toBeVisible();
+    expect(screen.getByRole("heading", { name: /awaiting the next verified state/i })).toBeVisible();
     expect(screen.queryByText(/chat transcript/i)).not.toBeInTheDocument();
   });
 
@@ -87,6 +89,26 @@ describe("CampaignPage", () => {
     view.unmount();
 
     expect(retrySignal?.aborted).toBe(true);
+  });
+
+  it("keeps a campaign action locked until its authoritative refresh succeeds", async () => {
+    let releaseRefresh: ((value: CampaignSnapshot) => void) | undefined;
+    const afterAction = { ...snapshot, status: "implementation" as const, version: 9, nextAllowedAction: null };
+    const getCampaign = vi.fn()
+      .mockResolvedValueOnce({ ...snapshot, status: "baseline" as const, nextAllowedAction: "implement" as const })
+      .mockImplementationOnce(() => new Promise<CampaignSnapshot>((resolve) => { releaseRefresh = resolve; }));
+    const runCampaignAction = vi.fn(async () => ({ ...snapshot, status: "implementation" as const, version: 9 }));
+
+    render(<CampaignPage api={{ getCampaign, issueApproval: async () => { throw new Error("No approval should be issued"); }, runCampaignAction }} campaignId="campaign-1" />);
+
+    const action = await screen.findByRole("button", { name: /run isolated implementation/i });
+    action.click();
+    await waitFor(() => { expect(runCampaignAction).toHaveBeenCalledWith("campaign-1", "implement", expect.any(AbortSignal)); });
+    expect(action).toBeDisabled();
+    expect(screen.getByLabelText(/refreshing campaign facts/i)).toBeVisible();
+
+    releaseRefresh?.(afterAction);
+    expect(await screen.findByRole("heading", { name: /awaiting the next verified state/i })).toBeVisible();
   });
 
   it("does not resurrect route-scoped state across an A-B-A navigation when promises ignore abort", async () => {

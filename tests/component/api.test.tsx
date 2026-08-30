@@ -21,6 +21,7 @@ const realCampaignResponse = {
 } as const;
 const realCampaignSnapshot: CampaignSnapshot = {
   ...realCampaignResponse,
+  nextAllowedAction: null,
   evidence: [],
   events: [{ id: "created", eventType: "campaign_created", occurredAt: "2026-08-26T00:00:00Z", sequence: 1, facts: {} }],
   approvals: [],
@@ -168,6 +169,16 @@ describe("OpenQuest browser API", () => {
       method: "POST",
       headers: { "content-type": "application/json", authorization: "Bearer runtime-only", "idempotency-key": "approval-click-0001" },
       body: JSON.stringify(confirmation),
+    }));
+  });
+
+  it("starts only a declared campaign operation with the operator capability", async () => {
+    const fetcher = vi.fn<FetchLike>(async () => new Response(JSON.stringify(realCampaignResponse), { status: 200 }));
+    const api = createOpenQuestApi({ fetch: fetcher, operatorCapability: () => "runtime-only" });
+
+    await expect(api.runCampaignAction(":review.1", "preflight")).resolves.toEqual(realCampaignResponse);
+    expect(fetcher).toHaveBeenCalledWith("/api/campaigns/%3Areview.1/actions/preflight", expect.objectContaining({
+      method: "POST", headers: { "content-type": "application/json", authorization: "Bearer runtime-only" }, body: "{}",
     }));
   });
 

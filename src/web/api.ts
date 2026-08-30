@@ -19,6 +19,7 @@ export interface ApprovalProposal { readonly proposalId: string; readonly action
 export interface ApprovalConfirmation { readonly proposalId: string; readonly actionDigest: string; readonly expectedCampaignVersion: number; }
 export interface PublicApproval { readonly id: string; readonly action: ApprovalAction; readonly actionDigest: string; readonly status: "pending" | "approved" | "rejected" | "consumed"; readonly issuedAt: string; readonly expiresAt?: string; readonly consumedAt?: string; readonly proposalId?: string; readonly expectedCampaignVersion?: number; readonly isActive: boolean; }
 export interface CampaignSnapshot extends Campaign {
+  readonly nextAllowedAction: "preflight" | "implement" | "verify" | null;
   readonly evidence: readonly { readonly id: string; readonly sourceUrl: string; readonly retrievedAt: string; readonly observation: string; readonly kind: "direct" | "inference" }[];
   readonly events: readonly { readonly id: string; readonly eventType: string; readonly occurredAt: string; readonly sequence: number; readonly facts: Readonly<Record<string, string | number | boolean>> }[];
   readonly approvals: readonly PublicApproval[];
@@ -34,6 +35,7 @@ export interface OpenQuestApi {
   getIssues(repository: string, signal?: AbortSignal): Promise<readonly IssueCandidate[]>;
   createCampaign(input: CreateCampaignRequest, signal?: AbortSignal): Promise<Pick<Campaign, "id">>;
   getCampaign(id: string, signal?: AbortSignal): Promise<CampaignSnapshot>;
+  runCampaignAction(id: string, action: "preflight" | "implement" | "verify", signal?: AbortSignal): Promise<Campaign>;
   issueApproval(campaignId: string, confirmation: ApprovalConfirmation, idempotencyKey: string, signal?: AbortSignal): Promise<PublicApproval>;
 }
 export type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
@@ -89,7 +91,7 @@ const publicEvent = z.object({ id: identifier, eventType: publicEventType, occur
   }
 });
 const qualityEscalationReason = z.enum(["maximum_qodo_iterations", "tests_failed", "repair_child_failed", "repair_cancelled", "operation_result_not_safely_recorded", "operator_recovered_interrupted_operation"]);
-const campaignSnapshotResponse = campaignCore.extend({ evidence: z.array(evidence).max(10_000), events: z.array(publicEvent).max(10_000), approvals: z.array(publicApproval).max(1_000), qodoFindings: z.array(qodoFinding).max(10_000), externalReferences: z.array(externalReference).max(10_000), externalActionClaims: z.array(externalActionClaim).max(1_000), approvalProposal: approvalProposal.nullable(), qualityEscalationReason: qualityEscalationReason.nullable() }).strict().superRefine((value, context) => {
+const campaignSnapshotResponse = campaignCore.extend({ nextAllowedAction: z.enum(["preflight", "implement", "verify"]).nullable(), evidence: z.array(evidence).max(10_000), events: z.array(publicEvent).max(10_000), approvals: z.array(publicApproval).max(1_000), qodoFindings: z.array(qodoFinding).max(10_000), externalReferences: z.array(externalReference).max(10_000), externalActionClaims: z.array(externalActionClaim).max(1_000), approvalProposal: approvalProposal.nullable(), qualityEscalationReason: qualityEscalationReason.nullable() }).strict().superRefine((value, context) => {
   validateCampaignIdentity(value, context);
   const proposal = value.approvalProposal;
   if (proposal !== null && (proposal.action.repository !== value.repository || proposal.action.issueNumber !== value.issueNumber || proposal.expectedCampaignVersion !== value.version)) context.addIssue({ code: "custom", message: "Approval proposal identity mismatch" });
@@ -105,6 +107,7 @@ export function createOpenQuestApi(options: OpenQuestApiOptions): OpenQuestApi {
     async getIssues(name, signal) { const [owner, repo, extra] = name.split("/"); if (owner === undefined || repo === undefined || extra !== undefined || !repositoryName.safeParse(name).success) throw new OpenQuestApiError("Issues could not be loaded"); const body = await request(options.fetch, `${baseUrl}/api/discovery/repositories/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues`, withSignal({}, signal)); const values = parsed(z.object({ issues: z.array(issue).max(200) }).strict(), body, "Issues could not be loaded").issues; if (values.some((value) => value.repository !== name)) throw new OpenQuestApiError("Issues could not be loaded"); return values; },
     async createCampaign(input, signal) { const body = await request(options.fetch, `${baseUrl}/api/campaigns`, withSignal({ method: "POST", headers: authenticatedHeaders(options.operatorCapability), body: JSON.stringify(input) }, signal)); const response = parsed(campaignResponse, body, "Campaign could not be started"); return { id: response.id }; },
     async getCampaign(id, signal) { const validId = parsed(campaignId, id, "Campaign could not be loaded"); const body = await request(options.fetch, `${baseUrl}/api/campaigns/${encodeURIComponent(validId)}`, withSignal({}, signal)); return parsed(campaignSnapshotResponse, body, "Campaign could not be loaded") as CampaignSnapshot; },
+    async runCampaignAction(id, action, signal) { const validId = parsed(campaignId, id, "Campaign action could not be started"); const validAction = parsed(z.enum(["preflight", "implement", "verify"]), action, "Campaign action could not be started"); const body = await request(options.fetch, `${baseUrl}/api/campaigns/${encodeURIComponent(validId)}/actions/${validAction}`, withSignal({ method: "POST", headers: authenticatedHeaders(options.operatorCapability), body: "{}" }, signal)); return parsed(campaignResponse, body, "Campaign action could not be started"); },
     async issueApproval(campaign, confirmation, key, signal) { const validCampaign = parsed(campaignId, campaign, "Approval could not be issued"); const validConfirmation = parsed(z.object({ proposalId: identifier, actionDigest: digest, expectedCampaignVersion: finite.int().positive() }).strict(), confirmation, "Approval could not be issued"); const validKey = parsed(idempotencyKey, key, "Approval could not be issued"); const body = await request(options.fetch, `${baseUrl}/api/campaigns/${encodeURIComponent(validCampaign)}/approvals`, withSignal({ method: "POST", headers: { ...authenticatedHeaders(options.operatorCapability), "idempotency-key": validKey }, body: JSON.stringify(validConfirmation) }, signal)); return parsed(approvalResponse, body, "Approval could not be issued").approval as PublicApproval; },
   };
 }

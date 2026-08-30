@@ -31,6 +31,7 @@ export function publicCampaignSnapshot(snapshot: CampaignSnapshot, now: number):
   const proposal = currentApprovalProposal(snapshot);
   return {
     ...snapshot.campaign,
+    nextAllowedAction: nextAllowedAction(snapshot),
     evidence: snapshot.evidence,
     events: snapshot.events.filter(({ eventType, sequence }) => publicEventTypes.has(eventType) && typeof sequence === "number" && Number.isSafeInteger(sequence) && sequence > 0).map(({ id, eventType, occurredAt, sequence, payload }) => ({ id, eventType, occurredAt, sequence, facts: safeEventFacts(eventType, payload) })),
     approvals: snapshot.approvals.map((approval) => publicApprovalWithProposal(approval, proposal, now)),
@@ -52,6 +53,36 @@ export function publicCampaignSnapshot(snapshot: CampaignSnapshot, now: number):
     approvalProposal: proposal === null ? null : publicApprovalProposal(proposal),
     qualityEscalationReason: qualityEscalationReason(snapshot),
   };
+}
+
+function nextAllowedAction(snapshot: CampaignSnapshot): "preflight" | "implement" | "verify" | null {
+  switch (snapshot.campaign.status) {
+    case "policy_review":
+    case "coordination_pending":
+    case "quarantined":
+      return "preflight";
+    case "baseline":
+      return "implement";
+    case "implementation":
+      return hasCompletedOperation(snapshot, "implement") ? "verify" : null;
+    case "verification":
+      return hasCompletedOperation(snapshot, "verify") ? "implement" : null;
+    default:
+      return null;
+  }
+}
+
+function hasCompletedOperation(snapshot: CampaignSnapshot, operation: "implement" | "verify"): boolean {
+  const commitSha = snapshot.externalReferences.find(({ kind }) => kind === "commit")?.value;
+  if (commitSha === undefined) return false;
+  return snapshot.events.some((event) => {
+    if (event.eventType !== "campaign_operation_completed" || !isRecord(event.payload) || event.payload.operation !== operation || event.payload.resultingCampaignVersion !== snapshot.campaign.version || !isRecord(event.payload.output)) return false;
+    return event.payload.output.currentCommitSha === commitSha;
+  });
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function safePublicQodoFinding(finding: CampaignSnapshot["qodoFindings"][number]): Readonly<Record<string, unknown>> {

@@ -90,7 +90,7 @@ OpenQuest is an approval-gated, evidence-first harness for open-source contribut
 
 - The default container deliberately injects no production Qodo review authority and no independent repair verifier, so full readiness fails closed.
 - No production adapter or API route executes approved GitHub writes.
-- The web UI does not expose buttons for the implemented `preflight`, `implement`, and `verify` action routes.
+- The web UI exposes the next allowed `preflight`, `implement`, or `verify` action with clear sandboxing and no-write guidance; an unavailable or unsafe provider still stops the campaign fail-closed.
 - Runtime discovery has no fixture/demo fallback and requires ready TrueForge, GitHub MCP, Daytona, registered agent, and trusted skill configuration.
 - SQLite and the scheduler are single-process and single-operator; there is no multi-user identity model, distributed scheduling, backup workflow, or encrypted campaign database.
 - OpenQuest relies on TrueForge/Daytona for sandbox creation, isolation, and teardown and does not independently verify sandbox deletion receipts.

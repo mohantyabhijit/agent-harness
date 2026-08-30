@@ -44,7 +44,7 @@ If demonstrating only implemented campaign behavior, continue with the readiness
 
 ## Static preflight and campaign operations
 
-The web UI does not expose operation buttons. To demonstrate preflight with an authenticated API client, send `POST /api/campaigns/<id>/actions/preflight` with an empty JSON object and the operator bearer capability through a client that masks authorization headers. Do not record the raw command, shell history, network inspector, or header.
+The campaign screen presents only the next action allowed by durable state. Use **Start static preflight** to begin the read-only repository examination; the control explains that it creates a fresh sandbox session and performs no GitHub write. The action requires the in-memory operator capability and records a durable claim before work begins.
 
 After completion, refresh the campaign page and show:
 
@@ -54,7 +54,7 @@ After completion, refresh the campaign page and show:
 - `dependenciesInstalled: false` and `repositoryScriptsExecuted: false` during preflight;
 - a `baseline` result for pass or `quarantined` for uncertainty/failure.
 
-Implementation and verification use the same API action route with `implement` and `verify`. Run them only for a controlled public repository after preflight passes. Each operation should create a new child session. A failed operation is valid demo evidence; do not rerun until the durable state and failure reason are understood.
+After a successful preflight, the same campaign screen exposes **Run isolated implementation**, followed by **Run verification**. Run them only for a controlled public repository after preflight passes. Each operation should create a new child session. A failed operation is valid demo evidence; do not rerun until the durable state and failure reason are understood.
 
 ## Exact approval boundary
 

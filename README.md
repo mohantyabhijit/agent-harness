@@ -107,6 +107,12 @@ npm test
 
 The repository also defines targeted integration and Playwright commands, but Task 11 does not add or alter tests. The quality workflow installs with `npm ci` and runs type-check, lint, build, and the existing test suite on pushes and pull requests with read-only repository permissions.
 
+## Qodo code review evidence
+
+Every repository change follows the [change checklist](TODO.md): a focused branch and PR, recorded verification, Qodo review of the latest commit, resolution or documented disposition of findings, a follow-up Qodo review after repairs, passing GitHub checks, and a human merge decision. Direct pushes to `main` do not count as reviewed work.
+
+[PR #3: Fix TrueForge discovery stream hangs](https://github.com/mohantyabhijit/agent-harness/pull/3) is the representative merged implementation PR. Qodo raised a cleanup-timeout reliability bug, the branch added an abort-on-cleanup repair, and the final commit received a follow-up Qodo update before merge. The [pull-request template](.github/pull_request_template.md) makes the same evidence and decision trail required for future changes.
+
 ## Repository map
 
 ```text
