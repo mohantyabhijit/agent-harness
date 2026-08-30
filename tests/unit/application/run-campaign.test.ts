@@ -96,7 +96,7 @@ describe("RunCampaign", () => {
 
     expect(harness.childSessions).toEqual(["session-1", "session-2", "session-3"]);
     expect(harness.packets[1]?.currentCommitSha).toBe(commitSha);
-    expect(harness.packets[2]?.currentCommitSha).toBe(commitSha);
+    expect(harness.packets[2]?.currentCommitSha).toBe("b".repeat(40));
     const snapshot = await store.get("campaign-1");
     expect(snapshot?.externalReferences.filter(({ kind }) => kind === "sandbox")).toEqual([
       { kind: "sandbox", value: "session-1" },
@@ -106,7 +106,7 @@ describe("RunCampaign", () => {
     expect(snapshot?.events.map(({ payload }) => payload)).toEqual(expect.arrayContaining([
       expect.objectContaining({ claimedCampaignVersion: 2, sandboxSessionId: "session-1" }),
       expect.objectContaining({ claimedCampaignVersion: 5, sandboxSessionId: "session-2" }),
-      expect.objectContaining({ claimedCampaignVersion: 6, sandboxSessionId: "session-3" }),
+      expect.objectContaining({ claimedCampaignVersion: 7, sandboxSessionId: "session-3" }),
     ]));
   });
 
@@ -154,7 +154,7 @@ describe("RunCampaign", () => {
     const { service, store, harness } = fixture();
     store.seed(campaign({ status: "coordination_pending" }));
     await service.execute("campaign-1", "preflight");
-    harness.enqueueResult("implement", { summary: "implemented", artifacts: [], output: { status: "completed", commitSha: nextCommit } });
+    harness.enqueueResult("implement", { summary: "implemented", artifacts: [], output: { status: "completed", commitSha: nextCommit, changedAreas: ["src/example.ts"], tests: ["npm test"], uncertainty: "No known uncertainty.", before: "The old behavior failed.", after: "The new behavior passes." } });
     await service.execute("campaign-1", "implement");
     await service.execute("campaign-1", "verify");
 

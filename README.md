@@ -83,8 +83,9 @@ OpenQuest currently has no runtime fixture mode. `fixtures/` supports existing a
 5. Each `preflight`, `implement`, or `verify` operation creates a fresh child session. The OpenQuest agent configuration gives that session a Daytona sandbox.
 6. Static preflight must return all five required checks, a commit SHA, and proof that dependencies and repository scripts were not executed. Invalid or uncertain output quarantines the campaign.
 7. Durable evidence, child/sandbox references, campaign events, approvals, commits, Qodo findings, and escalation reasons remain isolated by campaign.
-8. A valid external-action proposal may be approved only for its exact payload digest and current campaign version. Approval expires after ten minutes and is single-use.
-9. After a real pull request exists, authenticated Qodo evidence may pass the gate, request a fresh isolated repair, or escalate. There is no fourth automatic repair iteration.
+8. After implementation, the campaign shows a commit-bound before/after explanation, changed areas, executed tests, and remaining uncertainty beside the resumable parent chat.
+9. A valid external-action proposal may be approved only for its exact payload digest and current campaign version. Approval expires after ten minutes and is single-use.
+10. After a real pull request exists, authenticated Qodo evidence may pass the gate, request a fresh isolated repair, or escalate. There is no fourth automatic repair iteration.
 
 Repository names retained from prior Exa-assisted research are search seeds only. They do not carry verified current stars or contribution readiness, do not guarantee display, and do not replace canonical GitHub checks for visibility, license, activity, contribution policy, and accepted external pull requests. The runtime has no Exa dependency. `openai/codex` is excluded from code-PR recommendations because its official policy rejects external code contributions.
 
@@ -136,7 +137,6 @@ evidence/            non-secret evidence contract and capture checklist
 - There is no fixture-backed application or `OPENQUEST_DEMO_MODE`; fixtures are test-only.
 - The default Qodo review authority is unavailable, no production repair verifier is injected, and readiness therefore fails closed.
 - No server route or production adapter executes approved GitHub comments, assignment requests, branch pushes, pull-request creation, or pull-request updates. Approval issuance alone causes no external write.
-- The browser has no controls for the API's `preflight`, `implement`, and `verify` action routes; those operations currently require an authenticated API client.
 - The chat surface uses the parent TrueForge session but enables only GitHub read tools. It cannot publish contributions.
 - The SQLite store is local-process persistence. There is no multi-user identity model, distributed scheduler, backup workflow, or hosted deployment configuration.
 - Sandbox isolation and lifecycle enforcement depend on the configured TrueForge/Daytona provider. Static preflight reduces risk but cannot prove arbitrary code safe or substitute for sandbox controls.

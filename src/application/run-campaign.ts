@@ -77,6 +77,16 @@ interface PreflightEvidence {
   readonly observation: string;
 }
 
+interface ImplementationResult {
+  readonly status: "completed";
+  readonly commitSha: string;
+  readonly changedAreas: readonly string[];
+  readonly tests: readonly string[];
+  readonly uncertainty: string;
+  readonly before: string;
+  readonly after: string;
+}
+
 export class RunCampaign {
   readonly #externalActionClaimStaleAfterMs: number;
 
@@ -349,15 +359,15 @@ export class RunCampaign {
     await this.store.update(claimed, campaign.version);
     try {
       const result = await this.harness.runChildSession(this.packet(snapshot, currentCommitSha), "implement");
-      const nextCommitSha = implementationCommit(result.output);
-      const resultingCommitSha = nextCommitSha ?? currentCommitSha;
-      const resultingVersion = claimed.version + (resultingCommitSha === currentCommitSha ? 0 : 1);
+      const implementation = parseImplementationResult(result.output, currentCommitSha);
+      const resultingCommitSha = implementation.commitSha;
+      const resultingVersion = claimed.version + 1;
       const recordedVersion = await this.store.recordChildResult(campaign.id, {
         expectedVersion: claimed.version,
         expectedStatus: "implementation",
         childSessionId: result.sessionId,
-        event: this.operationEvent(claimed, resultingVersion, "campaign_operation_completed", "implement", result, { result: result.output, previousCommitSha: currentCommitSha, currentCommitSha: resultingCommitSha }),
-        ...(nextCommitSha === undefined ? {} : { newCommitSha: nextCommitSha }),
+        event: this.operationEvent(claimed, resultingVersion, "campaign_operation_completed", "implement", result, { ...implementation, previousCommitSha: currentCommitSha, currentCommitSha: resultingCommitSha }),
+        newCommitSha: resultingCommitSha,
         operationResult: { operation: "implement", currentCommitSha: resultingCommitSha, qodoIteration: claimed.qodoIteration },
       });
       return { ...claimed, version: recordedVersion };
@@ -382,6 +392,7 @@ export class RunCampaign {
     await this.store.update(claimed, campaign.version);
     try {
       const result = await this.harness.runChildSession(this.packet(snapshot, currentCommitSha), "verify");
+      parseVerificationResult(result.output, currentCommitSha);
       const recordedVersion = await this.store.recordChildResult(campaign.id, {
         expectedVersion: claimed.version,
         expectedStatus: "verification",
@@ -423,11 +434,16 @@ export class RunCampaign {
   }
 
   private packet(snapshot: CampaignSnapshot, currentCommitSha?: string): CampaignPacket {
+    const operationSafety = snapshot.campaign.status === "coordination_pending" || snapshot.campaign.status === "quarantined"
+      ? "Static preflight must inspect before any dependency installation or repository script; clone only in this fresh Daytona child."
+      : snapshot.campaign.status === "baseline" || snapshot.campaign.status === "verification"
+        ? "Clone and work only in this fresh Daytona child; bind output to the current commit and never publish."
+        : "Verify the exact current implementation commit in this fresh Daytona child; reject stale results.";
     return {
       campaignId: snapshot.campaign.id,
       repository: snapshot.campaign.repository,
       issueNumber: snapshot.campaign.issueNumber,
-      goal: `Advance campaign with verified ${snapshot.campaign.status} evidence`,
+      goal: `Advance campaign with verified ${snapshot.campaign.status} evidence. ${operationSafety}`,
       verifiedEvidence: snapshot.evidence
         .filter(({ kind }) => kind === "direct")
         .map(({ sourceUrl, observation }) => ({ sourceUrl, observation })),
@@ -647,10 +663,25 @@ function requiredCurrentCommit(snapshot: CampaignSnapshot): string {
   return current.value;
 }
 
-function implementationCommit(output: unknown): string | undefined {
-  if (!isRecord(output) || output.commitSha === undefined) return undefined;
-  if (typeof output.commitSha !== "string" || !/^[0-9a-f]{40}$/u.test(output.commitSha)) throw new Error("Invalid implementation commit");
-  return output.commitSha;
+function parseImplementationResult(output: unknown, currentCommitSha: string): ImplementationResult {
+  if (!isRecord(output) || Object.keys(output).some((key) => !["status", "commitSha", "changedAreas", "tests", "uncertainty", "before", "after"].includes(key)) ||
+    output.status !== "completed" || typeof output.commitSha !== "string" || !/^[0-9a-f]{40}$/u.test(output.commitSha) ||
+    output.commitSha === currentCommitSha || !stringList(output.changedAreas) || !stringList(output.tests) ||
+    typeof output.uncertainty !== "string" || output.uncertainty.trim().length === 0 ||
+    typeof output.before !== "string" || output.before.trim().length === 0 || typeof output.after !== "string" || output.after.trim().length === 0) {
+    throw new Error("Invalid implementation result");
+  }
+  return { status: "completed", commitSha: output.commitSha, changedAreas: output.changedAreas, tests: output.tests, uncertainty: output.uncertainty, before: output.before, after: output.after };
+}
+
+function parseVerificationResult(output: unknown, currentCommitSha: string): void {
+  if (!isRecord(output) || Object.keys(output).some((key) => !["testsPassed", "currentCommitSha", "tests", "uncertainty"].includes(key)) ||
+    output.testsPassed !== true || output.currentCommitSha !== currentCommitSha || !stringList(output.tests) ||
+    typeof output.uncertainty !== "string" || output.uncertainty.trim().length === 0) throw new Error("Invalid verification result");
+}
+
+function stringList(value: unknown): value is string[] {
+  return Array.isArray(value) && value.length > 0 && value.every((item) => typeof item === "string" && item.trim().length > 0);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
