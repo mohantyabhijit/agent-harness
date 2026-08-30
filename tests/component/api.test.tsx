@@ -175,6 +175,15 @@ describe("OpenQuest browser API", () => {
     await expect(api.publishApprovedAction("campaign-1", "approval-1", action)).rejects.toMatchObject({ code: "publication_outcome_unknown", status: 409 });
   });
 
+  it("distinguishes missing publication authority before any network attempt", async () => {
+    const fetcher = vi.fn<FetchLike>();
+    const api = createOpenQuestApi({ fetch: fetcher });
+    const action = { action: "create_pr" as const, repository: "owner/repo", issueNumber: 42, branch: "openquest/fix-42", baseBranch: "main", commitSha: "b".repeat(40), title: "Fix issue 42", body: "Verified tests, risks, rollback, AI disclosure" };
+
+    await expect(api.publishApprovedAction("campaign-1", "approval-1", action)).rejects.toMatchObject({ code: "operator_capability_missing", status: undefined });
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
   it("rejects malformed durable campaign facts at the browser boundary", async () => {
     const api = createOpenQuestApi({ fetch: async () => new Response(JSON.stringify({ ...realCampaignSnapshot, events: [{ ...realCampaignSnapshot.events[0], transcript: "do not expose" }] }), { status: 200 }) });
 

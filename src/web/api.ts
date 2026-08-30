@@ -153,8 +153,10 @@ export function createOpenQuestApi(options: OpenQuestApiOptions): OpenQuestApi {
         ? { action: validAction.action, repository: validAction.repository, issueNumber: validAction.issueNumber, branch: validAction.branch, commitSha: validAction.targetCommitSha }
         : validAction;
       const body = await request(options.fetch, `${baseUrl}/api/campaigns/${encodeURIComponent(validCampaign)}/publish`, withSignal({ method: "POST", headers: authenticatedHeaders(options.operatorCapability), body: JSON.stringify({ approvalId: validApproval, payload }) }, signal));
-      const result = parsed(publicationResult, body, "Publication returned an invalid result");
-      if ((validAction.action === "push_branch" && !("commitSha" in result)) || (validAction.action === "create_pr" && !("pullRequest" in result))) throw new OpenQuestApiError("Publication returned an unexpected result.");
+      const parsedResult = publicationResult.safeParse(body);
+      if (!parsedResult.success) throw new OpenQuestApiError("Publication returned an invalid result", undefined, "publication_response_invalid");
+      const result = parsedResult.data;
+      if ((validAction.action === "push_branch" && !("commitSha" in result)) || (validAction.action === "create_pr" && !("pullRequest" in result))) throw new OpenQuestApiError("Publication returned an unexpected result.", undefined, "publication_response_invalid");
       return result;
     },
   };
@@ -162,16 +164,16 @@ export function createOpenQuestApi(options: OpenQuestApiOptions): OpenQuestApi {
 
 async function request(fetcher: FetchLike, url: string, init: RequestInit): Promise<unknown> {
   let response: Response;
-  try { response = await fetcher(url, init); } catch (error) { if (error instanceof DOMException && error.name === "AbortError") throw error; throw new OpenQuestApiError("OpenQuest is unavailable. Please try again."); }
+  try { response = await fetcher(url, init); } catch (error) { if (error instanceof DOMException && error.name === "AbortError") throw error; throw new OpenQuestApiError("OpenQuest is unavailable. Please try again.", undefined, "transport_unavailable"); }
   if (!response.ok) {
     let body: unknown;
     try { body = await response.json() as unknown; } catch { body = undefined; }
     if (typeof body === "object" && body !== null && "code" in body && typeof body.code === "string" && "message" in body && typeof body.message === "string") throw new OpenQuestApiError(body.message, response.status, body.code);
     throw new OpenQuestApiError(response.status === 409 ? "This request conflicts with current campaign state." : "OpenQuest could not complete that request. Please try again.", response.status);
   }
-  try { return await response.json() as unknown; } catch { throw new OpenQuestApiError("OpenQuest returned an invalid response. Please try again."); }
+  try { return await response.json() as unknown; } catch { throw new OpenQuestApiError("OpenQuest returned an invalid response. Please try again.", undefined, "invalid_response"); }
 }
-function authenticatedHeaders(provider: OpenQuestApiOptions["operatorCapability"]): Record<string, string> { const value = provider?.(); if (value === undefined || value.trim() === "") throw new OpenQuestApiError("Connect an operator capability before authenticated actions."); return { "content-type": "application/json", authorization: `Bearer ${value}` }; }
+function authenticatedHeaders(provider: OpenQuestApiOptions["operatorCapability"]): Record<string, string> { const value = provider?.(); if (value === undefined || value.trim() === "") throw new OpenQuestApiError("Connect an operator capability before authenticated actions.", undefined, "operator_capability_missing"); return { "content-type": "application/json", authorization: `Bearer ${value}` }; }
 function withSignal(init: RequestInit, signal: AbortSignal | undefined): RequestInit { return signal === undefined ? init : { ...init, signal }; }
 function parsed<T>(schema: z.ZodType<T>, body: unknown, message: string): T { const result = schema.safeParse(body); if (!result.success) throw new OpenQuestApiError(message); return result.data; }
 function github(value: string): boolean { try { const url = new URL(value); return url.protocol === "https:" && url.hostname === "github.com" && url.username === "" && url.password === "" && url.port === "" && url.search === "" && url.hash === ""; } catch { return false; } }

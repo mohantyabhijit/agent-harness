@@ -560,6 +560,7 @@ export class FakeCampaignStore implements CampaignStore {
     assertExternalActionEventVersion(record.event.payload, snapshot.campaign.version, resultingVersion);
     if (record.nextProposalEvent !== undefined) {
       if (record.nextProposalEvent.id === record.event.id) throw new Error("Follow-up proposal event must have a distinct id");
+      if (this.#eventIds.has(record.nextProposalEvent.id)) throw new Error(`Duplicate campaign event id: ${record.nextProposalEvent.id}`);
       if (claim.payload.action !== "push_branch" || record.disposition !== "confirmed_completed") throw new Error("Follow-up proposal requires a confirmed completed branch push");
       assertProposalEvent(record.nextProposalEvent, resultingVersion, claim.claimedCampaignStatus, claim.payload.repository, claim.payload.issueNumber, claim.payload.commitSha, "create_pr", claim.payload.branch);
     }

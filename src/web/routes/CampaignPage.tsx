@@ -237,7 +237,7 @@ export function CampaignPage({ api, campaignId, createIdempotencyKey = defaultId
       refreshCampaign({ kind: "publication" });
     }).catch((reason: unknown) => {
       if (isAbort(reason) || routeEpoch.current !== epoch) return;
-      const outcomeUnknown = reason instanceof OpenQuestApiError && (reason.code === "publication_outcome_unknown" || (reason.status === undefined && reason.code === undefined));
+      const outcomeUnknown = reason instanceof OpenQuestApiError && ["publication_outcome_unknown", "transport_unavailable", "invalid_response", "publication_response_invalid"].includes(reason.code ?? "");
       setPublication({ routeIdentity, proposalId: proposal.proposalId, status: outcomeUnknown ? "unknown" : "error" });
       if (outcomeUnknown && reason instanceof OpenQuestApiError && reason.code !== "publication_outcome_unknown") refreshCampaign({ kind: "publication" });
     });

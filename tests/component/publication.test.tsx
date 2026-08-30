@@ -59,13 +59,26 @@ describe("Campaign publication UX", () => {
       externalReferences: [...snapshot().externalReferences, { kind: "pull_request" as const, value: "https://github.com/owner/repo/pull/17" }],
     };
     const getCampaign = vi.fn().mockResolvedValueOnce(snapshot()).mockResolvedValueOnce(reconciled);
-    const publishApprovedAction = vi.fn(async () => { throw new OpenQuestApiError("Network connection lost"); });
+    const publishApprovedAction = vi.fn(async () => { throw new OpenQuestApiError("Network connection lost", undefined, "transport_unavailable"); });
     render(<CampaignPage api={baseApi(getCampaign, publishApprovedAction)} campaignId="campaign-1" />);
 
     fireEvent.click(await screen.findByRole("button", { name: /create approved pull request/i }));
     expect(await screen.findByText(/publication reconciled/i)).toBeVisible();
     expect(getCampaign).toHaveBeenCalledTimes(2);
     expect(screen.queryByText(/approved action was not published/i)).not.toBeInTheDocument();
+  });
+
+  it("keeps a missing-capability failure retryable because no publication was attempted", async () => {
+    const publishApprovedAction = vi.fn()
+      .mockRejectedValueOnce(new OpenQuestApiError("Connect an operator capability before authenticated actions.", undefined, "operator_capability_missing"))
+      .mockResolvedValueOnce({ pullRequest: "https://github.com/owner/repo/pull/17" });
+    render(<CampaignPage api={baseApi(async () => snapshot(), publishApprovedAction)} campaignId="campaign-1" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /create approved pull request/i }));
+    expect(await screen.findByText(/approved action was not published/i)).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: /retry approved action/i }));
+    expect(await screen.findByText(/pull request opened/i)).toBeVisible();
+    expect(publishApprovedAction).toHaveBeenCalledTimes(2);
   });
 
   it("locks execution when the approval does not match the current server proposal", async () => {

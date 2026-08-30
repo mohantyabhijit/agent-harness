@@ -7,7 +7,7 @@ Scope: issue #15, local-only. This evidence contains no credential, provider pay
 - `npm run typecheck` — passed.
 - `npm run lint` — passed.
 - `npm run build` — passed; the existing Vite large-chunk advisory remains informational.
-- `npm test` — passed: 30 files, 512 tests.
+- `npm test` — passed: 30 files, 514 tests.
 - `npm run test:e2e` — passed: three Playwright scenarios, including the controlled contribution flow.
 - `git diff --check` — passed.
 
@@ -23,4 +23,4 @@ The controlled contribution scenario exercises discovery, issue selection, campa
 
 ## Qodo review evidence
 
-[PR #20](https://github.com/mohantyabhijit/agent-harness/pull/20) received an [initial exact-head Qodo review](https://github.com/mohantyabhijit/agent-harness/pull/20#issuecomment-5469595618). Qodo identified two valid publication-recovery defects: confirmed branch-push reconciliation did not persist the next exact pull-request proposal, and browser transport failure could state that no publication occurred without first reloading durable facts. Both were repaired and covered by focused regression tests; no finding was dismissed. The PR history records the required follow-up review against the repair commit and passing GitHub checks before merge.
+[PR #20](https://github.com/mohantyabhijit/agent-harness/pull/20) received an [initial exact-head Qodo review](https://github.com/mohantyabhijit/agent-harness/pull/20#issuecomment-5469595618). Qodo identified two valid publication-recovery defects: confirmed branch-push reconciliation did not persist the next exact pull-request proposal, and browser transport failure could state that no publication occurred without first reloading durable facts. Follow-up review found two valid repair defects: fake-store duplicate-ID behavior differed from SQLite, and a missing operator capability was incorrectly treated as an uncertain external write. All four findings were repaired and covered by focused regression tests; no finding was dismissed. The PR history records the final exact-head review and passing GitHub checks before merge.
