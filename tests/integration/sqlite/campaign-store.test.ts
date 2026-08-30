@@ -140,6 +140,24 @@ function insertRepairAuthority(database: Database.Database, input: { eventId: st
 }
 
 describe("SqliteCampaignStore", () => {
+  it("finalizes the persisted issue brief and version in one transaction", async () => {
+    const { store } = openMemoryStore();
+    const issueBrief = {
+      problem: "The boundary result is incorrect.", likelyCause: "A guard is missing.", smallestFix: "Add the guard and regression test.",
+      affectedAreas: ["src/boundary.ts"], tests: ["Run the regression test."], risks: ["Invalid callers may surface."], uncertainty: "Call sites require inspection.",
+      evidence: [{ sourceUrl: "https://github.com/owner/repo/issues/42", observation: "The issue documents expected behavior." }],
+    };
+    await store.create(campaign({ status: "policy_review", version: 1 }), { id: "created-finalize", eventType: "campaign_created", occurredAt: "2026-08-30T00:00:00Z", payload: { issueBrief } });
+
+    const finalized = await store.finalizeCampaign("campaign-1", issueBrief, 1, { id: "finalized", eventType: "campaign_finalized", occurredAt: "2026-08-30T00:01:00Z", payload: { idempotencyKey: "finalize-once", expectedVersion: 1 } });
+
+    expect(finalized).toMatchObject({ status: "coordination_pending", version: 2 });
+    const snapshot = await store.get("campaign-1");
+    expect(snapshot?.events.at(-1)).toMatchObject({ eventType: "campaign_finalized", payload: { idempotencyKey: "finalize-once", expectedVersion: 1, brief: issueBrief } });
+    await expect(store.finalizeCampaign("campaign-1", issueBrief, 1, { id: "second-finalize", eventType: "campaign_finalized", occurredAt: "2026-08-30T00:02:00Z", payload: {} })).rejects.toBeInstanceOf(CampaignVersionConflict);
+    expect((await store.get("campaign-1"))?.events).toHaveLength(2);
+  });
+
   it("rolls back terminal Qodo status when SQLite cannot persist escalation evidence", async () => {
     const { database, store } = openMemoryStore();
     const current = campaign({ status: "qodo_review", version: 1, qodoIteration: 3 });

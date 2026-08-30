@@ -1,6 +1,7 @@
 import type { CampaignStore } from "./ports/campaign-store.js";
 import type { HarnessPort } from "./ports/harness.js";
 import type { Campaign } from "../domain/campaign.js";
+import { isSourceBackedIssueBrief } from "../domain/issue-brief.js";
 import { ApplicationError } from "./errors.js";
 
 export interface Clock {
@@ -45,6 +46,27 @@ export class CreateCampaign {
       await this.harness.createParentSession(`${input.repository}#${String(input.issueNumber)}`),
       "parent session identifier",
     );
+    let issueBrief;
+    try {
+      const analysis = await this.harness.runChildSession({
+        campaignId,
+        repository: input.repository,
+        issueNumber: input.issueNumber,
+        goal: "Explain the GitHub issue and propose the smallest safe fix. Return only the strict issue brief object requested by the OpenQuest agent instructions.",
+        verifiedEvidence: [{ sourceUrl: input.issueUrl, observation: "Selected GitHub issue to analyze before any repository clone or execution." }],
+        approvals: [],
+      }, "policy");
+      await this.harness.deleteSession(analysis.sessionId);
+      if (!isSourceBackedIssueBrief(analysis.output)) throw new Error("Invalid issue brief");
+      issueBrief = structuredClone(analysis.output);
+    } catch {
+      try {
+        await this.harness.deleteSession(parentSessionId);
+      } catch {
+        throw new Error("Issue analysis failed; unused session cleanup required");
+      }
+      throw new Error("Issue analysis could not be created");
+    }
     const campaign: Campaign = {
       id: campaignId,
       repository: input.repository,
@@ -59,7 +81,7 @@ export class CreateCampaign {
     const creationEvent = {
       id: creationEventId,
       eventType: "campaign_created",
-      payload: { status: campaign.status, parentSessionId },
+      payload: { status: campaign.status, parentSessionId, issueBrief },
       occurredAt: createdAt,
     };
 

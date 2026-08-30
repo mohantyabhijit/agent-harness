@@ -35,6 +35,19 @@ describe("CreateCampaign", () => {
       }),
     ).rejects.toMatchObject({ code: "campaign_conflict" });
     expect(harness.parentSessions).toEqual(["session-1"]);
+    expect(harness.operations).toEqual(["policy"]);
+    expect(harness.deletedSessions).toEqual(["session-2"]);
+  });
+
+  it("fails closed and cleans up when TrueForge returns a malformed issue brief", async () => {
+    const store = new FakeCampaignStore();
+    const harness = new FakeHarness();
+    harness.enqueueResult("policy", { summary: "invalid", artifacts: [], output: { problem: "missing evidence" } });
+    const service = new CreateCampaign(store, harness, { now: () => "2026-08-26T00:00:00Z" }, { next: () => "campaign-1" });
+
+    await expect(service.execute({ repository: "owner/repo", issueNumber: 42, issueUrl: "https://github.com/owner/repo/issues/42", lane: "easy_win" })).rejects.toThrow(/analysis could not be created/i);
+    expect(await store.get("campaign-1")).toBeUndefined();
+    expect(harness.deletedSessions).toEqual(["session-2", "session-1"]);
   });
 
   it("deletes only the losing unused parent session when duplicate creation races", async () => {
@@ -76,7 +89,7 @@ describe("CreateCampaign", () => {
     }
     const stored = await store.findByIssue("OWNER/REPO", 42);
     expect(stored?.campaign.parentSessionId).toBe("session-1");
-    expect(harness.deletedSessions).toEqual(["session-2"]);
+    expect(harness.deletedSessions).toEqual(["session-3", "session-4", "session-2"]);
   });
 
   it("compensates a failed persistence write and exposes no store details", async () => {
@@ -103,7 +116,7 @@ describe("CreateCampaign", () => {
 
     await expect(result).rejects.toEqual(new Error("Campaign could not be created"));
     await expect(result).rejects.not.toThrow(/secret/u);
-    expect(harness.deletedSessions).toEqual(["session-1"]);
+    expect(harness.deletedSessions).toEqual(["session-2", "session-1"]);
     expect(await store.findByIssue("owner/repo", 42)).toBeUndefined();
   });
 
@@ -126,7 +139,7 @@ describe("CreateCampaign", () => {
     })).rejects.toThrow(/could not be created/i);
 
     expect(await store.get("campaign-1")).toBeUndefined();
-    expect(harness.deletedSessions).toEqual(["session-1"]);
+    expect(harness.deletedSessions).toEqual(["session-2", "session-1"]);
   });
 
   it("fails closed with cleanup-required evidence and never retries deletion", async () => {
@@ -158,11 +171,11 @@ describe("CreateCampaign", () => {
       lane: "easy_win",
     });
     await expect(result).rejects.toEqual(
-      new Error("Campaign creation failed; unused session cleanup required"),
+      new Error("Issue analysis failed; unused session cleanup required"),
     );
     await expect(result).rejects.not.toThrow(/top-secret/u);
     expect(await store.get("campaign-1")).toBeUndefined();
-    expect(harness.deleteAttempts).toBe(1);
+    expect(harness.deleteAttempts).toBe(2);
   });
 
   it("matches SQLite global campaign-event identity semantics", async () => {

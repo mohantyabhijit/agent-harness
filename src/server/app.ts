@@ -4,6 +4,7 @@ import { z } from "zod";
 import { TrueForgeIntentClassifier } from "../adapters/trueforge/intent-classifier.js";
 import { ApplicationError } from "../application/errors.js";
 import { CreateCampaign, type Clock, type IdGenerator } from "../application/create-campaign.js";
+import { FinalizeCampaign } from "../application/finalize-campaign.js";
 import { DiscoverRepositories } from "../application/discover.js";
 import { ApprovalIssuanceConflict, CampaignIdentityConflict, CampaignVersionConflict, type CampaignStore } from "../application/ports/campaign-store.js";
 import type { GithubCatalogPort } from "../application/ports/github-catalog.js";
@@ -42,6 +43,7 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
   const app = Fastify({ logger: false, bodyLimit: 256 * 1_024 });
   const discover = new DiscoverRepositories(dependencies.catalog);
   const createCampaign = new CreateCampaign(dependencies.store, dependencies.harness, dependencies.clock, dependencies.ids);
+  const finalizeCampaign = new FinalizeCampaign(dependencies.store, () => dependencies.clock.now(), () => dependencies.ids.next());
   const runCampaign = new RunCampaign(dependencies.store, dependencies.harness, dependencies.clock, dependencies.ids);
   const syncReview = new SyncReview(dependencies.store, dependencies.harness, dependencies.clock, dependencies.ids, dependencies.repairVerifier);
   const qodoReview = dependencies.qodoReview ?? { getReview: async () => { throw new HarnessUnavailable(); } };
@@ -76,7 +78,7 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
   });
   registerSpaceRoutes(app);
   registerDiscoveryRoutes(app, { discover, catalog: dependencies.catalog, intentClassifier: new TrueForgeIntentClassifier(dependencies.harness) });
-  registerCampaignRoutes(app, { createCampaign, runCampaign, store: dependencies.store, clock: dependencies.clock });
+  registerCampaignRoutes(app, { createCampaign, finalizeCampaign, runCampaign, store: dependencies.store, clock: dependencies.clock });
   registerApprovalRoutes(app, { store: dependencies.store, clock: dependencies.clock, ids: dependencies.ids });
   registerReviewRoutes(app, { syncReview: authenticatedReview, ...(dependencies.reviewSyncTimeoutMs === undefined ? {} : { timeoutMs: dependencies.reviewSyncTimeoutMs }) });
   return app;

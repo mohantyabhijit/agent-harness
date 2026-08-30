@@ -39,8 +39,9 @@ If demonstrating only implemented campaign behavior, continue with the readiness
 4. Explain that the TrueForge chat clarifies which structured category fits, while authoritative repository and issue recommendations appear only in cards backed by validated canonical GitHub source URLs. Background seeds are leads, not pre-verified results, and there is no Exa runtime or fixture fallback.
 5. Open source evidence in a separate tab and confirm repository identity, license/activity evidence, and issue URL match the card before selecting it.
 6. Start an **Easy Win** or **Long-Term Challenge**. The resulting URL contains the durable campaign ID. Record that ID in the private demo notes only if it contains no sensitive information.
-7. Reload the campaign URL. Show that SQLite restores the issue identity, status, timeline, evidence, parent session ID, Qodo state, and any current approval surface.
-8. In the embedded OpenQuest agent, explain that GitHub tools are read-only. Do not ask it to post, push, or create a pull request.
+7. Review the source-backed issue brief: problem, likely cause, smallest fix, affected areas, tests, risks, uncertainty, and GitHub evidence. Discuss it in the parent TrueForge thread, then select **Finalize issue brief**. State clearly that finalization writes only durable local campaign facts; it does not clone the repository or write to GitHub.
+8. Show that static preflight is unavailable before finalization and appears only after the campaign advances atomically to `coordination_pending`. Reload the campaign URL and show that SQLite restores the brief, issue identity, status, timeline, evidence, parent session ID, Qodo state, and any current approval surface.
+9. In the embedded OpenQuest agent, explain that GitHub tools are read-only. Do not ask it to post, push, or create a pull request.
 
 ## Static preflight and campaign operations
 

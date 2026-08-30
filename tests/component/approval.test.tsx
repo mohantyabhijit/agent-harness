@@ -43,6 +43,7 @@ const proposal: ApprovalProposal = {
   },
 };
 const snapshot: CampaignSnapshot = {
+  issueBrief: null,
   id: "campaign-1", repository: "owner/repo", issueNumber: 42, issueUrl: "https://github.com/owner/repo/issues/42", parentSessionId: "session-42", lane: "easy_win", status: "contribution_approval", qodoIteration: 0, version: 7, nextAllowedAction: null,
   evidence: [], events: [], approvals: [], qodoFindings: [], externalReferences: [{ kind: "commit", value: "a".repeat(40) }], externalActionClaims: [], approvalProposal: proposal, qualityEscalationReason: null,
 };
