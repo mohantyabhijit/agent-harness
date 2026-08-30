@@ -112,6 +112,10 @@ dd { margin: .2rem 0 0; color: #fff; font-weight: 650; }
 .action-panel { border-color: #7460a9; background: linear-gradient(140deg, rgba(49, 38, 77, .98), rgba(24, 20, 39, .98)); }
 .action-panel .primary-action { margin-top: .35rem; }
 .action-note { margin: .9rem 0 0; color: #b9b1ca; font-size: .82rem; }
+.publication-action { border-color: #9f7cd1; background: linear-gradient(140deg, rgba(43, 34, 68, .98), rgba(22, 18, 35, .98)); }
+.publication-details { margin-bottom: 1rem; }
+.publication-result { margin-top: 1rem; padding: .9rem 1rem; border-left: .25rem solid #9ff29c; background: #1b2e2b; }
+.publication-result p { margin: .35rem 0 0; }
 @media (max-width: 44rem) { .space-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 62rem) { .campaign-layout { grid-template-columns: 1fr; } .campaign-side { position: static; } }
 @media (max-width: 31rem) { .space-grid, .signal-grid, .issue-signals, .quality-counts { grid-template-columns: 1fr; } .space-card { min-height: 8rem; } .onboarding-shell, .discover-shell, .campaign-shell { padding-top: 1.5rem; } .panel-heading { display: block; } .status-pill, .fact-count { display: inline-block; margin-bottom: .8rem; } }

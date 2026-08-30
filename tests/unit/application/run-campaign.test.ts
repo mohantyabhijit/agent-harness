@@ -93,7 +93,7 @@ describe("RunCampaign", () => {
 
     expect((await service.execute("campaign-1", "preflight")).status).toBe("baseline");
     expect((await service.execute("campaign-1", "implement")).status).toBe("implementation");
-    expect((await service.execute("campaign-1", "verify")).status).toBe("verification");
+    expect((await service.execute("campaign-1", "verify")).status).toBe("contribution_approval");
 
     expect(harness.childSessions).toEqual(["session-1", "session-2", "session-3"]);
     expect(harness.packets[1]?.currentCommitSha).toBe(commitSha);
@@ -111,6 +111,15 @@ describe("RunCampaign", () => {
       expect.objectContaining({ claimedCampaignVersion: 5, sandboxSessionId: "session-2" }),
       expect.objectContaining({ claimedCampaignVersion: 7, sandboxSessionId: "session-3" }),
     ]));
+    expect(snapshot?.events).toContainEqual(expect.objectContaining({
+      eventType: "external_action_proposed",
+      payload: expect.objectContaining({
+        expectedCampaignVersion: 8,
+        expectedCampaignStatus: "contribution_approval",
+        expectedCurrentCommitSha: "b".repeat(40),
+        payload: expect.objectContaining({ action: "push_branch", branch: "openquest/issue-42", commitSha: "b".repeat(40) }),
+      }),
+    }));
   });
 
   it("requires durable implementation completion for the claimed campaign version", async () => {
@@ -453,6 +462,20 @@ describe("RunCampaign", () => {
     expect(completed?.campaign.version).toBe(8);
     expect(completed?.externalReferences).toContainEqual({ kind: "commit", value: nextCommit });
     expect(completed?.externalActionClaims[0]).toMatchObject({ status: "completed", currentCommitSha: commitSha, payload: pushPayload });
+    expect(completed?.events.at(-1)).toEqual(expect.objectContaining({
+      eventType: "external_action_proposed",
+      payload: expect.objectContaining({
+        expectedCampaignVersion: 8,
+        expectedCurrentCommitSha: nextCommit,
+        payload: expect.objectContaining({
+          action: "create_pr",
+          branch: pushPayload.branch,
+          baseBranch: "main",
+          commitSha: nextCommit,
+          body: expect.stringContaining("AI disclosure"),
+        }),
+      }),
+    }));
   });
 
   it("keeps a failed callback fenced until explicit reconciliation without restoring approval", async () => {

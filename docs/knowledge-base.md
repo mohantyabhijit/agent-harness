@@ -65,6 +65,12 @@ Current evidence from the 2026-08-30 repository audit: 418 tests in the full Vit
 
 No pull request was created against FastAPI. The connected GitHub integration can read public PR history and identify the authenticated account, but it returned HTTP 403 when checking collaborator permission and has no available fork/branch creation path for that third-party repository. Do not represent a candidate as raised until a real branch, commit, CI result, and public PR URL exist. The current repository branch is the reviewable implementation artifact; external publication requires an authenticated fork or maintainer-approved branch.
 
+## Local contribution-flow QA (2026-08-30)
+
+The controlled local flow now covers category selection, verified repository and issue selection, durable brief finalization, static preflight, isolated implementation, verification, server-owned branch proposal, separate branch approval and execution, server-owned pull-request proposal, separate PR approval and execution, and final canonical reference reload. The fixture records the exact publication requests and performs no external network call or GitHub write.
+
+The full local release matrix passed with 514 Vitest tests and three Playwright scenarios, plus typecheck, lint, production build, and diff checks. This is deterministic application evidence, not provider evidence. No live TrueForge model/Daytona execution, live GitHub publisher, Qodo runtime authority, deployment, or third-party open-source pull request was exercised. The controlled TrueForge chat fixture exposed an upstream UI runtime update-loop error; the campaign now contains that failure behind an error boundary so campaign facts and approvals remain usable, but a provider-backed chat turn remains a separate readiness check.
+
 ## Hosted deployment
 
 The production target is the existing DigitalOcean VPS behind Nginx/TLS at `https://abhijitmohanty.com/openquest/`. Releases live under `/srv/openquest/releases/<commit>`, with `current` updated atomically. The static Vite bundle is served by Nginx; `/openquest/api/` proxies to the localhost OpenQuest API on port 8788; `/openquest/trueforge/` proxies to the standalone TrueForge service on port 8790. Service definitions are in `deploy/`.

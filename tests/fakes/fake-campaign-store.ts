@@ -478,6 +478,12 @@ export class FakeCampaignStore implements CampaignStore {
     const opensPullRequest = claim.payload.action === "create_pr" && record.publishedReference?.kind === "pull_request";
     const resultingVersion = returnsToReview || opensPullRequest ? snapshot.campaign.version + 1 : headVersion;
     assertExternalActionEventVersion(record.completedEvent.payload, claim.claimedCampaignVersion, resultingVersion);
+    if (record.nextProposalEvent !== undefined) {
+      this.#assertEventAvailable(record.nextProposalEvent.id);
+      if (record.nextProposalEvent.id === record.completedEvent.id) throw new Error("Follow-up proposal event must have a distinct id");
+      if (claim.payload.action !== "push_branch" || record.newCommitSha === undefined) throw new Error("Follow-up proposal requires a completed branch push");
+      assertProposalEvent(record.nextProposalEvent, resultingVersion, claim.claimedCampaignStatus, claim.payload.repository, claim.payload.issueNumber, record.newCommitSha, "create_pr", claim.payload.branch);
+    }
     if (record.newCommitSha !== undefined && singletonCommit(snapshot) !== record.newCommitSha) {
       snapshot.externalReferences = snapshot.externalReferences.filter(({ kind }) => kind !== "commit");
       snapshot.externalReferences.push({ kind: "commit", value: record.newCommitSha });
@@ -488,6 +494,10 @@ export class FakeCampaignStore implements CampaignStore {
     if (opensPullRequest) snapshot.campaign = { ...snapshot.campaign, status: "pull_request_open", version: resultingVersion };
     this.#pushEvent(snapshot, record.completedEvent);
     this.#eventIds.add(record.completedEvent.id);
+    if (record.nextProposalEvent !== undefined) {
+      this.#pushEvent(snapshot, record.nextProposalEvent);
+      this.#eventIds.add(record.nextProposalEvent.id);
+    }
     Object.assign(claim, { status: "completed", closedAt: record.completedAt });
     return resultingVersion;
   }
@@ -548,6 +558,12 @@ export class FakeCampaignStore implements CampaignStore {
     }
     const resultingVersion = snapshot.campaign.version + (changed || confirmedUpdate || confirmedCreate ? 1 : 0);
     assertExternalActionEventVersion(record.event.payload, snapshot.campaign.version, resultingVersion);
+    if (record.nextProposalEvent !== undefined) {
+      if (record.nextProposalEvent.id === record.event.id) throw new Error("Follow-up proposal event must have a distinct id");
+      if (this.#eventIds.has(record.nextProposalEvent.id)) throw new Error(`Duplicate campaign event id: ${record.nextProposalEvent.id}`);
+      if (claim.payload.action !== "push_branch" || record.disposition !== "confirmed_completed") throw new Error("Follow-up proposal requires a confirmed completed branch push");
+      assertProposalEvent(record.nextProposalEvent, resultingVersion, claim.claimedCampaignStatus, claim.payload.repository, claim.payload.issueNumber, claim.payload.commitSha, "create_pr", claim.payload.branch);
+    }
     if (this.failNextEvent) {
       this.failNextEvent = false;
       throw new Error("Campaign event persistence failed");
@@ -561,6 +577,10 @@ export class FakeCampaignStore implements CampaignStore {
     if (changed || confirmedUpdate || confirmedCreate) snapshot.campaign = { ...snapshot.campaign, version: resultingVersion, ...(confirmedUpdate ? { status: "qodo_review" as const } : confirmedCreate ? { status: "pull_request_open" as const } : {}) };
     this.#pushEvent(snapshot, record.event);
     this.#eventIds.add(record.event.id);
+    if (record.nextProposalEvent !== undefined) {
+      this.#pushEvent(snapshot, record.nextProposalEvent);
+      this.#eventIds.add(record.nextProposalEvent.id);
+    }
     Object.assign(claim, {
       status: "reconciled",
       closedAt: record.reconciledAt,
@@ -649,6 +669,13 @@ export class FakeCampaignStore implements CampaignStore {
     const current = snapshot.externalReferences.find(({ kind }) => kind === "commit")?.value;
     if (record.newCommitSha !== undefined && current !== record.newCommitSha) resultingVersion += 1;
     assertChildEventVersion(record.event.payload, record.expectedVersion, resultingVersion);
+    if (record.nextCampaign !== undefined || record.nextProposalEvent !== undefined) {
+      if (record.nextCampaign === undefined || record.nextProposalEvent === undefined) throw new Error("Next campaign and proposal must be persisted together");
+      if (record.newCommitSha !== undefined || record.expectedStatus !== "verification" || record.event.eventType !== "campaign_operation_completed" || record.operationResult?.operation !== "verify") throw new Error("Contribution approval requires a completed verification without a new commit");
+      if (record.nextCampaign.version !== resultingVersion + 1 || record.nextCampaign.status !== "contribution_approval") throw new Error("Invalid contribution approval campaign transition");
+      if (record.nextCampaign.id !== snapshot.campaign.id || record.nextCampaign.repository !== snapshot.campaign.repository || record.nextCampaign.issueNumber !== snapshot.campaign.issueNumber || record.nextCampaign.issueUrl !== snapshot.campaign.issueUrl || record.nextCampaign.parentSessionId !== snapshot.campaign.parentSessionId || record.nextCampaign.lane !== snapshot.campaign.lane || record.nextCampaign.qodoIteration !== snapshot.campaign.qodoIteration) throw new Error("Contribution approval campaign identity changed");
+      assertProposalEvent(record.nextProposalEvent, record.nextCampaign.version, record.nextCampaign.status, snapshot.campaign.repository, snapshot.campaign.issueNumber, current, "push_branch");
+    }
     const nextReferences = snapshot.externalReferences.filter(({ kind }) => kind !== "commit" || record.newCommitSha === undefined);
     if (record.newCommitSha !== undefined) nextReferences.push({ kind: "commit", value: record.newCommitSha });
     const childReferences = { child_session: record.childSessionId, sandbox: record.sandboxSessionId ?? record.childSessionId } as const;
@@ -667,8 +694,13 @@ export class FakeCampaignStore implements CampaignStore {
     snapshot.externalReferences = nextReferences;
     this.#pushEvent(snapshot, record.event);
     this.#eventIds.add(record.event.id);
-    if (resultingVersion !== record.expectedVersion) snapshot.campaign = { ...snapshot.campaign, version: resultingVersion };
-    return resultingVersion;
+    if (record.nextCampaign !== undefined) snapshot.campaign = structuredClone(record.nextCampaign);
+    else if (resultingVersion !== record.expectedVersion) snapshot.campaign = { ...snapshot.campaign, version: resultingVersion };
+    if (record.nextProposalEvent !== undefined) {
+      this.#pushEvent(snapshot, record.nextProposalEvent);
+      this.#eventIds.add(record.nextProposalEvent.id);
+    }
+    return record.nextCampaign?.version ?? resultingVersion;
   }
 
   #recordPublishedReference(snapshot: MutableSnapshot, payload: ExternalActionPayload, reference: ExternalReference): void {
@@ -851,6 +883,35 @@ function assertUpdatePullRequestIdentity(
 
 function assertExternalActionEventVersion(payload: unknown, expectedVersion: number, resultingVersion: number): void {
   if (typeof payload !== "object" || payload === null || Array.isArray(payload) || !("claimedCampaignVersion" in payload) || payload.claimedCampaignVersion !== expectedVersion || !("resultingCampaignVersion" in payload) || payload.resultingCampaignVersion !== resultingVersion) throw new Error("External action event is not bound to the campaign version");
+}
+
+function assertProposalEvent(
+  event: CampaignEventInput,
+  expectedVersion: number,
+  expectedStatus: CampaignStatus,
+  repository: string,
+  issueNumber: number,
+  expectedCommitSha: string | undefined,
+  expectedAction: "push_branch" | "create_pr",
+  expectedBranch?: string,
+): void {
+  if (event.eventType !== "external_action_proposed" || typeof event.payload !== "object" || event.payload === null || Array.isArray(event.payload)) throw new Error("Invalid external action proposal event");
+  const payload = event.payload as Record<string, unknown>;
+  const proposalKeys = ["proposalId", "payload", "actionDigest", "expectedCampaignVersion", "expectedCampaignStatus", "expectedCurrentCommitSha", "brief"];
+  if (Object.keys(payload).some((key) => !proposalKeys.includes(key)) || Object.keys(payload).length !== proposalKeys.length || payload.proposalId !== event.id || payload.expectedCampaignVersion !== expectedVersion || payload.expectedCampaignStatus !== expectedStatus || payload.expectedCurrentCommitSha !== expectedCommitSha) throw new Error("External action proposal is not bound to the campaign version");
+  if (typeof payload.payload !== "object" || payload.payload === null || Array.isArray(payload.payload)) throw new Error("External action proposal payload is invalid");
+  const action = payload.payload as ExternalActionPayload;
+  validateExternalActionPayload(action);
+  if (action.action !== expectedAction || action.repository !== repository || action.issueNumber !== issueNumber || externalActionDigest(action) !== payload.actionDigest) throw new Error("External action proposal identity is invalid");
+  if (expectedCommitSha === undefined || (action.action === "push_branch" ? action.commitSha !== expectedCommitSha : action.commitSha !== expectedCommitSha)) throw new Error("External action proposal commit is not current");
+  if (expectedBranch !== undefined && (action.action !== "create_pr" || action.branch !== expectedBranch)) throw new Error("Follow-up proposal branch does not match push");
+  const brief = payload.brief;
+  if (typeof brief !== "object" || brief === null || Array.isArray(brief)) throw new Error("External action proposal brief is invalid");
+  const briefRecord = brief as Record<string, unknown>;
+  const briefKeys = ["policy", "approach", "files", "risks", "tests", "safetyResult", "qodoStatus", "aiDisclosure"];
+  if (Object.keys(briefRecord).some((key) => !briefKeys.includes(key)) || Object.keys(briefRecord).length !== briefKeys.length) throw new Error("External action proposal brief is invalid");
+  for (const key of ["policy", "approach", "safetyResult", "qodoStatus", "aiDisclosure"]) if (typeof briefRecord[key] !== "string" || briefRecord[key].trim().length < 3 || briefRecord[key].length > 20_000) throw new Error("External action proposal brief is invalid");
+  for (const key of ["files", "risks", "tests"]) if (!Array.isArray(briefRecord[key]) || briefRecord[key].length === 0 || briefRecord[key].length > 200 || !(briefRecord[key] as unknown[]).every((item) => typeof item === "string" && item.trim().length >= 1 && item.length <= 20_000)) throw new Error("External action proposal brief is invalid");
 }
 
 function assertStaleRecoveryEvent(event: CampaignEventInput, claim: ExternalActionClaim): void {

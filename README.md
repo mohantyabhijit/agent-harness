@@ -2,7 +2,7 @@
 
 OpenQuest is a human-in-the-loop agent harness for responsible open-source contribution campaigns. A user chooses an open-source space, reviews evidence-ranked public repositories and issues, and creates one durable campaign per issue. TrueForge coordinates isolated work; SQLite preserves campaign facts; exact, single-use approvals protect external actions; and a bounded Qodo gate can request at most three repair iterations.
 
-This repository is an honest MVP, not an unattended pull-request bot. The current production composition supports live GitHub discovery through TrueForge, campaign creation, static preflight, implementation and verification child sessions, durable timelines, and approval issuance. GitHub writes are not exposed by an HTTP route, and the default Qodo authority and independent repair verifier are deliberately unavailable. See [Current limitations](#current-limitations).
+This repository is an honest MVP, not an unattended pull-request bot. It supports live GitHub discovery through TrueForge, durable campaign planning, isolated implementation and verification, exact branch/PR proposals, separate approvals and publication calls, and a bounded Qodo repair gate. The default local composition deliberately injects neither a live GitHub publisher nor Qodo/repair authority; those provider seams fail closed. See [Current limitations](#current-limitations).
 
 ## Prerequisites
 
@@ -54,7 +54,7 @@ npm run dev
 
 Open `http://127.0.0.1:5173/`. The API listens on `http://127.0.0.1:8788/`; TrueForge normally listens on `http://127.0.0.1:8790/`.
 
-The UI asks for the operator capability before authenticated discovery. The onboarding conversation maps a user's interest to one of the five structured categories; repository results still come only from the verified discovery pipeline. GitHub access in the embedded campaign chat is read-only: the agent manifest enables only `@read-only` GitHub MCP tools. The campaign approval button issues time-limited authority for one exact server-owned proposal; it does not execute that action or write to GitHub.
+The UI asks for the operator capability before authenticated discovery. The onboarding conversation maps a user's interest to one of the five structured categories; repository results still come only from the verified discovery pipeline. GitHub access in the embedded campaign chat is read-only: the agent manifest enables only `@read-only` GitHub MCP tools. The campaign approval button issues time-limited authority for one exact server-owned proposal. A separate execution control appears only while that exact approval remains active. In the default local composition publication is unavailable because no live publisher is injected.
 
 ## Repeatable demo preflight
 
@@ -85,11 +85,12 @@ OpenQuest currently has no runtime fixture mode. `fixtures/` supports existing a
 7. Durable evidence, child/sandbox references, campaign events, approvals, commits, Qodo findings, and escalation reasons remain isolated by campaign.
 8. After implementation, the campaign shows a commit-bound before/after explanation, changed areas, executed tests, and remaining uncertainty beside the resumable parent chat.
 9. A valid external-action proposal may be approved only for its exact payload digest and current campaign version. Approval expires after ten minutes and is single-use.
-10. After a real pull request exists, authenticated Qodo evidence may pass the gate, request a fresh isolated repair, or escalate. There is no fourth automatic repair iteration.
+10. Successful verification atomically advances to contribution approval and creates the exact branch-push proposal. A completed branch push atomically creates a separate pull-request proposal; approval and execution remain separate at both stages.
+11. After a real pull request exists, authenticated Qodo evidence may pass the gate, request a fresh isolated repair, or escalate. There is no fourth automatic repair iteration.
 
 Repository names retained from prior Exa-assisted research are search seeds only. They do not carry verified current stars or contribution readiness, do not guarantee display, and do not replace canonical GitHub checks for visibility, license, activity, contribution policy, and accepted external pull requests. The runtime has no Exa dependency. `openai/codex` is excluded from code-PR recommendations because its official policy rejects external code contributions.
 
-The HTTP action routes cover issue-brief finalization plus `preflight`, `implement`, and `verify`; the product UI exposes only the next action allowed by durable state. API `POST` requests require the operator bearer capability except review synchronization, which requires the distinct review-provider capability. `GET` and `HEAD` routes return sanitized, read-only projections without a bearer token.
+The HTTP action routes cover issue-brief finalization, `preflight`, `implement`, `verify`, exact approved publication, and unknown-outcome reconciliation; the product UI exposes only the next action allowed by durable state. API `POST` requests require the operator bearer capability except review synchronization, which requires the distinct review-provider capability. `GET` and `HEAD` routes return sanitized, read-only projections without a bearer token.
 
 ## Health and readiness
 
@@ -109,13 +110,15 @@ npm run build
 npm test
 ```
 
-The repository also defines targeted integration and Playwright commands, but Task 11 does not add or alter tests. The quality workflow installs with `npm ci` and runs type-check, lint, build, and the existing test suite on pushes and pull requests with read-only repository permissions.
+The repository also defines targeted integration and Playwright commands. `npm run test:e2e` includes a controlled local contribution flow that exercises discovery through separate branch and pull-request approvals without contacting or mutating GitHub. The quality workflow installs with `npm ci` and runs type-check, lint, build, and the test suite on pushes and pull requests with read-only repository permissions.
 
 ## Qodo Code Review Evidence
 
 Every repository change follows the [change checklist](TODO.md): a focused branch and PR, recorded verification, Qodo review of the latest commit, resolution or documented disposition of findings, a follow-up Qodo review after repairs, passing GitHub checks, and an authorized maintainer merge. Direct pushes to `main` do not count as reviewed work.
 
 [PR #16: Conversation-first repository discovery](https://github.com/mohantyabhijit/agent-harness/pull/16) is the representative merged implementation PR. Qodo surfaced unvalidated chat recommendations, insufficient claim-specific repository evidence, ranking and conversation races, and transient-session lifecycle defects; the final code fixed those findings and received an [exact-head follow-up review](https://github.com/mohantyabhijit/agent-harness/pull/16#issuecomment-5468824110) before merge. One Medium observability recommendation was [intentionally deferred with its reason recorded in the Qodo thread](https://github.com/mohantyabhijit/agent-harness/pull/16#discussion_r3889579536): cleanup remains best-effort and outcome-preserving, while durable cleanup metrics wait for a repository-wide telemetry sink rather than ad-hoc console logging. The [pull-request template](.github/pull_request_template.md) makes the same evidence and decision trail required for future changes.
+
+[PR #20: Local contribution-flow completion](https://github.com/mohantyabhijit/agent-harness/pull/20) records the end-to-end QA closeout and its Qodo decision trail. The [initial exact-head review](https://github.com/mohantyabhijit/agent-harness/pull/20#issuecomment-5469595618) found that a reconciled branch push could lose its follow-up pull-request proposal and that a lost browser response could misreport publication. Both findings were accepted: the backend now creates the next proposal atomically during reconciliation, and the browser reloads authoritative campaign facts after an ambiguous transport failure. Follow-up review also caught fake-store parity and missing-auth retry defects; those were fixed by mirroring production duplicate-ID rejection and distinguishing pre-request authority failure from an uncertain transport result. The PR history retains every repair and the final exact-head review; no finding was dismissed.
 
 ## Repository map
 
@@ -136,8 +139,8 @@ evidence/            non-secret evidence contract and capture checklist
 
 - There is no fixture-backed application or `OPENQUEST_DEMO_MODE`; fixtures are test-only.
 - The default Qodo review authority is unavailable, no production repair verifier is injected, and readiness therefore fails closed.
-- No server route or production adapter executes approved GitHub comments, assignment requests, branch pushes, pull-request creation, or pull-request updates. Approval issuance alone causes no external write.
-- The chat surface uses the parent TrueForge session but enables only GitHub read tools. It cannot publish contributions.
+- The server publisher route supports only exact approved branch pushes and pull-request creation, but the default local container injects no live GitHub publisher. Comments, assignment, and PR updates have no production publisher route. Approval issuance alone causes no external write.
+- The chat surface uses the parent TrueForge session but enables only GitHub read tools. Publication remains a separate server-only capability. A chat rendering failure is contained so durable campaign controls remain usable.
 - The SQLite store is local-process persistence. There is no multi-user identity model, distributed scheduler, backup workflow, or hosted deployment configuration.
 - Sandbox isolation and lifecycle enforcement depend on the configured TrueForge/Daytona provider. Static preflight reduces risk but cannot prove arbitrary code safe or substitute for sandbox controls.
 

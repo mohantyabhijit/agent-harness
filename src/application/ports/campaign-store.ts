@@ -78,6 +78,7 @@ export interface ExternalActionCompletionRecord {
   readonly completedEvent: CampaignEventInput;
   readonly newCommitSha?: string;
   readonly publishedReference?: ExternalReference;
+  readonly nextProposalEvent?: CampaignEventInput;
 }
 
 export interface ExternalActionOutcomeUnknownRecord {
@@ -100,6 +101,7 @@ export interface ExternalActionReconciliationRecord {
   readonly observedPullRequest?: string;
   readonly reconciledAt: string;
   readonly event: CampaignEventInput;
+  readonly nextProposalEvent?: CampaignEventInput;
 }
 
 export interface ChildResultRecord {
@@ -110,6 +112,8 @@ export interface ChildResultRecord {
   readonly event: CampaignEventInput;
   readonly newCommitSha?: string;
   readonly operationResult?: CampaignOperationResult;
+  readonly nextCampaign?: Campaign;
+  readonly nextProposalEvent?: CampaignEventInput;
   readonly persistenceLease?: PersistenceLease;
 }
 

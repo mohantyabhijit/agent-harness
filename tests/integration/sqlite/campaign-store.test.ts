@@ -974,6 +974,35 @@ describe("SqliteCampaignStore", () => {
     expect((await store.get("campaign-1"))?.events).toHaveLength(1);
   });
 
+  it("rolls back verification evidence when the atomic contribution proposal is invalid", async () => {
+    const { store, database } = openMemoryStore();
+    const current = "b".repeat(40);
+    const verifying = campaign({ status: "verification", version: 7 });
+    await store.create(verifying);
+    database.prepare("INSERT INTO external_references (campaign_id, kind, value) VALUES (?, 'commit', ?)").run("campaign-1", current);
+    const next = transitionCampaign(verifying, "contribution_approval");
+    const push = { action: "push_branch" as const, repository: "owner/repo", issueNumber: 42, branch: "openquest/issue-42", commitSha: current };
+
+    await expect(store.recordChildResult("campaign-1", {
+      expectedVersion: 7,
+      expectedStatus: "verification",
+      childSessionId: "verify-child",
+      event: { id: "verify-event", eventType: "campaign_operation_completed", payload: { claimedCampaignVersion: 7, resultingCampaignVersion: 7 }, occurredAt: "2026-08-26T00:01:00Z" },
+      operationResult: { operation: "verify", currentCommitSha: current, qodoIteration: 0 },
+      nextCampaign: next,
+      nextProposalEvent: { id: "invalid-proposal", eventType: "external_action_proposed", occurredAt: "2026-08-26T00:01:00Z", payload: {
+        proposalId: "invalid-proposal", payload: push, actionDigest: externalActionDigest(push), expectedCampaignVersion: 99,
+        expectedCampaignStatus: "contribution_approval", expectedCurrentCommitSha: current,
+        brief: { policy: "Policy", approach: "Approach", files: ["src/a.ts"], risks: ["Risk"], tests: ["npm test"], safetyResult: "Passed", qodoStatus: "Clear", aiDisclosure: "AI-assisted" },
+      } },
+    })).rejects.toThrow(/proposal|version/i);
+
+    const snapshot = await store.get("campaign-1");
+    expect(snapshot?.campaign).toEqual(verifying);
+    expect(snapshot?.events).toEqual([]);
+    expect(snapshot?.externalReferences).toEqual([{ kind: "commit", value: current }]);
+  });
+
   it("forbids generic repair-time rotation while the claimed child can atomically publish its commit", async () => {
     const { store, database } = openMemoryStore();
     await store.create(campaign({ status: "repair", version: 2, qodoIteration: 1 }));

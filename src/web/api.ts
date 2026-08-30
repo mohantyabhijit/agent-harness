@@ -18,6 +18,8 @@ export type ApprovalActionSummary =
   | Readonly<{ action: "create_pr"; repository: string; issueNumber: number; branch: string; baseBranch: string; commitSha: string; title: string; body: string }>
   | Readonly<{ action: "update_pr"; repository: string; issueNumber: number; pullRequest: string; branch: string; commitSha: string; body: string }>;
 export interface ApprovalProposal { readonly proposalId: string; readonly actionDigest: string; readonly expectedCampaignVersion: number; readonly action: ApprovalActionSummary; readonly brief: ApprovalBrief; }
+export type PublicationAction = Extract<ApprovalActionSummary, Readonly<{ action: "push_branch" | "create_pr" }>>;
+export type PublicationResult = Readonly<{ commitSha: string }> | Readonly<{ pullRequest: string }>;
 export interface ApprovalConfirmation { readonly proposalId: string; readonly actionDigest: string; readonly expectedCampaignVersion: number; }
 export interface PublicApproval { readonly id: string; readonly action: ApprovalAction; readonly actionDigest: string; readonly status: "pending" | "approved" | "rejected" | "consumed"; readonly issuedAt: string; readonly expiresAt?: string; readonly consumedAt?: string; readonly proposalId?: string; readonly expectedCampaignVersion?: number; readonly isActive: boolean; }
 export interface CampaignSnapshot extends Campaign {
@@ -43,10 +45,11 @@ export interface OpenQuestApi {
   finalizeCampaign(id: string, expectedVersion: number, idempotencyKey: string, signal?: AbortSignal): Promise<Campaign>;
   runCampaignAction(id: string, action: "preflight" | "implement" | "verify", signal?: AbortSignal): Promise<Campaign>;
   issueApproval(campaignId: string, confirmation: ApprovalConfirmation, idempotencyKey: string, signal?: AbortSignal): Promise<PublicApproval>;
+  publishApprovedAction(campaignId: string, approvalId: string, action: PublicationAction, signal?: AbortSignal): Promise<PublicationResult>;
 }
 export type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 export interface OpenQuestApiOptions { readonly fetch: FetchLike; readonly baseUrl?: string; readonly operatorCapability?: () => string | undefined; }
-export class OpenQuestApiError extends Error { constructor(message: string, readonly status?: number) { super(message); this.name = "OpenQuestApiError"; } }
+export class OpenQuestApiError extends Error { constructor(message: string, readonly status?: number, readonly code?: string) { super(message); this.name = "OpenQuestApiError"; } }
 
 const metadata: Readonly<Record<Space, Omit<SpaceOption, "id">>> = {
   ai_ml: { name: "AI & agents", description: "Contribute to models, agents, and intelligent systems." }, developer_tools: { name: "Developer tools", description: "Improve the tools developers use to build and ship." }, web: { name: "Web & apps", description: "Build open experiences for browsers, desktops, and mobile devices." }, data: { name: "Data & infrastructure", description: "Strengthen data systems and the infrastructure behind them." }, social_impact: { name: "Civic, science & social impact", description: "Support public-interest technology, research, and access." },
@@ -123,6 +126,10 @@ const campaignSnapshotResponse = campaignCore.extend({ nextAllowedAction: z.enum
   if (proposal !== null && (proposal.action.repository !== value.repository || proposal.action.issueNumber !== value.issueNumber || proposal.expectedCampaignVersion !== value.version)) context.addIssue({ code: "custom", message: "Approval proposal identity mismatch" });
 });
 const approvalResponse = z.object({ approval: publicApproval }).strict();
+const publicationResult = z.union([
+  z.object({ commitSha }).strict(),
+  z.object({ pullRequest: githubUrl.refine(pullRequestUrl, "GitHub pull request URL") }).strict(),
+]);
 const idempotencyKey = z.string().min(8).max(128).regex(/^[\x21-\x7E]+$/u);
 
 export function createOpenQuestApi(options: OpenQuestApiOptions): OpenQuestApi {
@@ -137,11 +144,36 @@ export function createOpenQuestApi(options: OpenQuestApiOptions): OpenQuestApi {
     async finalizeCampaign(id, expectedVersion, key, signal) { const validId = parsed(campaignId, id, "Campaign could not be finalized"); const version = parsed(finite.int().positive(), expectedVersion, "Campaign could not be finalized"); const validKey = parsed(idempotencyKey, key, "Campaign could not be finalized"); const body = await request(options.fetch, `${baseUrl}/api/campaigns/${encodeURIComponent(validId)}/finalize`, withSignal({ method: "POST", headers: authenticatedHeaders(options.operatorCapability), body: JSON.stringify({ expectedVersion: version, idempotencyKey: validKey }) }, signal)); return parsed(campaignResponse, body, "Campaign could not be finalized"); },
     async runCampaignAction(id, action, signal) { const validId = parsed(campaignId, id, "Campaign action could not be started"); const validAction = parsed(z.enum(["preflight", "implement", "verify"]), action, "Campaign action could not be started"); const body = await request(options.fetch, `${baseUrl}/api/campaigns/${encodeURIComponent(validId)}/actions/${validAction}`, withSignal({ method: "POST", headers: authenticatedHeaders(options.operatorCapability), body: "{}" }, signal)); return parsed(campaignResponse, body, "Campaign action could not be started"); },
     async issueApproval(campaign, confirmation, key, signal) { const validCampaign = parsed(campaignId, campaign, "Approval could not be issued"); const validConfirmation = parsed(z.object({ proposalId: identifier, actionDigest: digest, expectedCampaignVersion: finite.int().positive() }).strict(), confirmation, "Approval could not be issued"); const validKey = parsed(idempotencyKey, key, "Approval could not be issued"); const body = await request(options.fetch, `${baseUrl}/api/campaigns/${encodeURIComponent(validCampaign)}/approvals`, withSignal({ method: "POST", headers: { ...authenticatedHeaders(options.operatorCapability), "idempotency-key": validKey }, body: JSON.stringify(validConfirmation) }, signal)); return parsed(approvalResponse, body, "Approval could not be issued").approval as PublicApproval; },
+    async publishApprovedAction(campaign, approval, action, signal) {
+      const validCampaign = parsed(campaignId, campaign, "Publication could not be started");
+      const validApproval = parsed(identifier, approval, "Publication could not be started");
+      const validAction = parsed(approvalActionSummary, action, "Publication could not be started");
+      if (validAction.action !== "push_branch" && validAction.action !== "create_pr") throw new OpenQuestApiError("Only branch pushes and pull requests can be published.");
+      const payload = validAction.action === "push_branch"
+        ? { action: validAction.action, repository: validAction.repository, issueNumber: validAction.issueNumber, branch: validAction.branch, commitSha: validAction.targetCommitSha }
+        : validAction;
+      const body = await request(options.fetch, `${baseUrl}/api/campaigns/${encodeURIComponent(validCampaign)}/publish`, withSignal({ method: "POST", headers: authenticatedHeaders(options.operatorCapability), body: JSON.stringify({ approvalId: validApproval, payload }) }, signal));
+      const parsedResult = publicationResult.safeParse(body);
+      if (!parsedResult.success) throw new OpenQuestApiError("Publication returned an invalid result", undefined, "publication_response_invalid");
+      const result = parsedResult.data;
+      if ((validAction.action === "push_branch" && !("commitSha" in result)) || (validAction.action === "create_pr" && !("pullRequest" in result))) throw new OpenQuestApiError("Publication returned an unexpected result.", undefined, "publication_response_invalid");
+      return result;
+    },
   };
 }
 
-async function request(fetcher: FetchLike, url: string, init: RequestInit): Promise<unknown> { let response: Response; try { response = await fetcher(url, init); } catch (error) { if (error instanceof DOMException && error.name === "AbortError") throw error; throw new OpenQuestApiError("OpenQuest is unavailable. Please try again."); } if (!response.ok) throw new OpenQuestApiError(response.status === 409 ? "This request conflicts with current campaign state." : "OpenQuest could not complete that request. Please try again.", response.status); try { return await response.json() as unknown; } catch { throw new OpenQuestApiError("OpenQuest returned an invalid response. Please try again."); } }
-function authenticatedHeaders(provider: OpenQuestApiOptions["operatorCapability"]): Record<string, string> { const value = provider?.(); if (value === undefined || value.trim() === "") throw new OpenQuestApiError("Connect an operator capability before authenticated actions."); return { "content-type": "application/json", authorization: `Bearer ${value}` }; }
+async function request(fetcher: FetchLike, url: string, init: RequestInit): Promise<unknown> {
+  let response: Response;
+  try { response = await fetcher(url, init); } catch (error) { if (error instanceof DOMException && error.name === "AbortError") throw error; throw new OpenQuestApiError("OpenQuest is unavailable. Please try again.", undefined, "transport_unavailable"); }
+  if (!response.ok) {
+    let body: unknown;
+    try { body = await response.json() as unknown; } catch { body = undefined; }
+    if (typeof body === "object" && body !== null && "code" in body && typeof body.code === "string" && "message" in body && typeof body.message === "string") throw new OpenQuestApiError(body.message, response.status, body.code);
+    throw new OpenQuestApiError(response.status === 409 ? "This request conflicts with current campaign state." : "OpenQuest could not complete that request. Please try again.", response.status);
+  }
+  try { return await response.json() as unknown; } catch { throw new OpenQuestApiError("OpenQuest returned an invalid response. Please try again.", undefined, "invalid_response"); }
+}
+function authenticatedHeaders(provider: OpenQuestApiOptions["operatorCapability"]): Record<string, string> { const value = provider?.(); if (value === undefined || value.trim() === "") throw new OpenQuestApiError("Connect an operator capability before authenticated actions.", undefined, "operator_capability_missing"); return { "content-type": "application/json", authorization: `Bearer ${value}` }; }
 function withSignal(init: RequestInit, signal: AbortSignal | undefined): RequestInit { return signal === undefined ? init : { ...init, signal }; }
 function parsed<T>(schema: z.ZodType<T>, body: unknown, message: string): T { const result = schema.safeParse(body); if (!result.success) throw new OpenQuestApiError(message); return result.data; }
 function github(value: string): boolean { try { const url = new URL(value); return url.protocol === "https:" && url.hostname === "github.com" && url.username === "" && url.password === "" && url.port === "" && url.search === "" && url.hash === ""; } catch { return false; } }
@@ -149,3 +181,4 @@ function githubReviewUrl(value: string): boolean { try { const url = new URL(val
 function repoUrl(value: string, name: string): boolean { try { return new URL(value).pathname === `/${name}`; } catch { return false; } }
 function repoEvidence(value: string, name: string): boolean { try { return new URL(value).pathname.split("/").slice(1, 3).join("/") === name; } catch { return false; } }
 function issueUrl(value: string, name: string, number: number): boolean { try { return new URL(value).pathname === `/${name}/issues/${String(number)}`; } catch { return false; } }
+function pullRequestUrl(value: string): boolean { try { return /^\/[^/]+\/[^/]+\/pull\/[1-9][0-9]*$/u.test(new URL(value).pathname); } catch { return false; } }
