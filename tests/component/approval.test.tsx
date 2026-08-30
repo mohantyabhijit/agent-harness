@@ -172,6 +172,32 @@ describe("ChangeBrief", () => {
 describe("Campaign approval", () => {
   afterEach(() => { cleanup(); vi.useRealTimers(); });
 
+  it("locks approval while a campaign action awaits authoritative refresh", async () => {
+    const preflightProposal: ApprovalProposal = {
+      ...proposal,
+      action: { action: "post_issue_comment", repository: "owner/repo", issueNumber: 42, body: "May I work on this?" },
+    };
+    const actionSnapshot = { ...snapshot, status: "coordination_pending" as const, nextAllowedAction: "preflight" as const, approvalProposal: preflightProposal };
+    const getCampaign = vi.fn<OpenQuestApi["getCampaign"]>()
+      .mockResolvedValueOnce(actionSnapshot)
+      .mockImplementationOnce(() => new Promise<CampaignSnapshot>(() => undefined));
+    const runCampaignAction = vi.fn<NonNullable<OpenQuestApi["runCampaignAction"]>>(async () => ({ ...actionSnapshot, status: "preflight" as const }));
+    const issueApproval = vi.fn<OpenQuestApi["issueApproval"]>(async () => { throw new Error("Approval must remain locked"); });
+
+    render(<CampaignPage api={{ getCampaign, issueApproval, runCampaignAction }} campaignId="campaign-1" createIdempotencyKey={() => "approval-action-lock"} />);
+
+    await screen.findByRole("button", { name: /start static preflight/i });
+    fireEvent.click(screen.getByRole("checkbox", { name: /reviewed every field/i }));
+    const approval = screen.getByRole("button", { name: /approve scoped issue comment proposal/i });
+    expect(approval).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: /start static preflight/i }));
+    await waitFor(() => { expect(runCampaignAction).toHaveBeenCalledOnce(); });
+
+    expect(approval).toBeDisabled();
+    fireEvent.click(approval);
+    expect(issueApproval).not.toHaveBeenCalled();
+  });
+
   it("generates one bounded visible-ASCII key per explicit click and prevents double submission", async () => {
     let release!: () => void;
     const pending = new Promise<void>((resolve) => { release = resolve; });
