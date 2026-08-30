@@ -1,5 +1,7 @@
 # OpenQuest
 
+![OpenQuest contribution workflow](docs/images/openquest-hero.png)
+
 OpenQuest is a human-in-the-loop agent harness for open-source contributions. Its TrueForge chat helps a user choose a public repository and issue, prepares a source-backed plan, works in an isolated Daytona sandbox, explains the fix, and keeps every GitHub write behind an exact human approval.
 
 - [Watch the demo on YouTube](https://youtu.be/ehBBt39Bv4Q)
@@ -58,6 +60,12 @@ npm run build
 npm test
 ```
 
+## Architecture
+
+![OpenQuest trust architecture](docs/images/openquest-trust-architecture.png)
+
+TrueForge coordinates research and isolated Daytona execution, while durable campaign state and separate human approvals protect branch pushes and pull-request creation. See [the architecture](docs/architecture.md) and [threat model](docs/threat-model.md) for the complete trust boundaries.
+
 ## Qodo Code Review Evidence
 
 Every repository change follows the [change checklist](TODO.md): a focused branch and PR, recorded verification, Qodo review of the latest commit, resolution or documented disposition of findings, a follow-up Qodo review after repairs, passing GitHub checks, and an authorized maintainer merge. Direct pushes to `main` do not count as reviewed work.
@@ -68,4 +76,4 @@ Every repository change follows the [change checklist](TODO.md): a focused branc
 
 [PR #22: Native TrueForge chat and OpenQuest redesign](https://github.com/mohantyabhijit/agent-harness/pull/22) records the local-first product repair and review evidence. The [initial exact-head Qodo review](https://github.com/mohantyabhijit/agent-harness/pull/22#issuecomment-5470066678) found that empty verified discovery was excluded, research seeds constrained the wider search, and the issue-brief response schema accepted URLs rejected by the domain validator. All three were repaired in commit [`aa9ddb9`](https://github.com/mohantyabhijit/agent-harness/commit/aa9ddb9), with each disposition recorded in its Qodo thread and follow-up review requested against the final code.
 
-Architecture and trust boundaries are documented in [docs/architecture.md](docs/architecture.md) and [docs/threat-model.md](docs/threat-model.md). Qodo behavior is documented in [docs/qodo-workflow.md](docs/qodo-workflow.md).
+Qodo behavior is documented in [docs/qodo-workflow.md](docs/qodo-workflow.md).
