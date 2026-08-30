@@ -18,6 +18,14 @@ const schema = `
     UNIQUE(repository, issue_number)
   );
 
+  CREATE TABLE IF NOT EXISTS discovery_snapshots (
+    snapshot_key TEXT PRIMARY KEY,
+    kind TEXT NOT NULL CHECK (kind IN ('repositories', 'issues')),
+    payload_json TEXT NOT NULL,
+    verified_at TEXT NOT NULL,
+    source TEXT NOT NULL CHECK (source IN ('snapshot', 'live'))
+  );
+
   CREATE TABLE IF NOT EXISTS campaign_evidence (
     id TEXT PRIMARY KEY,
     campaign_id TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,

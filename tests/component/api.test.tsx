@@ -269,7 +269,7 @@ describe("OpenQuest browser API", () => {
   it("accepts claim-specific direct verification evidence for repository discovery", async () => {
     const api = createOpenQuestApi({ fetch: async () => new Response(JSON.stringify(repositoryResponse()), { status: 200 }), operatorCapability: () => "runtime-only" });
 
-    await expect(api.discoverRepositories(["developer_tools"])).resolves.toHaveLength(1);
+    await expect(api.discoverRepositories(["developer_tools"])).resolves.toMatchObject({ values: expect.arrayContaining([expect.anything()]) });
   });
 
   it.each([

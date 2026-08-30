@@ -116,8 +116,8 @@ describe("DiscoverPage", () => {
     const created: unknown[] = [];
     const api = {
       getSpaces: async () => [],
-      discoverRepositories: async () => [healthyRepository],
-      getIssues: async () => [easyIssue, longTermIssue],
+      discoverRepositories: async () => ({ values: [healthyRepository] }),
+      getIssues: async () => ({ values: [easyIssue, longTermIssue] }),
       createCampaign: async (input: unknown) => {
         created.push(input);
         return { id: ":review.1" };
@@ -147,8 +147,8 @@ describe("DiscoverPage", () => {
     let createAttempts = 0;
     const destinations: string[] = [];
     const api = {
-      discoverRepositories: async () => [healthyRepository],
-      getIssues: async () => [easyIssue],
+      discoverRepositories: async () => ({ values: [healthyRepository] }),
+      getIssues: async () => ({ values: [easyIssue] }),
       createCampaign: async () => {
         createAttempts += 1;
         return campaign.promise;
@@ -172,8 +172,8 @@ describe("DiscoverPage", () => {
     const destinations: string[] = [];
     let campaignSignal: AbortSignal | undefined;
     const api = {
-      discoverRepositories: async () => [healthyRepository],
-      getIssues: async () => [easyIssue],
+      discoverRepositories: async () => ({ values: [healthyRepository] }),
+      getIssues: async () => ({ values: [easyIssue] }),
       createCampaign: async (_input: unknown, signal?: AbortSignal) => {
         campaignSignal = signal;
         return campaign.promise;
@@ -197,8 +197,8 @@ describe("DiscoverPage", () => {
     const firstIssues = deferred<readonly [typeof easyIssue]>();
     const secondIssues = deferred<readonly []>();
     const api = {
-      discoverRepositories: async () => [healthyRepository, secondRepository],
-      getIssues: async (repository: string) => repository === healthyRepository.repository.fullName ? firstIssues.promise : secondIssues.promise,
+      discoverRepositories: async () => ({ values: [healthyRepository, secondRepository] }),
+      getIssues: async (repository: string) => (repository === healthyRepository.repository.fullName ? firstIssues.promise : secondIssues.promise).then((values) => ({ values })),
       createCampaign: async () => ({ id: "campaign-1" }),
     };
     render(<DiscoverPage api={api} spaces={["developer_tools"]} navigate={() => undefined} />);
@@ -226,12 +226,12 @@ describe("DiscoverPage", () => {
     const freshIssues = deferred<readonly [typeof longTermIssue]>();
     let issueAttempt = 0;
     const api = {
-      discoverRepositories: async () => [healthyRepository],
+      discoverRepositories: async () => ({ values: [healthyRepository] }),
       getIssues: async () => {
         issueAttempt += 1;
-        if (issueAttempt === 1) return staleIssues.promise;
+        if (issueAttempt === 1) return staleIssues.promise.then((values) => ({ values }));
         if (issueAttempt < 4) throw new Error("offline");
-        return freshIssues.promise;
+        return freshIssues.promise.then((values) => ({ values }));
       },
       createCampaign: async () => ({ id: "campaign-1" }),
     };
@@ -261,9 +261,9 @@ describe("DiscoverPage", () => {
       discoverRepositories: async () => {
         attempts += 1;
         if (attempts === 1) throw new Error("offline");
-        return [healthyRepository];
+        return { values: [healthyRepository] };
       },
-      getIssues: async () => [],
+      getIssues: async () => ({ values: [] }),
       createCampaign: async () => ({ id: "campaign-1" }),
     };
     render(<DiscoverPage api={api} spaces={["developer_tools"]} navigate={() => undefined} />);
